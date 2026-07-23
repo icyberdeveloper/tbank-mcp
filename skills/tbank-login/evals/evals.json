@@ -1,0 +1,8 @@
+{
+  "skill_name": "tbank-login",
+  "evals": [
+    {"id": 1, "prompt": "Залогинься в Т-Банк, мой номер +79991234567", "expected_output": "Агент вызывает login(phone), сообщает что SMS отправлена, спрашивает OTP код, потом если банк просит пароль — спрашивает пароль, вызывает confirm, проверяет session_status"},
+    {"id": 2, "prompt": "Хочу посмотреть счета, но сессия наверное истекла", "expected_output": "Агент вызывает session_status, если истекла — refresh_session (без OTP), если совсем мертва — просит логиниться"},
+    {"id": 3, "prompt": "Тулы падают с SESSION EXPIRED", "expected_output": "Агент вызывает refresh_session, повторяет упавший тул, если refresh тоже падает — просит полный логин"}
+  ]
+}

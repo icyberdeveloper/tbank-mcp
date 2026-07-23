@@ -1,0 +1,37 @@
+# user secrets — NEVER ship
+captures.xml
+captures.jsonl
+refresh_captures.xml
+refresh_captures.jsonl
+session.json
+*.har
+
+# reverse-engineering artifacts (large, not part of the MCP runtime)
+tbank_app.apk
+*.objection.apk*
+dex/
+jadx-out*/
+extracted/
+tools/
+dev/
+redroid-data/
+
+# regenerated at runtime by tbank_mcp/tls.py
+ca/bundle.pem
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# misc
+*.log
+.DS_Store
+
+# CA certs regenerated/derivable at runtime
+ca/*.pem
+ca/*.cer
+login_cli.py

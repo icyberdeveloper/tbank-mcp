@@ -1,0 +1,36 @@
+{
+  "name": "tbank-mcp",
+  "version": "0.1.0",
+  "description": "T-Bank (Т-Банк) MCP — mobile banking API: счета, операции, заказ продуктов, переводы, мессенджер, инвестиции. 25 тулов, 6 скиллов.",
+  "author": "neondelph",
+  "homepage": "https://github.com/neondelph/tbank-mcp",
+  "license": "MIT",
+  "categories": ["finance", "banking", "mcp", "russian"],
+  "keywords": ["tbank", "tinkoff", "banking", "mcp", "grocery", "transfer", "invest"],
+  "requirements": {
+    "python": ">=3.11",
+    "packages": ["mcp>=1.2", "requests>=2.32", "playwright>=1.40"]
+  },
+  "mcpServers": {
+    "tbank": {
+      "command": "${REPO_DIR}/.venv/bin/python",
+      "args": ["-m", "src.server"],
+      "cwd": "${REPO_DIR}"
+    }
+  },
+  "skills": [
+    "skills/tbank-login",
+    "skills/tbank-grocery-order",
+    "skills/tbank-transfer-money",
+    "skills/tbank-bill-pay",
+    "skills/tbank-budget-analyzer",
+    "skills/tbank-invest-advisor"
+  ],
+  "install": {
+    "steps": [
+      "python -m venv ${REPO_DIR}/.venv",
+      "${REPO_DIR}/.venv/bin/pip install -e ${REPO_DIR}",
+      "${REPO_DIR}/.venv/bin/python -m playwright install chromium"
+    ]
+  }
+}
