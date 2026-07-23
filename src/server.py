@@ -69,43 +69,49 @@ def _err(e):
     return f"{type(e).__name__}: {e}"
 
 
-# ── LOGIN (2) ──────────────────────────────────────────────
-# SECURITY: password and PIN are NEVER passed to the LLM.
-# login(phone) + confirm_otp(otp) are safe (OTP is one-time, not secret).
-# Password/PIN are handled via env vars (TBANK_PASSWORD/TBANK_PIN)
-# or via the local login_cli.py script — both outside the agent's context.
+# ── LOGIN (4) ──────────────────────────────────────────────
 
 @mcp.tool()
 def login(phone: str) -> str:
-    """Начать логин. Отправляет SMS OTP.
-    Пароль/PIN НЕ передаются агенту — они читаются из env TBANK_PASSWORD/TBANK_PIN
-    или вводятся через локальный CLI (login_cli.py)."""
+    """Начать логин. Отправляет SMS OTP. Возвращает какой шаг следующий (otp/password/pin)."""
     global _session
     _session = _blank_session()
     try:
-        msg = _session.login(phone)
-        # If login() reports a password step — check env var
-        if "password" in msg.lower() and os.environ.get("TBANK_PASSWORD"):
-            _session.confirm_step("password", os.environ["TBANK_PASSWORD"])
-            _save_session(_session)
-            return f"OK (password from env). sessionid={_session.mobile_sessionid[:12]}…"
-        return msg
+        return _session.login(phone)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
 def confirm_otp(otp: str) -> str:
-    """Отправить SMS-код. Пароль (если банк просит) читается из TBANK_PASSWORD env."""
+    """Отправить SMS-код."""
     global _session
     if not _session: return "call login(phone) first"
     try:
         _session.confirm_step("otp", otp)
-        # If bank asks for password after OTP — check env (no LLM exposure)
-        if os.environ.get("TBANK_PASSWORD"):
-            try:
-                _session.confirm_step("password", os.environ["TBANK_PASSWORD"])
-            except Exception:
-                pass
+        _save_session(_session)
+        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def confirm_password(password: str) -> str:
+    """Отправить пароль аккаунта (первый логин на новом устройстве)."""
+    global _session
+    if not _session: return "call login(phone) first"
+    try:
+        _session.confirm_step("password", password)
+        _save_session(_session)
+        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def confirm_pin(pin: str) -> str:
+    """Отправить PIN (re-auth)."""
+    global _session
+    if not _session: return "call login(phone) first"
+    try:
+        _session.confirm_step("pin", pin)
         _save_session(_session)
         return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
     except Exception as e:
