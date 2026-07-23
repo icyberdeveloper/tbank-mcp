@@ -1,0 +1,22 @@
+{
+  "name": "tbank-mcp",
+  "owner": {
+    "type": "github",
+    "username": "icyberdeveloper"
+  },
+  "metadata": {
+    "description": "T-Bank (Т-Банк) MCP — mobile banking API: счета, операции, заказ продуктов, переводы, мессенджер, инвестиции.",
+    "version": "0.1.0",
+    "tags": ["finance", "banking", "mcp", "russian", "tinkoff"]
+  },
+  "plugins": [
+    {
+      "name": "tbank",
+      "source": "./",
+      "description": "T-Bank mobile banking MCP + 6 skills",
+      "requirements": {
+        "python": ">=3.11"
+      }
+    }
+  ]
+}
