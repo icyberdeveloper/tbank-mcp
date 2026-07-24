@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import traceback
 from typing import Any
 
@@ -17,7 +18,10 @@ from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
 
 mcp = FastMCP("tbank")
 _session: MobileSession | None = None
-_SESSION_FILE = os.environ.get("TBANK_SESSION", "session.json")
+_SESSION_FILE = os.environ.get(
+    "TBANK_SESSION",
+    os.path.expanduser("~/.local/share/tbank-mcp/session.json"),
+)
 
 
 def _blank_session():
@@ -28,26 +32,33 @@ def _blank_session():
 
 
 def _save_session(s):
-    """Save session to disk with 0600 permissions (owner-only read/write)."""
+    """Save session to disk with 0600 permissions (owner-only read/write).
+    Persists _minted_at for correct expiry tracking across restarts."""
     try:
-        d = {k: v for k, v in s.__dict__.items() if not k.startswith("_")}
-        # write to temp then rename — avoids partial writes + sets 0600
+        d = {k: v for k, v in s.__dict__.items() if not k.startswith("_") or k == "_minted_at"}
+        os.makedirs(os.path.dirname(_SESSION_FILE), exist_ok=True)
         fd = os.open(_SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(d, fh, ensure_ascii=False)
         os.chmod(_SESSION_FILE, 0o600)
-    except OSError:
-        pass
+        print(f"[tbank] session saved: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, 0600)", file=sys.stderr)
+    except OSError as e:
+        print(f"[tbank] session save failed: {e}", file=sys.stderr)
 
 
 def _load_session():
     if not os.path.exists(_SESSION_FILE):
+        print(f"[tbank] no session file: {_SESSION_FILE}", file=sys.stderr)
         return None
     try:
         d = json.load(open(_SESSION_FILE))
         d.pop("_http", None)
-        return MobileSession(**d)
-    except Exception:
+        s = MobileSession(**d)
+        mode = oct(os.stat(_SESSION_FILE).st_mode & 0o777)
+        print(f"[tbank] session loaded: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, {mode})", file=sys.stderr)
+        return s
+    except Exception as e:
+        print(f"[tbank] session load failed: {e}", file=sys.stderr)
         return None
 
 
@@ -122,11 +133,20 @@ def confirm_pin(pin: str) -> str:
 
 @mcp.tool()
 def refresh_session() -> str:
-    """Тихий re-login (без OTP). Вызови при SESSION EXPIRED."""
+    """Обновить сессию. Сначала пробует refresh_token, при invalid_grant —
+    silent re-login через SSO_SESSION (без OTP). Если оба пути не работают — REAUTH_REQUIRED."""
     try:
-        _require().refresh()
-        _save_session(_session)
-        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+        s = _require()
+        try:
+            s.refresh()
+        except SessionExpired:
+            # refresh_token invalid — try silent re-login via SSO_SESSION
+            if s.sso_login_cookie and s.auth_step_fingerprint:
+                s.silent_relogin()
+            else:
+                return "REAUTH_REQUIRED: refresh_token истёк и нет SSO_SESSION. Нужен полный логин (login + OTP + password)."
+        _save_session(s)
+        return f"OK. sessionid={s.mobile_sessionid[:12]}…"
     except Exception as e:
         return _err(e)
 

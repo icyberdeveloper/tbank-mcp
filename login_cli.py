@@ -97,7 +97,8 @@ def main():
 
 
 def _success():
-    print("\n✓ ГОТОВО! session.json сохранён (права 0600).")
+    print(f"\n✓ ГОТОВО! Сессия сохранена: {srv._SESSION_FILE} (права 0600).")
+    print("  MCP читает этот же файл — путь совпадает без ручной настройки.")
     print("  Запусти Claude Code в этом репозитории.")
     print("  Пароль НЕ передан агенту — он работает с сохранённой сессией.")
     print("  Тулы: list_accounts, grocery_search, transfer, ...")

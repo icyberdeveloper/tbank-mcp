@@ -110,6 +110,8 @@ You normally just call a read tool; the above runs under the hood. Call
 
 - Every tool returns a short string (counts + summaries) or JSON; read its
   description in [TOOLS.md](TOOLS.md).
-- On `SESSION EXPIRED`, call `refresh_session` (silent re-login) and retry.
+- On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
+  no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
+  (login + OTP + password).
 - Money tools (`pay`, `payment_gate_pay`, `grocery_order_create`,
   `checkout_process_order`) are REAL — confirm the body before running.

@@ -118,7 +118,10 @@ export TBANK_PHONE="+79991234567"
 
 ## Security
 
-- **`session.json`** — gitignored, права 0600 (owner-only). Содержит токены.
+- **`session.json`** — канонический путь `~/.local/share/tbank-mcp/session.json`
+  (переопределяется env `TBANK_SESSION`), права 0600 (owner-only). Содержит токены.
+  Один и тот же файл читают и `login_cli.py`, и MCP-сервер — без ручной настройки.
+  При старте MCP логирует только путь/размер/права доступа, без токенов и cookies.
 - **Пароль/PIN** — НЕ в git, НЕ в коде, НЕ в контексте LLM (если используешь login_cli.py).
 - **0 hardcoded secrets** in code (verified by audit).
 - Money tools (`transfer`, `grocery_checkout`) требуют подтверждения.

@@ -32,6 +32,11 @@ from .endpoints import BUILTIN_ENDPOINTS
 
 MOBILE_BASE = "https://api.t-bank-app.ru"
 ID_BASE = "https://id.t-bank-app.ru"
+# Canonical OAuth2 token endpoint for the refresh grant. Used as the dataclass
+# default AND normalized again in __post_init__, so a legacy session.json that
+# stored an explicit empty "" token_url (the old default) can never make
+# refresh() POST to "" (the original MissingSchema('') crash).
+DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
 _CA_BUNDLE = os.environ.get(
     "TBANK_CA_BUNDLE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ca", "bundle.pem"),
@@ -124,20 +129,23 @@ class MobileSession:
     auth_step_fingerprint: str = "" # the static fingerprint blob sent at auth/step (silent re-login)
     tmsg_session_id: str = ""       # messenger JWT cookie (tm.t-bank-app.ru)
     sso_access_token: str = ""     # auth_code-grant access_token (silent re-login) for tmsg ONLY; reads use the refresh access_token
-    token_url: str = ""            # https://id.t-bank-app.ru/auth/token/mobile
+    token_url: str = DEFAULT_TOKEN_URL
     # read request templates, per endpoint key (verbatim from capture)
     read_templates: dict = field(default_factory=dict)
     # config
     base_url: str = MOBILE_BASE
     proxy: str | None = None
     _http: requests.Session = field(default_factory=requests.Session, repr=False)
-    _minted_at: float = 0.0
+    _minted_at: float = 0.0  # persisted to session.json (not just runtime)
 
     def __post_init__(self) -> None:
         # self-bootstrap defaults: a fresh device_id + a built-in device
         # fingerprint blob (no capture needed). login()/confirm_otp() populate
         # the SSO_SESSION + session from a real phone+OTP login.
         import uuid as _uuid
+        # If _minted_at is 0 (loaded from legacy session without timestamp),
+        # don't set it to now — that would make an old token look fresh.
+        # Leave it 0 — ensure_fresh will refresh before first use.
         if not self.device_id:
             self.device_id = str(_uuid.uuid4()).upper()
         if not self.old_device_id:
@@ -164,7 +172,17 @@ class MobileSession:
             self._http.mount("https://", _tls.RobustTLSAdapter())
         except Exception:
             pass
-        self._minted_at = time.time()
+        # Normalize token_url: a legacy session.json may have stored an explicit
+        # "" (the old default). An empty value would make refresh() POST to "",
+        # so force the canonical default. The dataclass default alone can't
+        # override an explicit empty string passed at construction time.
+        if not self.token_url:
+            self.token_url = DEFAULT_TOKEN_URL
+        # DON'T set _minted_at = time.time() here — it would make old tokens
+        # look fresh on reload. _minted_at is set by login/refresh/renew,
+        # or stays 0 (from legacy session) → ensure_fresh will refresh before use.
+        if not self._minted_at:
+            self._minted_at = 0  # explicit: 0 means "unknown age → refresh before first use"
         # login state (cid + otp token persisted between login() and confirm_otp())
         self._login_cid: str = ""
         self._login_token: str = ""
@@ -228,8 +246,9 @@ class MobileSession:
     def ensure_fresh(self, max_age_s: int = 6000) -> None:
         """Re-mint the session before the access_token expires (~2h).
         Prefers silent_relogin (gives a session valid for BOTH reads and the
-        messenger tmsg); falls back to refresh() if no SSO_SESSION."""
-        if time.time() - self._minted_at > min(max_age_s, max(60, self.expires_in - 600)):
+        messenger tmsg); falls back to refresh() if no SSO_SESSION.
+        _minted_at == 0 means unknown age (legacy session) → always refresh."""
+        if self._minted_at == 0 or time.time() - self._minted_at > min(max_age_s, max(60, self.expires_in - 600)):
             if self.sso_login_cookie and self.auth_step_fingerprint:
                 self.silent_relogin()
             else:

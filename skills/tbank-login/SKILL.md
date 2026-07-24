@@ -17,7 +17,7 @@ description: |
 | `confirm_otp(otp)` | Отправляет SMS-код. |
 | `confirm_password(password)` | Отправляет пароль аккаунта (первый логин на новом устройстве). |
 | `confirm_pin(pin)` | Отправляет PIN (re-auth). |
-| `refresh_session()` | Тихий re-login (без OTP/пароля). |
+| `refresh_session()` | Обновить сессию без OTP (refresh_token → silent re-login). Единый тул — агент не знает про внутренний fallback. |
 | `session_status()` | Проверить жива ли сессия. |
 | `keepalive()` | Пинг — продлевает сессию (~2ч TTL). |
 
@@ -27,3 +27,26 @@ description: |
 2. Пользователь сообщает SMS-код → `confirm_otp(code)`
 3. Если банк просит пароль → `confirm_password(password)`
 4. session.json сохранён. Готово.
+
+## Обновление сессии (SESSION EXPIRED / NO_SESSION)
+
+Access-токен живёт ~2ч. `ensure_fresh()` освежает сессию сам на первом вызове
+каждого флоу, поэтому вручную refresh нужен только если тул вернул `SESSION EXPIRED`.
+
+1. Вызови `refresh_session()` — это **единый** тул обновления. Внутри он сам
+   пробует refresh_token, а при `invalid_grant` — silent re-login через
+   SSO_SESSION (без OTP/пароля). Агенту не нужно знать про fallback.
+2. Повтори упавший тул.
+3. Если `refresh_session()` вернул `REAUTH_REQUIRED` — оба пути истекли. Скажи
+   пользователю: нужен полный логин (`login(phone)` + OTP + пароль). НЕ пытайся
+   обновлять дальше и не зацикливайся.
+
+## Где хранится сессия
+
+- Канонический путь: `~/.local/share/tbank-mcp/session.json` (права 0600).
+  Переопределяется env `TBANK_SESSION`.
+- `login_cli.py` и MCP-сервер читают **один и тот же** файл — ручная настройка
+  пути не нужна.
+- Сессия переживает перезапуск MCP: время выдачи токена (`_minted_at`)
+  сохраняется в файле, поэтому после рестарта старый токен не выглядит «свежим».
+  Legacy-файл без timestamp считается устаревшим → refresh до первого использования.

@@ -31,5 +31,11 @@ agent (Claude/Codex/etc.), then call `flows` for the ordered tool sequences.
 - **Money tools** (`pay`, `payment_gate_pay`, `grocery_order_create`,
   `checkout_process_order`) move REAL money. NEVER call without the user's
   explicit go-ahead; show the body first.
-- `session.json` (gitignored) holds the secrets — keep it private.
-- On `SESSION EXPIRED`: call `refresh_session` (silent re-login, no OTP), retry.
+- `session.json` holds the secrets — keep it private. Canonical path:
+  `~/.local/share/tbank-mcp/session.json` (override with `TBANK_SESSION`), 0600.
+  Both `login_cli.py` and the MCP read this same file with no manual setup. At
+  startup the MCP logs only path/size/mode — never tokens or cookies.
+- On `SESSION EXPIRED`: call `refresh_session` — it tries `refresh_token` first,
+  then silent re-login via SSO_SESSION (no OTP), and only returns
+  `REAUTH_REQUIRED` if both fail (then the user must re-login). Retry the failed
+  tool after a successful refresh.
