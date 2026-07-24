@@ -28,7 +28,14 @@ invest_portfolio | invest_operations | invest_securities | pension | broker_marg
 Содержимое корзины. Обязательны app_id/point_id (те же, что в grocery_add_to_cart).
 
 ## `grocery_checkout`
-Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. Обязательны app_id/point_id.
+Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. Обязательны app_id/point_id.
+Счёт выбирается автоматически. При неопределённом результате (заказ мог создаться) повтор
+блокируется — сначала `grocery_attempts()`. `force=True` — только после явного подтверждения,
+что прошлого заказа нет.
+
+## `grocery_attempts`
+Недавние попытки checkout (read-only) — reconciliation после UNKNOWN: status, order_id,
+attempt_id, сумма.
 
 ## `grocery_plan_order`
 Спланировать заказ: для каждого ингредиента ищет (custom_ordered → global).

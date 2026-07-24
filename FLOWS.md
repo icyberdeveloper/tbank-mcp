@@ -119,5 +119,10 @@ You normally just call a read tool; the above runs under the hood. Call
 - On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
   no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
   (login + OTP + password).
+- `grocery_checkout` is safer now: post-delivery sum (cart re-read after deliveries),
+  auto-selected payment account, and an attempt journal
+  (`~/.local/share/tbank-mcp/attempts.jsonl`). After an UNKNOWN result (order may
+  exist) the auto-retry is BLOCKED — reconcile via `grocery_attempts`, and only
+  force a retry after the user confirms no order exists.
 - Money tools (`pay`, `payment_gate_pay`, `grocery_order_create`,
   `checkout_process_order`) are REAL — confirm the body before running.

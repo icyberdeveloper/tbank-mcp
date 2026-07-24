@@ -335,16 +335,67 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         return _err(e)
 
 @mcp.tool()
-def grocery_checkout(app_id: str = "", point_id: str = "") -> str:
-    """Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
+def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) -> str:
+    """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
-    ВНИМАНИЕ: web-flow (src/checkout.py) пока поддерживает appId=578; для других
-    магазинов нужна Phase 3. Всегда показывай состав и сумму и жди явного подтверждения."""
+    Счёт оплаты выбирается автоматически (первый Current RUB с балансом).
+    При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
+    сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
+    пользователь ЯВНО подтвердил, что прошлого заказа нет. Всегда показывай состав и
+    сумму и жди явного подтверждения перед вызовом."""
     try:
+        from . import journal
+        from .checkout import select_payment_account, CheckoutError, CheckoutUnknown
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
-        r = s.grocery_checkout(app_id=app_id, point_id=point_id)
-        return f"[store appId={app_id} pointId={point_id}] ✓ ORDER {r['order_id']} PAID. sum={r['sum']}₽"
+        # 1. read the cart → goods + amount + a stable cart hash
+        cart_raw = s.grocery_cart_get(app_id=app_id, point_id=point_id)
+        cart = cart_raw.get("cart", cart_raw) if isinstance(cart_raw, dict) else {}
+        goods = cart.get("goods", []) if isinstance(cart, dict) else []
+        if not goods:
+            return f"[store appId={app_id} pointId={point_id}] Корзина пуста — не из чего оформлять заказ."
+        amount = cart.get("goodsSum", 0) or cart.get("sum", 0) or 0
+        chash = journal.cart_hash_of(goods)
+        # 2. block-check: an unknown/paid prior attempt for THIS cart → no auto-retry (#10)
+        blocked, last = journal.is_retry_blocked(chash)
+        if blocked and not force:
+            return (f"[store appId={app_id} pointId={point_id}] BLOCKED: предыдущая попытка checkout для "
+                    f"этой корзины завершилась неопределённо (status={last.get('status')}, "
+                    f"attempt={last.get('attempt_id')}, order={last.get('order_id') or '-'}). Заказ мог быть "
+                    f"создан/оплачен — сначала grocery_attempts() и проверь заказ в приложении. "
+                    f"Принудительный повтор (force=True) — только если пользователь подтвердил отсутствие заказа.")
+        # 3. select a payment account (rejects empty — fixes the old empty-agreement bug, #9)
+        account = select_payment_account(s)
+        # 4. new journal attempt + run the web checkout
+        attempt_id = journal.new_attempt(app_id, point_id, chash, amount)
+        try:
+            r = s.grocery_checkout(app_id=app_id, point_id=point_id, account=account,
+                                   sum_val=amount, attempt_id=attempt_id)
+            return (f"[store appId={app_id} pointId={point_id}] ✓ ORDER {r['order_id']} PAID. "
+                    f"sum={r['sum']}₽ (attempt {attempt_id})")
+        except CheckoutUnknown as e:
+            return (f"[store appId={app_id} pointId={point_id}] UNKNOWN RESULT (attempt {attempt_id}): {e} "
+                    f"Повтор ЗАБЛОКИРОВАН — заказ мог создаться. Проверь grocery_attempts() и заказ в приложении.")
+        except CheckoutError as e:
+            journal.record(attempt_id, "failed", "failed", error=str(e)[:160])
+            return _err(e)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def grocery_attempts() -> str:
+    """Недавние попытки grocery checkout (read-only) — для reconciliation после
+    неопределённого результата (UNKNOWN). Показывает status/order_id/attempt_id/sum."""
+    try:
+        from . import journal
+        rows = journal.recent(15)
+        if not rows:
+            return "Попыток checkout пока не было."
+        return "\n".join(
+            f"- {r.get('attempt_id')} | {r.get('status')} | appId={r.get('app_id')} "
+            f"| {r.get('amount', '?')}₽ | order={r.get('order_id') or '-'} "
+            f"| {(r.get('error') or r.get('payment_status') or '')[:60]}"
+            for r in rows)
     except Exception as e:
         return _err(e)
 

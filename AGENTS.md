@@ -39,3 +39,9 @@ agent (Claude/Codex/etc.), then call `flows` for the ordered tool sequences.
   then silent re-login via SSO_SESSION (no OTP), and only returns
   `REAUTH_REQUIRED` if both fail (then the user must re-login). Retry the failed
   tool after a successful refresh.
+- `grocery_checkout` records an attempt journal
+  (`~/.local/share/tbank-mcp/attempts.jsonl`); after an UNKNOWN result (order may
+  have been created) an automatic retry is BLOCKED to prevent duplicate orders.
+  Reconcile via `grocery_attempts`, and pass `force=True` only after the user
+  confirms no order exists. The payment account is auto-selected (first Current
+  RUB with a positive balance).

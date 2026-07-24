@@ -1400,20 +1400,17 @@ class MobileSession:
         return self._call_read("grocery_cart_set", body=body, overrides={"appId": app_id, "pointId": point_id})
 
     def grocery_checkout(self, app_id: str = "", point_id: str = "",
-                         client_email: str = "", account: str = "") -> dict:
-        """Full grocery checkout: web cart sync → deliveries → order/create →
-        payment_gate_pay. One call → order paid. Requires Playwright.
-        The mobile cart read is store-aware (appId+pointId). NOTE: src/checkout.py
-        still hardcodes appId=578 (Азбука Вкуса) in the Playwright web flow;
-        generalizing the web flow to other stores is Phase 3 (#7/#8)."""
+                         client_email: str = "", account: str = "",
+                         sum_val: float = 0, attempt_id: str | None = None) -> dict:
+        """Full grocery checkout (web flow): deliveries → order/create → payment_gate_pay.
+        `app_id`/`point_id` scope the store; `account` is the selected payment
+        agreement (from checkout.select_payment_account); `sum_val` is a mobile-cart
+        fallback sum (the post-delivery WEB sum is used inside); `attempt_id` records
+        progress in the journal. Raises checkout.CheckoutError (safe to retry) or
+        checkout.CheckoutUnknown (order may exist — retry must be blocked)."""
         from .checkout import checkout as _checkout
-        # get sum from the SAME store's cart (appId + pointId) — not a bare appId
-        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
-        cart = self._call_read("grocery_cart_get", overrides=ov or None)
-        sum_val = 0
-        if isinstance(cart, dict):
-            sum_val = cart.get("goodsSum", 0) or cart.get("sum", 0)
-        return _checkout(self, app_id=app_id, client_email=client_email, sum_val=sum_val)
+        return _checkout(self, app_id=app_id, point_id=point_id, client_email=client_email,
+                         sum_val=sum_val, account=account, attempt_id=attempt_id)
 
     def messenger_send(self, conversation_id: str, text: str) -> dict:
         """Send a text message to a conversation. Encapsulates the vendor
