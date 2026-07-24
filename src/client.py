@@ -37,10 +37,6 @@ ID_BASE = "https://id.t-bank-app.ru"
 # stored an explicit empty "" token_url (the old default) can never make
 # refresh() POST to "" (the original MissingSchema('') crash).
 DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
-# "Азбука вкуса" store ids — used only for explicit equality guards (e.g. the
-# custom_ordered category is Azbuka-specific), NEVER as a silent default.
-AZBUKA_APP_ID = "578"
-AZBUKA_POINT_ID = "700"
 # SBP "pointer type" enum for a phone-number pointer. Verified CONSTANT across all
 # phone/SBP transfers in captures.xml (6 different recipients, different bankMemberId,
 # always pointerType="8276") — it is NOT the recipient's bank code (that's bankMemberId),
@@ -836,7 +832,7 @@ class MobileSession:
         """Sphere (Город) categories."""
         return self._as_list(self._call_read("sphere_categories"))
 
-    def grocery_goods(self, category_id: str = "custom_ordered_azbuka_vkusa",
+    def grocery_goods(self, category_id: str = "",
                       app_id: str = "", point_id: str = "",
                       page: int = 1) -> list[dict]:
         """Grocery goods (Город catalog items). Pass category_id to browse a
@@ -1178,6 +1174,39 @@ class MobileSession:
             uniq.append(st)
         return uniq
 
+    def _resolve_custom_ordered_id(self, app_id: str, point_id: str) -> str:
+        """Discover the per-store 'previously ordered' (Вы заказывали) category id.
+        The id is store-suffixed (e.g. custom_ordered_<store>) and NOT
+        constructible client-side — sibling custom ids carry random/date suffixes.
+        The server lists it in GET /api/grocery/catalog?appId=&pointId= (the real
+        app calls it with appId/pointId) under blocks[type=='Categories'].list,
+        as the item whose id starts with 'custom_ordered' (label 'Вы заказывали').
+        Returns '' when the store has no order history (block absent) → caller
+        falls back to global search. Verified for appId=578; degrades safely
+        for other stores."""
+        data = self._call_read("grocery_catalog", overrides={"appId": app_id, "pointId": point_id})
+        blocks = []
+        if isinstance(data, dict):
+            blocks = data.get("blocks") or []
+            if not blocks and isinstance(data.get("payload"), dict):
+                blocks = data["payload"].get("blocks") or []
+        fallback = ""
+        for block in blocks:
+            items = block.get("list") if isinstance(block, dict) else None
+            if not isinstance(items, list):
+                continue
+            for cat in items:
+                if not isinstance(cat, dict):
+                    continue
+                cid = cat.get("id")
+                if isinstance(cid, str) and cid.startswith("custom_ordered"):
+                    # prefer the labeled 'Вы заказывали' match; else keep first custom_ordered
+                    if "заказывал" in str(cat.get("name") or "").lower():
+                        return cid
+                    if not fallback:
+                        fallback = cid
+        return fallback
+
     def grocery_plan_order(self, ingredients: list[str], store_app_id: str = "",
                            store_point_id: str = "") -> dict:
         """Plan a grocery order. #12: custom_ordered is loaded ONCE per store and
@@ -1207,14 +1236,16 @@ class MobileSession:
             if _custom is not None:
                 return _custom
             _custom = []
-            # custom_ordered is an Azbuka-specific history category — only fetch it
-            # for the Azbuka store; other stores go straight to global search. (#H3)
-            if app_id != AZBUKA_APP_ID:
+            # Discover the per-store 'previously ordered' category id dynamically
+            # (no hardcoded store id — works for any store that has order history;
+            # stores without it return '' and we fall through to global search).
+            category_id = self._resolve_custom_ordered_id(app_id, point_id)
+            if not category_id:
                 return _custom
             for page in range(1, 4):
                 items = self._as_list(self._call_read("grocery_goods", overrides={
                     "appId": app_id, "pointId": point_id,
-                    "categoryId": "custom_ordered_azbuka_vkusa",
+                    "categoryId": category_id,
                     "page": str(page), "count": "50"}))
                 if not items:
                     break
