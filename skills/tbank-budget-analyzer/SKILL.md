@@ -24,7 +24,6 @@ description: |
 | `get_data("sbp")` | СБП-подписки |
 | `get_data("finhealth_total")` | Итоговый баланс |
 | `get_data("finhealth_turnover")` | Оборот по счёту |
-| `get_data("regular_payments")` | Регулярные платежи |
 
 ## Флоу
 

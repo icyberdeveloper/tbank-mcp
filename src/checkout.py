@@ -40,6 +40,10 @@ import time
 from . import journal
 from . import observability as obs
 
+# Shared web-checkout query string (capture-verified) for every grocery web fetch.
+# Single source of truth — bump here, not in 5 separate JS template strings.
+GROCERY_WEB_QS = "appName=grocery_evo&appVersion=7.31.6&platform=webview_ios"
+
 
 class CheckoutError(RuntimeError):
     """Checkout failed in a way that is safe to retry (no order was POSTed)."""
@@ -60,7 +64,7 @@ def _safe_record(attempt_id, step, status, **fields):
         pass
 
 
-def checkout(session, app_id: str = "578", point_id: str = "",
+def checkout(session, app_id: str = "", point_id: str = "",
              client_email: str = "", sum_val: float = 0,
              account: str = "", attempt_id: str | None = None) -> dict:
     """Run the grocery checkout via headless browser. `session` is a MobileSession
@@ -81,6 +85,11 @@ def checkout(session, app_id: str = "578", point_id: str = "",
     Returns {order_id, payment_id, status, sum} or raises CheckoutError (safe retry)
     / CheckoutUnknown (retry blocked)."""
     from playwright.sync_api import sync_playwright
+
+    if not app_id:
+        # money-path footgun: never default to a store. The MCP layer (_store)
+        # always passes app_id; this guards direct/internal callers.
+        raise CheckoutError("app_id is required (from grocery_stores())")
 
     web_ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
               "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1")
@@ -129,12 +138,12 @@ def checkout(session, app_id: str = "578", point_id: str = "",
 
             def web_cart(app):
                 """GET web cart, return (sum, goods, raw)."""
-                wc = page.evaluate("""async (appId) => {
-                    const r = await fetch('/api/supreme/lifestyle/api/grocery/cart?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios&appId=' + appId + '&origin=web,ib5,platform', {headers: {'Accept': 'application/json'}});
+                wc = page.evaluate("""async (a) => {
+                    const r = await fetch('/api/supreme/lifestyle/api/grocery/cart?' + a.qs + '&appId=' + a.appId + '&origin=web,ib5,platform', {headers: {'Accept': 'application/json'}});
                     return {status: r.status, body: await r.json().catch(() => ({}))};
-                }""", app)
+                }""", {"appId": app, "qs": GROCERY_WEB_QS})
                 body = wc.get("body", {}) or {}
-                cart = body.get("payload", {}).get("cart", {}) if isinstance(body, dict) else {}
+                cart = (body.get("payload") or {}).get("cart", {}) if isinstance(body, dict) else {}
                 s = cart.get("goodsSum", 0) or cart.get("sum", 0)
                 return s, cart.get("goods", []), wc
 
@@ -165,12 +174,12 @@ def checkout(session, app_id: str = "578", point_id: str = "",
             # was the old bug: a delivery failure silently led to a stale sum + bad order.
             _t0 = time.time()
             deliv = page.evaluate("""async (args) => {
-                const r = await fetch('/api/supreme/lifestyle/api/grocery/deliveries?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios&appId=' + args.appId + '&pointId=' + args.pointId, {
+                const r = await fetch('/api/supreme/lifestyle/api/grocery/deliveries?' + args.qs + '&appId=' + args.appId + '&pointId=' + args.pointId, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({serviceKeys: ["FEE", "DYNAMIC_CASHBACK", "PICKING_CART_SUM"]})
                 });
                 return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", {"appId": app_id, "pointId": point_id})
+            }""", {"appId": app_id, "pointId": point_id, "qs": GROCERY_WEB_QS})
             _dur = int((time.time() - _t0) * 1000)
             dbody = deliv.get("body", {}) if isinstance(deliv, dict) else {}
             d_err = ""
@@ -212,10 +221,10 @@ def checkout(session, app_id: str = "578", point_id: str = "",
 
             # 5. resolve the payment agreement + customer email from the capture-
             # verified endpoints (NOT a guess from list_accounts). #8/#9
-            agr_res = page.evaluate("""async () => {
-                const r = await fetch('/api/supreme/lifestyle/api/user/payment/account/last?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios', {headers: {'Accept': 'application/json'}});
+            agr_res = page.evaluate("""async (a) => {
+                const r = await fetch('/api/supreme/lifestyle/api/user/payment/account/last?' + a.qs + '&serviceName=GROCERY', {headers: {'Accept': 'application/json'}});
                 return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""")
+            }""", {"qs": GROCERY_WEB_QS})
             agr_body = agr_res.get("body", {}) if isinstance(agr_res, dict) else {}
             agr_payload = agr_body.get("payload", {}) if isinstance(agr_body, dict) else {}
             agreement = (agr_payload.get("accountId") if isinstance(agr_payload, dict) else "") or account
@@ -224,10 +233,10 @@ def checkout(session, app_id: str = "578", point_id: str = "",
             if not agreement:
                 raise CheckoutError("no payment account: user/payment/account/last returned no accountId")
 
-            ci_res = page.evaluate("""async () => {
-                const r = await fetch('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios', {headers: {'Accept': 'application/json'}});
+            ci_res = page.evaluate("""async (a) => {
+                const r = await fetch('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?' + a.qs, {headers: {'Accept': 'application/json'}});
                 return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""")
+            }""", {"qs": GROCERY_WEB_QS})
             ci_body = ci_res.get("body", {}) if isinstance(ci_res, dict) else {}
             ci_email = ci_body.get("email") if isinstance(ci_body, dict) else ""
             if not ci_email and isinstance(ci_body, dict):
@@ -241,13 +250,13 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                 order_obj["clientEmail"] = email
             order_body = json.dumps(order_obj)
             _t0 = time.time()
-            order_res = page.evaluate("""async (body) => {
-                const o = JSON.parse(body);
-                const r = await fetch('/api/supreme/lifestyle/api/grocery/order/create?appId=' + o.appId + '&appName=grocery_evo&appVersion=7.31.6&platform=webview_ios&sum=' + o.sum, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: body
+            order_res = page.evaluate("""async (a) => {
+                const o = JSON.parse(a.body);
+                const r = await fetch('/api/supreme/lifestyle/api/grocery/order/create?appId=' + o.appId + '&' + a.qs + '&sum=' + o.sum, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: a.body
                 });
                 return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", order_body)
+            }""", {"body": order_body, "qs": GROCERY_WEB_QS})
             _dur = int((time.time() - _t0) * 1000)
             obody = order_res.get("body", {}) if isinstance(order_res, dict) else {}
             order = obody.get("payload", {}).get("order", {}) if isinstance(obody, dict) else {}
@@ -266,7 +275,8 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                              err=str(obody.get("errorMessage") or obody.get("resultCode") or "")[:120])
                 raise CheckoutUnknown(
                     f"order/create returned no orderId (http={order_res.get('status')}, "
-                    f"resp={json.dumps(obody, ensure_ascii=False)[:200]}) — order may exist, do NOT retry blindly")
+                    f"code={o_code}) — order may exist, do NOT retry blindly. "
+                    f"See grocery_attempts()/diagnostics() for details.")
             print(f"[checkout] order created: id={order_id}")
             _safe_record(attempt_id, "order_create", "order_posted", order_id=order_id)
 

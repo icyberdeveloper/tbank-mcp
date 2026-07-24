@@ -4,6 +4,12 @@ Ordered tool-call sequences for common tasks. The session self-refreshes
 (`ensure_fresh` → silent re-login, no OTP) on the first call of each flow, so you
 don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 
+> **Tool names:** the **32 MCP tools** are the authoritative interface (see TOOLS.md
+> and the skills). Some sections below describe INTERNAL api steps — e.g. the web
+> checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
+> tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
+> `grocery_goods`, `grocery_cart_set`, `active_loans` are NOT MCP tools).
+
 ## 0. Bootstrap (first-time login)
 
 **First-time login = phone → OTP (SMS) → password → session.**
@@ -11,14 +17,9 @@ Not just OTP — the bank requires the account password on the first login
 on a new device. `login(phone)` returns which step is next (otp/password/pin).
 Call the matching `confirm_*` tool.
 
-1. `login(phone)` → SMS OTP sent (or password step).
+1. `login(phone)` → SMS OTP sent (or password step). phone = full form, e.g. `+79991234567`.
 2. `confirm_otp(otp)` → if bank returns `step: password`, continue.
 3. `confirm_password(password)` → session minted. Persists `session.json`.
-
-1. `login(phone)` → bank sends an SMS OTP. (phone = full form, e.g. `+79991234567`.)
-2. `confirm_otp(otp)` → mints the session (access_token + sessionid + refresh_token
-   + SSO_SESSION cookie). Persists `session.json`. After this, everything below
-   works headless. Call this only once (or when the session is revoked).
 
 ## 1. Session / login (automatic, no OTP)
 
@@ -69,11 +70,12 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 4. P2P transfer / bill pay  (signed)
 
-1. `payment_commission(body)` → preview the fee (`payParameters` JSON).
-2. `pay(body)` → **HMAC-signed** `v1/pay` (`x-api-signature` =
-   base64(HMAC-SHA256(key=sessionid, msg=METHOD\n+path_tail\n+query\n+body))).
-   `body` = form-encoded `payParameters=...` (provider p2p-anybank, moneyAmount,
-   providerFields with the recipient). Moves real money.
+1. `payment_commission(body)` → preview the fee (`payParameters`, same shape as transfer).
+2. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
+   pointer_link_id)` → moves REAL money. The HMAC `x-api-signature` over `/v1/pay`
+   (base64(HMAC-SHA256(key=sessionid, msg=METHOD+path_tail+query+body))) is applied
+   INSIDE `transfer`. phone/СБП needs recipient member fields; `provider="transfer-inner"`
+   for between-own-accounts.
 
 > Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
 > is cookie-only.
@@ -86,7 +88,7 @@ You normally just call a read tool; the above runs under the hood. Call
    `direction`/`message_id` to page).
 3. `messenger_hints(conversation_id)` → quick-reply suggestions.
 4. `messenger_faq(conversation_id)` → self-help FAQ.
-5. `messenger_send_message(conversation_id, body)` → **send** a reply (real
+5. `messenger_send(conversation_id, text)` → **send** a reply (real
    message, not money). `body` = JSON message body (or empty to replay).
 6. `messenger_mark_read(conversation_id, message_id)` → mark read.
 7. `messenger_unread()` → unread count across chats.
@@ -129,5 +131,5 @@ You normally just call a read tool; the above runs under the hood. Call
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools (`pay`, `payment_gate_pay`, `grocery_order_create`,
-  `checkout_process_order`) are REAL — confirm the body before running.
+- Money tools (`transfer`, `grocery_checkout`) are REAL — confirm the amount/recipient
+  (transfer) and store+sum (grocery_checkout) with the user before running.

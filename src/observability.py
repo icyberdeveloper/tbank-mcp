@@ -53,6 +53,16 @@ def _is_sensitive_key(k: str) -> bool:
 def _redact_value(v):
     """Recursively redact secrets/PII in a value and truncate long strings."""
     if isinstance(v, str):
+        # If the string is itself JSON (e.g. a raw response dumped into an `err`
+        # field), parse + redact its STRUCTURE so a secret under a sensitive key
+        # inside the dump (cookie:"SSO=zzz", access_token:"eyJ…") is scrubbed —
+        # the value patterns below can't see short values or key names in a string.
+        try:
+            parsed = json.loads(v)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(_redact_value(parsed), ensure_ascii=False)[:_MAX_VAL]
         v = _RE_JWT.sub("<jwt>", v)
         v = _RE_CARD.sub("<card>", v)
         v = _RE_BLOB.sub("<redacted-blob>", v)

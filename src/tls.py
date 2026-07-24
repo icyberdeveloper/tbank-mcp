@@ -101,9 +101,11 @@ class RobustTLSAdapter(HTTPAdapter):
             return super().send(request, **kwargs)
         except requests.exceptions.SSLError as e:
             host = urlparse(request.url).hostname or ""
-            # refresh just this host's chain (and the bundle in place)
+            # Rebuild the FULL bundle (all BANK_HOSTS), not just [host] — rebuilding
+            # only [host] would rewrite the bundle to system-CAs + that one host and
+            # discard every other bank host's chain, causing cascading SSL failures.
             try:
-                rebuild_bundle([host])
+                rebuild_bundle()
             except Exception:
                 pass
             # the session's verify points at BUNDLE; rebuild updated it in place.

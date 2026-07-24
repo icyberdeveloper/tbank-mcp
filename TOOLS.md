@@ -1,6 +1,6 @@
 # T-Bank MCP — каталог тулов
 
-**25 тулов.** Логин: login(phone) → confirm_otp/confirm_password. Дальше headless.
+**32 тулa.** Логин: login(phone) → confirm_otp/confirm_password. Дальше headless.
 
 ## `confirm_otp`
 Отправить SMS-код.
@@ -56,6 +56,18 @@ ingredients = JSON массив, напр. ["свёкла","говядина","�
 
 ## `grocery_stores`
 Список магазинов (название, appId, pointId, доставка, кешбэк). Источник app_id/point_id для всех остальных grocery-тулов.
+
+## `invest_accounts`
+Инвест-счета (InvestBox/брокерские). Возьми brokerAccountId.
+
+## `invest_portfolio`
+Статистика портфеля (P&L) за период. invest_portfolio(broker_account_id, days).
+
+## `invest_operations`
+Брокерские операции. invest_operations(broker_account_id, operation_type, limit).
+
+## `invest_securities`
+Купленные бумаги (акции/облигации/ETF). invest_securities(broker_account_id).
 
 ## `keepalive`
 Пинг — продлить сессию.

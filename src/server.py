@@ -1,6 +1,6 @@
 """T-Bank mobile API MCP server (FastMCP).
 
-25 tools for the agent. Low-level API calls are encapsulated in high-level tools.
+32 tools for the agent. Low-level API calls are encapsulated in high-level tools.
 get_data(section) covers 60+ read endpoints in one tool.
 
 Run: python -m src.server
@@ -52,7 +52,12 @@ def _load_session():
         return None
     try:
         d = json.load(open(_SESSION_FILE))
-        d.pop("_http", None)
+        # keep known non-underscore fields + _minted_at; drop runtime fields (_http,
+        # _login_*) and removed fields (e.g. legacy sso_access_token) so an old
+        # session.json loads without TypeError.
+        fields = MobileSession.__dataclass_fields__
+        keep = {k for k in fields if not k.startswith("_")} | {"_minted_at"}
+        d = {k: v for k, v in d.items() if k in keep}
         s = MobileSession(**d)
         mode = oct(os.stat(_SESSION_FILE).st_mode & 0o777)
         print(f"[tbank] session loaded: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, {mode})", file=sys.stderr)
@@ -74,10 +79,10 @@ def _require():
 
 def _err(e):
     if isinstance(e, SessionExpired):
-        return f"SESSION EXPIRED: call refresh_session(). {e.message}"
+        return f"SESSION EXPIRED: call refresh_session(). {str(e.message)[:300]}"
     if isinstance(e, TbankApiError):
-        return f"API error ({e.result_code}): {e.message}"
-    return f"{type(e).__name__}: {e}"
+        return f"API error ({e.result_code}): {str(e.message)[:300]}"
+    return f"{type(e).__name__}: {str(e)[:300]}"
 
 
 def _store(app_id: str, point_id: str) -> tuple[str, str]:
@@ -113,7 +118,7 @@ def confirm_otp(otp: str) -> str:
     try:
         _session.confirm_step("otp", otp)
         _save_session(_session)
-        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+        return "OK. session active."
     except Exception as e:
         return _err(e)
 
@@ -125,7 +130,7 @@ def confirm_password(password: str) -> str:
     try:
         _session.confirm_step("password", password)
         _save_session(_session)
-        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+        return "OK. session active."
     except Exception as e:
         return _err(e)
 
@@ -137,7 +142,7 @@ def confirm_pin(pin: str) -> str:
     try:
         _session.confirm_step("pin", pin)
         _save_session(_session)
-        return f"OK. sessionid={_session.mobile_sessionid[:12]}…"
+        return "OK. session active."
     except Exception as e:
         return _err(e)
 
@@ -166,7 +171,7 @@ def refresh_session() -> str:
                 return "REAUTH_REQUIRED: refresh_token истёк и нет SSO_SESSION. Нужен полный логин (login + OTP + password)."
         _save_session(s)
         obs.emit("refresh", grant=grant, result="ok")
-        return f"OK. sessionid={s.mobile_sessionid[:12]}…"
+        return "OK. session active."
     except Exception as e:
         try:
             from . import observability as obs
@@ -252,7 +257,7 @@ def get_data(section: str) -> str:
     requisites | invoices | templates | contacts | providers | cards | loans | autopayments |
     sbp | offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
     cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
-    invest_portfolio | invest_operations | invest_securities | pension | broker_margin | shared."""
+    pension | broker_margin | shared. (invest_portfolio/operations/securities — отдельные тулы.)"""
     try:
         s = _require(); s.ensure_fresh()
         return json.dumps(s.get_data(section), ensure_ascii=False, default=str)[:5000]
@@ -527,12 +532,20 @@ def messenger_unread() -> str:
 # ── MONEY (2) ──────────────────────────────────────────────
 
 @mcp.tool()
-def transfer(amount: float, to_account: str, description: str = "") -> str:
-    """Перевод (P2P/СБП). РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем."""
+def transfer(amount: float, to_account: str, description: str = "",
+             provider: str = "p2p-anybank", bank_member_id: str = "",
+             masked_fio: str = "", pointer_link_id: str = "") -> str:
+    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем). Контракт сверен с захватом.
+    phone/СБП (по умолчанию): to_account=телефон, нужны bank_member_id/masked_fio/pointer_link_id
+    получателя (из сохранённого контакта или SBP-резолвинга) — иначе RECIPIENT_NOT_RESOLVED.
+    Между своими счетами: provider='transfer-inner', to_account=счёт-получатель.
+    По реквизитам юр.лица: используй низкоуровневый pay() с явными providerFields."""
     try:
         s = _require(); s.ensure_fresh()
-        s.transfer(amount, to_account, description)
-        return f"Sent: {amount}₽ to {to_account}"
+        s.transfer(amount, to_account, description, provider=provider,
+                   bank_member_id=bank_member_id, masked_fio=masked_fio,
+                   pointer_link_id=pointer_link_id)
+        return f"Sent: {amount}₽ to {to_account} (provider={provider})"
     except Exception as e:
         return _err(e)
 
@@ -543,6 +556,50 @@ def payment_commission(body: str = "") -> str:
         s = _require(); s.ensure_fresh()
         b = json.loads(body) if body else None
         return json.dumps(s._call_read("payment_commission", body=b), ensure_ascii=False)[:1000]
+    except Exception as e:
+        return _err(e)
+
+
+# ── INVEST (4) ─────────────────────────────────────────────
+
+@mcp.tool()
+def invest_accounts() -> str:
+    """Инвест-счета (InvestBox/брокерские). Возьми brokerAccountId для следующих тулов."""
+    try:
+        s = _require(); s.ensure_fresh()
+        accs = s.invest_accounts()
+        return "\n".join(f"- {a.get('brokerAccountId', a.get('id','?'))} | {a.get('name','')[:30]}" for a in accs) or "нет инвест-счетов"
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def invest_portfolio(broker_account_id: str, days: int = 30) -> str:
+    """Статистика портфеля (P&L) за период. broker_account_id — из invest_accounts()."""
+    try:
+        s = _require(); s.ensure_fresh()
+        start, end = ms_for_period(days)
+        return json.dumps(s.invest_portfolio(broker_account_id, start, end),
+                          ensure_ascii=False, default=str)[:4000]
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def invest_operations(broker_account_id: str, operation_type: str = "", limit: int = 50) -> str:
+    """Брокерские операции. operation_type — фильтр (пусто = все)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
+        return "\n".join(f"- [{(o.get('date',''))}] {(o.get('amount') or {}).get('value','?')} | {o.get('description','')[:40]}" for o in ops[:50]) or "нет операций"
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def invest_securities(broker_account_id: str) -> str:
+    """Купленные бумаги (акции/облигации/ETF) по брокерскому счёту."""
+    try:
+        s = _require(); s.ensure_fresh()
+        secs = s.invest_securities(broker_account_id)
+        return "\n".join(f"- {sec.get('ticker', sec.get('name','?'))[:12]} | {sec.get('balance','?')} | {sec.get('name','')[:30]}" for sec in secs) or "нет бумаг"
     except Exception as e:
         return _err(e)
 

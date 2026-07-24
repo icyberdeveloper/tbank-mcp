@@ -1256,7 +1256,7 @@ BUILTIN_ENDPOINTS = {
  "messenger_send": {
   "method": "POST",
   "host": "https://tm.t-bank-app.ru",
-  "path": "/app/bank/messenger/conversations/AAKjxa24heaokKQBpfrl3vff_MGsAQIIYmFuawI/messages",
+  "path": "/app/bank/messenger/conversations/{conversation_id}/messages",
   "params": {},
   "headers": {
    "Content-Type": "application/vnd.chats.chatapi.text.message.in.v1+json",

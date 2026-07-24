@@ -37,6 +37,19 @@ ID_BASE = "https://id.t-bank-app.ru"
 # stored an explicit empty "" token_url (the old default) can never make
 # refresh() POST to "" (the original MissingSchema('') crash).
 DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
+# "Азбука вкуса" store ids — used only for explicit equality guards (e.g. the
+# custom_ordered category is Azbuka-specific), NEVER as a silent default.
+AZBUKA_APP_ID = "578"
+AZBUKA_POINT_ID = "700"
+
+
+def _need_store(app_id: str, point_id: str) -> tuple[str, str]:
+    """Client-layer guard mirroring server._store(): grocery store-scope methods
+    require explicit app_id/point_id — no silent 578/700 default."""
+    if not app_id or not point_id:
+        raise TbankApiError("NO_STORE_CONTEXT",
+            "app_id/point_id required (from grocery_stores()) — no silent default store.")
+    return app_id, point_id
 _CA_BUNDLE = os.environ.get(
     "TBANK_CA_BUNDLE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ca", "bundle.pem"),
@@ -128,7 +141,6 @@ class MobileSession:
     sso_login_cookie: str = ""      # the LOGIN (auth_code) cookie set incl. SSO_SESSION (long-lived) — for silent re-login
     auth_step_fingerprint: str = "" # the static fingerprint blob sent at auth/step (silent re-login)
     tmsg_session_id: str = ""       # messenger JWT cookie (tm.t-bank-app.ru)
-    sso_access_token: str = ""     # auth_code-grant access_token (silent re-login) for tmsg ONLY; reads use the refresh access_token
     token_url: str = DEFAULT_TOKEN_URL
     # read request templates, per endpoint key (verbatim from capture)
     read_templates: dict = field(default_factory=dict)
@@ -250,7 +262,13 @@ class MobileSession:
         _minted_at == 0 means unknown age (legacy session) → always refresh."""
         if self._minted_at == 0 or time.time() - self._minted_at > min(max_age_s, max(60, self.expires_in - 600)):
             if self.sso_login_cookie and self.auth_step_fingerprint:
-                self.silent_relogin()
+                try:
+                    self.silent_relogin()
+                except Exception:
+                    # SSO silent re-login failed (e.g. SSO_SESSION dead server-side):
+                    # the refresh_token grant can still mint a read-capable session,
+                    # so fall back instead of failing every read.
+                    self.refresh()
             else:
                 self.refresh()
 
@@ -407,7 +425,7 @@ class MobileSession:
                    "User-Agent": "okhttp/4.12.0", "x-lang": "ru"}
         if self.cookie_str:
             headers["Cookie"] = self.cookie_str
-        r = self._http.post(url, json={"ssoToken": self.sso_access_token or self.access_token},
+        r = self._http.post(url, json={"ssoToken": self.access_token},
                            headers=headers, timeout=30)
         data = self._unwrap(r)
         jwt = ""
@@ -423,9 +441,6 @@ class MobileSession:
         SSO-valid access_token, then mint the tmsg via issueTokenBySSO."""
         if not self._tmsg_expired():
             return
-        # try the current access_token first (works if it's an auth_code-grant one)
-        if self.access_token and not self._tmsg_expired():
-            pass
         # mint tmsg from the current access_token; if it fails (refresh token is
         # SSO-invalid), do a silent re-login to get a fresh auth_code access_token.
         try:
@@ -669,6 +684,8 @@ class MobileSession:
                              period: str = "day", group_by: str = "category") -> dict:
         ov = {"start": str(start_ms), "end": str(end_ms), "period": period,
               "groupBy": group_by, "config": "allNotInner"}
+        if account_id:
+            ov["account"] = account_id
         return self._call_read("operations_histogram", overrides=ov)
 
     def list_regular_payments(self, activity_types: str = "payment") -> list[dict]:
@@ -748,7 +765,7 @@ class MobileSession:
             if isinstance(cart, dict):
                 delivery = cart.get("delivery", {}) or cart.get("cart", {}).get("delivery", {})
                 addr = delivery.get("address", {})
-                pid = delivery.get("pointId", point_id or "700")
+                pid = delivery.get("pointId", point_id)
                 body = {
                     "goods": [], "cartSetMode": "SINGLE_CART",
                     "delivery": {"isExpress": False, "comment": "", "pointId": pid,
@@ -815,7 +832,7 @@ class MobileSession:
         return self._as_list(self._call_read("sphere_categories"))
 
     def grocery_goods(self, category_id: str = "custom_ordered_azbuka_vkusa",
-                      app_id: str = "578", point_id: str = "700",
+                      app_id: str = "", point_id: str = "",
                       page: int = 1) -> list[dict]:
         """Grocery goods (Город catalog items). Pass category_id to browse a
         category, page for pagination."""
@@ -1103,10 +1120,17 @@ class MobileSession:
             addrs = info.json().get("payload", {}).get("deliveryInfo", {}).get("addresses", [])
         except Exception:
             pass
-        addr = addrs[0].get("value", "") if addrs else ""
-        coords = addrs[0].get("coordinates", {}) if addrs else {}
-        lat = str(coords.get("latitude", 55.754709)) if coords else "55.754709"
-        lon = str(coords.get("longitude", 37.525818)) if coords else "37.525818"
+        if not addrs:
+            raise TbankApiError("NO_DELIVERY_ADDRESS",
+                "У аккаунта нет сохранённого адреса доставки. Добавь адрес в приложении "
+                "Т-Банка (Город), затем вызови grocery_stores() снова.")
+        addr = addrs[0].get("value", "")
+        coords = addrs[0].get("coordinates") or {}
+        if not coords.get("latitude") or not coords.get("longitude"):
+            raise TbankApiError("NO_DELIVERY_ADDRESS",
+                "Сохранённый адрес без координат — обнови адрес в приложении Т-Банка (Город).")
+        lat = str(coords.get("latitude"))
+        lon = str(coords.get("longitude"))
         # retailers needs ALL these params (from capture)
         params = {"appName": self.app_name, "appVersion": self.app_version,
                   "platform": self.platform, "origin": self.origin,
@@ -1159,8 +1183,7 @@ class MobileSession:
 
         Returns {store, items, total_sum, missing, substitutions}."""
         import re as _re
-        app_id = store_app_id or "578"
-        point_id = store_point_id or "700"
+        app_id, point_id = _need_store(store_app_id, store_point_id)
         plan = {"store": app_id, "items": [], "total_sum": 0,
                 "missing": [], "substitutions": []}
 
@@ -1179,6 +1202,10 @@ class MobileSession:
             if _custom is not None:
                 return _custom
             _custom = []
+            # custom_ordered is an Azbuka-specific history category — only fetch it
+            # for the Azbuka store; other stores go straight to global search. (#H3)
+            if app_id != AZBUKA_APP_ID:
+                return _custom
             for page in range(1, 4):
                 items = self._as_list(self._call_read("grocery_goods", overrides={
                     "appId": app_id, "pointId": point_id,
@@ -1194,7 +1221,7 @@ class MobileSession:
             q = norm(ingredient)
             found = None
             for g in custom_once():
-                name = g.get("name", "").lower().replace("ё", "е")
+                name = (g.get("name") or "").lower().replace("ё", "е")
                 if q and q in name:
                     price = g.get("price", {})
                     pv = price.get("value", 0) if isinstance(price, dict) else 0
@@ -1283,6 +1310,8 @@ class MobileSession:
         """operations_histogram?groupBy=category -> {earning:[...], spending:[...]}."""
         ov = {"start": str(start_ms), "end": str(end_ms),
               "groupBy": "category", "period": "day", "config": "allNotInner"}
+        if account_id:
+            ov["account"] = account_id
         data = self._call_read("operations_histogram", overrides=ov)
         payload = data.get("payload", data) if isinstance(data, dict) else {}
         spending = payload.get("spending") or []
@@ -1368,6 +1397,7 @@ class MobileSession:
         catalog (not just one category). Uses inStockFilter (only available
         items). Filters out prepared foods. Returns: id, name, price, weight,
         store, imageUrl. query = e.g. "свёкла"."""
+        _need_store(app_id, point_id)
         q = query.lower().strip().replace("ё", "е")
         # POST search/fulltext (global search across the store)
         base = {"Accept": "application/json", "User-Agent": "okhttp/4.12.0"}
@@ -1380,8 +1410,8 @@ class MobileSession:
             "text": query.replace("ё", "е"),
         }
         params = {
-            "screen": "grocery", "context": "api", "applicationId": app_id or "578",
-            "pointId": point_id or "700", "appName": self.app_name,
+            "screen": "grocery", "context": "api", "applicationId": app_id,
+            "pointId": point_id, "appName": self.app_name,
             "appVersion": self.app_version, "platform": self.platform,
             "origin": self.origin, "deviceId": self.device_id,
             "oldDeviceId": self.old_device_id, "ccc": self.ccc,
@@ -1404,7 +1434,7 @@ class MobileSession:
             src = hit.get("objectSource", {})
             if not src:
                 continue
-            name = src.get("name", "")
+            name = src.get("name") or ""
             name_norm = name.lower().replace("ё", "е")
             # must match the query
             if q not in name_norm:
@@ -1442,9 +1472,10 @@ class MobileSession:
         results.sort(key=lambda r: (not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
         return results
 
-    def grocery_add_to_cart(self, items: list[dict], app_id: str = "578", point_id: str = "700") -> dict:
+    def grocery_add_to_cart(self, items: list[dict], app_id: str = "", point_id: str = "") -> dict:
         """Add items to cart. items = [{"id": "123", "count": 1}, ...].
         Encapsulates: address.details fetch + cart/set body format."""
+        _need_store(app_id, point_id)
         # get full address (with details) from current cart
         cart = self._call_read("grocery_cart_get", overrides={"appId": app_id, "pointId": point_id})
         addr = {}
@@ -1479,23 +1510,71 @@ class MobileSession:
         return self._call_read("messenger_send", body=body,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
-    def transfer(self, amount: float, to_account: str, description: str = "") -> Any:
-        """P2P transfer (encapsulates: payment_commission + pay body + HMAC signature).
-        amount = RUB, to_account = recipient account/phone, description = optional note."""
-        # preview commission
-        comm_body = {"payParameters": json.dumps({
-            "account": to_account, "moneyAmount": amount, "currency": "RUB",
-            "paymentType": "Payment", "provider": "p2p-anybank"})}
-        try:
-            self._call_read("payment_commission", body=comm_body)
-        except Exception:
-            pass
-        # pay (signed — _call_signed handles the HMAC)
-        pay_body = ("payParameters=" + urllib.parse.quote(json.dumps({
-            "isTransferStatus": "false", "moneyAmount": amount,
-            "provider": "p2p-anybank", "providerFields": {"pointerType": "ACCOUNT",
-            "account": to_account, "description": description}})))
-        return self.pay(pay_body)
+    def _source_account(self) -> str:
+        """First Current RUB account id with a positive balance — the payer/source
+        for transfers (capture: payParameters.account = 10-char source id)."""
+        for a in (self.list_accounts() or []):
+            if not isinstance(a, dict) or (a.get("accountType") or "") != "Current":
+                continue
+            money = a.get("moneyAmount") or {}
+            bal = money.get("value", 0) if isinstance(money, dict) else 0
+            try:
+                bal = float(bal)
+            except (TypeError, ValueError):
+                bal = 0.0
+            if bal <= 0:
+                continue
+            cur = a.get("currency")
+            cn = cur.get("name") if isinstance(cur, dict) else cur
+            if cn and str(cn).upper() not in ("RUB", "RUBLES", "РОССИЙСКИЙ РУБЛЬ", "₽"):
+                continue
+            if a.get("id"):
+                return str(a["id"])
+        raise TbankApiError("NO_SOURCE_ACCOUNT",
+            "no Current RUB account with a positive balance to use as transfer source")
+
+    def transfer(self, amount: float, to_account: str, description: str = "",
+                 provider: str = "p2p-anybank", pointer_type: str = "8276",
+                 bank_member_id: str = "", masked_fio: str = "",
+                 pointer_link_id: str = "") -> Any:
+        """Transfer via signed /v1/pay (REAL money). Body shape is capture-verified
+        (the old body invented pointerType='ACCOUNT' and was rejected). The signing
+        mechanism (_signed_parts) is unchanged — it was proven byte-exact.
+
+        phone/SBP (default: provider='p2p-anybank', pointer_type='8276'):
+          to_account = recipient phone. The SBP recipient must be resolved first —
+          pass bank_member_id/masked_fio/pointer_link_id (from a saved contact via
+          payment_templates/contact_list, or an SBP lookup). Without them the API
+          rejects the pay (RECIPIENT_NOT_RESOLVED).
+        between own accounts (provider='transfer-inner'): to_account = target account;
+          providerFields = {'bankContract': to_account}.
+        by details (provider='transfer-legal'): use the low-level pay() tool with
+          explicit providerFields (bankBik/bankAcnt/inn/kpp/...) — not built here.
+
+        Source account = first Current RUB (list_accounts). For commission preview,
+        call payment_commission() separately before this. ALWAYS confirm with the user."""
+        src = self._source_account()
+        if provider == "transfer-inner":
+            pf = {"bankContract": to_account}
+        elif provider == "transfer-legal":
+            raise TbankApiError("NO_TEMPLATE",
+                "transfer-legal needs explicit providerFields (bankBik/bankAcnt/inn/kpp/...) "
+                "— use the low-level pay(body) tool with a hand-built payParameters.")
+        else:  # p2p-anybank (phone / SBP)
+            if not (bank_member_id and masked_fio and pointer_link_id):
+                raise TbankApiError("RECIPIENT_NOT_RESOLVED",
+                    "phone/SBP transfer needs the recipient's SBP member fields "
+                    "(bank_member_id, masked_fio, pointer_link_id). Resolve them from a saved "
+                    "contact (payment_templates/contact_list) or an SBP phone lookup first.")
+            pf = {"pointerType": pointer_type, "pointer": to_account,
+                  "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
+                  "pointerLinkId": pointer_link_id}
+        pay_params = {"provider": provider, "currency": "RUB", "account": src,
+                      "moneyAmount": amount, "providerFields": pf,
+                      "isTransferStatus": "false", "isUrgentTransfer": "false"}
+        body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
+        return self.pay(body)
+
 
     def get_data(self, section: str) -> Any:
         """Unified getter for banking data. section = one of:

@@ -13,11 +13,10 @@ description: |
 
 | Тул | Что делает |
 |---|---|
-| `list_accounts()` | Список счетов пользователя (найти источник) |
+| `list_accounts()` | Список счетов пользователя (источник) |
 | `get_data("requisites")` | Реквизиты счёта (номер, БИК — для входящих) |
 | `payment_commission(body)` | Предпросмотр комиссии (БЕЗ денег) |
-| `transfer(amount, to_account, description)` | P2P перевод (HMAC-подпись внутри) |
-| `pay(body)` | Сырой подписанный платёж (продвинутый) |
+| `transfer(amount, to_account, description, provider, bank_member_id, masked_fio, pointer_link_id)` | Перевод (подпись внутри). phone/СБП по умолчанию; `provider="transfer-inner"` — между своими счетами |
 
 ## Флоу
 
@@ -77,12 +76,15 @@ description: |
 
 ### Шаг 5: Перевод
 
-Вызови `transfer(amount, to_account, description)`:
+Вызови `transfer(amount, to_account, description, ...)`:
 - `amount` — сумма в рублях (число)
-- `to_account` — номер телефона/счёта получателя
+- `to_account` — телефон (`+79991234567`) для phone/СБП, либо счёт-получатель для `transfer-inner`
 - `description` — комментарий (по запросу пользователя)
 
-Для сложных случаев (не-P2P) — `pay(body)` с форматом `payParameters=...`.
+**phone/СБП (по умолчанию):** требуются поля получателя `bank_member_id`/`masked_fio`/`pointer_link_id`
+(резолвинг из сохранённого контакта `payment_templates`/`contact_list` или SBP-lookup). Без них —
+`RECIPIENT_NOT_RESOLVED`. **Между своими счетами:** `provider="transfer-inner"`, `to_account`=счёт.
+**По реквизитам юр.лица (БИК/счёт/ИНН):** пока не автоматизировано — используй приложение.
 
 ### Шаг 6: Отчёт
 

@@ -28,6 +28,8 @@ import os
 import time
 import uuid
 
+from .observability import _redact_value as _redact
+
 ATTEMPTS_FILE = os.environ.get(
     "TBANK_ATTEMPTS",
     os.path.expanduser("~/.local/share/tbank-mcp/attempts.jsonl"),
@@ -42,10 +44,18 @@ def _ts() -> float:
 
 
 def _append(rec: dict) -> None:
+    """Append one redacted event with 0600 perms. Redaction (observability._redact_value)
+    scrubs any secret/PII that a caller may have passed (e.g. a raw response dump)."""
     os.makedirs(os.path.dirname(ATTEMPTS_FILE), exist_ok=True)
     rec["ts"] = _ts()
-    with open(ATTEMPTS_FILE, "a", encoding="utf-8") as fh:
+    rec = _redact(rec)
+    fd = os.open(ATTEMPTS_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(ATTEMPTS_FILE, 0o600)  # enforce 0600 even if the file pre-existed
+    except OSError:
+        pass
 
 
 def _events() -> list[dict]:
