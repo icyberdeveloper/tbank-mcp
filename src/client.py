@@ -132,6 +132,19 @@ _STRICT_XAPP_HOSTS = {
 }
 
 
+def _normalize_phone(phone: str) -> str:
+    """Normalize a RU mobile number to the SBP `pointer` format ``+7XXXXXXXXXX``
+    (the form the real app sends). Accepts +7 / 8 / 7 / bare-9… forms."""
+    d = re.sub(r"\D", "", phone or "")
+    if d.startswith("8") and len(d) == 11:
+        d = "7" + d[1:]          # 8904… → 7904…
+    elif len(d) == 10 and d[:1] == "9":
+        d = "7" + d              # 904… → 7904…
+    if not (len(d) == 11 and d.startswith("7")):
+        raise TbankApiError("INVALID_PHONE", f"not a valid RU mobile number: {phone}")
+    return "+" + d
+
+
 @dataclass
 class MobileSession:
     # tokens (rotate on refresh)
@@ -330,6 +343,7 @@ class MobileSession:
         per-host profile). Injecting them elsewhere diverges from the app and breaks
         the grocery cart on lifestyle. An explicit template header still wins
         (setdefault below)."""
+        from urllib.parse import urlparse
         hn = (urlparse(host_url).hostname or host_url or "").lower()
         h: dict[str, str] = {"X-Lang": "ru", "Accept-Language": "ru",
                              "Accept": "application/json"}
@@ -1666,6 +1680,47 @@ class MobileSession:
         raise TbankApiError("NO_SOURCE_ACCOUNT",
             "no Current RUB account with a positive balance to use as transfer source")
 
+    def resolve_sbp_recipient(self, phone: str) -> list[dict]:
+        """Resolve a phone to its SBP recipient banks (GET /v1/get_requisites,
+        capture-verified). READ-ONLY — no money moves. A phone can map to SEVERAL
+        banks (the recipient has accounts in multiple SBP banks), so the caller
+        picks one (prefer isDefaultBank=True). Returns [{bank_member_id,
+        masked_fio, pointer_link_id, bank_name, bank_id, is_default_bank,
+        provider_fields}] per bank — provider_fields is the ready SBP providerFields
+        object (pointerType from the SBP_PHONE_POINTER_TYPE constant) to paste into
+        payment_commission(). Empty list = not registered in SBP / wrong number."""
+        ptr = _normalize_phone(phone)
+        r = self._call_read("get_requisites", overrides={
+            "pointerType": "phone", "pointer": ptr,
+            "pointerSource": "external", "withTinkoff": "true", "gapBanks": "true",
+        })
+        items = r if isinstance(r, list) else (
+            (r.get("payload") if isinstance(r, dict) else None) or [])
+        out: list[dict] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            df = {d.get("name"): d.get("value")
+                  for d in (it.get("displayFields") or []) if isinstance(d, dict)}
+            brand = it.get("brand") or {}
+            bmi, mfio, plid = (str(df.get("bankMemberId", "")),
+                               str(df.get("maskedFIO", "")),
+                               str(it.get("pointerLinkId", "")))
+            out.append({
+                "bank_member_id": bmi,
+                "masked_fio": mfio,
+                "pointer_link_id": plid,
+                "bank_name": str(brand.get("name", "")),
+                "bank_id": str(brand.get("id", "")),
+                "is_default_bank": bool(it.get("isDefaultBank")),
+                # ready SBP providerFields — paste into payment_commission() so the
+                # agent never hand-writes the 8276 pointer-type code.
+                "provider_fields": {"pointerType": SBP_PHONE_POINTER_TYPE,
+                                    "pointer": ptr, "bankMemberId": bmi,
+                                    "maskedFIO": mfio, "pointerLinkId": plid},
+            })
+        return out
+
     def transfer(self, amount: float, to_account: str, description: str = "",
                  provider: str = "p2p-anybank", pointer_type: str = SBP_PHONE_POINTER_TYPE,
                  bank_member_id: str = "", masked_fio: str = "",
@@ -1675,10 +1730,14 @@ class MobileSession:
         mechanism (_signed_parts) is unchanged — it was proven byte-exact.
 
         phone/SBP (default: provider='p2p-anybank', pointer_type='8276'):
-          to_account = recipient phone. The SBP recipient must be resolved first —
-          pass bank_member_id/masked_fio/pointer_link_id (from a saved contact via
-          payment_templates/contact_list, or an SBP lookup). Without them the API
-          rejects the pay (RECIPIENT_NOT_RESOLVED).
+          to_account = recipient phone. If bank_member_id/masked_fio/pointer_link_id
+          are NOT passed, the recipient is AUTO-RESOLVED via resolve_sbp_recipient()
+          (GET /v1/get_requisites): the default bank is picked, or the single match;
+          if several banks with no default → RECIPIENT_MULTIPLE_BANKS (surface list,
+          never silently pick). For a NEW recipient, call transfer_sbp_resolve(phone)
+          first to show the user the candidate banks, then pass the chosen fields.
+          pay body is capture-verified (providerFields.pointerType='8276', pointer
+          '+7XXXXXXXXXX', paymentType='Transfer').
         between own accounts (provider='transfer-inner'): to_account = target account;
           providerFields = {'bankContract': to_account}.
         by details (provider='transfer-legal'): use the low-level pay() tool with
@@ -1695,16 +1754,36 @@ class MobileSession:
                 "— use the low-level pay(body) tool with a hand-built payParameters.")
         else:  # p2p-anybank (phone / SBP)
             if not (bank_member_id and masked_fio and pointer_link_id):
-                raise TbankApiError("RECIPIENT_NOT_RESOLVED",
-                    "phone/SBP transfer needs the recipient's SBP member fields "
-                    "(bank_member_id, masked_fio, pointer_link_id). Resolve them from a saved "
-                    "contact (payment_templates/contact_list) or an SBP phone lookup first.")
-            pf = {"pointerType": pointer_type, "pointer": to_account,
+                # Auto-resolve the recipient via get_requisites (read-only). Pick the
+                # default bank if any, else the single match; if several with NO
+                # default, refuse + surface the list — money safety: never silently
+                # pick a bank (could send to the wrong bank/account).
+                resolved = self.resolve_sbp_recipient(to_account)
+                if not resolved:
+                    raise TbankApiError("RECIPIENT_NOT_RESOLVED",
+                        f"{to_account} is not registered in SBP (or the number is wrong). "
+                        "Call transfer_sbp_resolve(phone) to check.")
+                pick = next((x for x in resolved if x["is_default_bank"]), None)
+                if pick is None and len(resolved) == 1:
+                    pick = resolved[0]
+                if pick is None:
+                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
+                        f"{to_account} maps to {len(resolved)} SBP banks — pick one:\n" +
+                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']} | "
+                                  f"bankMemberId={x['bank_member_id']} | pointerLinkId={x['pointer_link_id']}"
+                                  for x in resolved) +
+                        "\nPass the chosen bank_member_id + pointer_link_id to transfer().")
+                bank_member_id = pick["bank_member_id"]
+                masked_fio = pick["masked_fio"]
+                pointer_link_id = pick["pointer_link_id"]
+            pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
                   "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
                   "pointerLinkId": pointer_link_id}
         pay_params = {"provider": provider, "currency": "RUB", "account": src,
                       "moneyAmount": amount, "providerFields": pf,
                       "isTransferStatus": "false", "isUrgentTransfer": "false"}
+        if provider == "p2p-anybank":
+            pay_params["paymentType"] = "Transfer"   # capture-verified for SBP transfers
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
         return self.pay(body)
 

@@ -5,7 +5,7 @@ agent (Claude/Codex/etc.), then call `flows` for the ordered tool sequences.
 
 ## Quick start (bootstrap once)
 
-1. `login(phone)` — sends an SMS OTP. phone = full form, e.g. `+79991234567`.
+1. `login(phone)` — sends an SMS OTP. phone = full form, e.g. `+7XXXXXXXXXX`.
 2. `confirm_otp(otp)` — finishes login; mints the session. (If the bank returns a
    PIN step instead of OTP, call `confirm_pin(pin)`.)
 3. The session persists; all reads + messenger now work headless. `ensure_fresh`

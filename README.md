@@ -37,8 +37,8 @@ cp -r skills/* ~/.claude/skills/
 cd tbank-mcp
 
 # Пароль спросит скрипт (getpass — не отображается в терминале):
-.venv/bin/python login_cli.py +79991234567
-# [1/3] login(+79991234567) ... SMS отправлена
+.venv/bin/python login_cli.py +7XXXXXXXXXX
+# [1/3] login(+7XXXXXXXXXX) ... SMS отправлена
 # [2/3] SMS-код: ****        ← вводишь код из SMS (скрытый ввод)
 # [3/3] Пароль (не отображается): ****   ← вводишь пароль (скрытый ввод)
 # ✓ ГОТОВО! session.json сохранён (права 0600).
@@ -48,7 +48,7 @@ cd tbank-mcp
 
 Или с паролем в env (CI/скрипты):
 ```bash
-TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +79991234567
+TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +7XXXXXXXXXX
 ```
 
 После логина — **запусти Claude Code**. Агент видит сохранённую сессию и работает
@@ -59,7 +59,7 @@ TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +79991234567
 Если тебе удобно передавать пароль агенту:
 
 ```
-> login(+79991234567)
+> login(+7XXXXXXXXXX)
 > [SMS code] 1234
 > confirm_otp("1234")
 > [bank asks password]
@@ -73,7 +73,7 @@ TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +79991234567
 
 ```bash
 export TBANK_PASSWORD="пароль"
-export TBANK_PHONE="+79991234567"
+export TBANK_PHONE="+7XXXXXXXXXX"
 # login() автоматически подхватит пароль из env после confirm_otp()
 ```
 

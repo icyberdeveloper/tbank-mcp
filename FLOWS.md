@@ -17,7 +17,7 @@ Not just OTP — the bank requires the account password on the first login
 on a new device. `login(phone)` returns which step is next (otp/password/pin).
 Call the matching `confirm_*` tool.
 
-1. `login(phone)` → SMS OTP sent (or password step). phone = full form, e.g. `+79991234567`.
+1. `login(phone)` → SMS OTP sent (or password step). phone = full form, e.g. `+7XXXXXXXXXX`.
 2. `confirm_otp(otp)` → if bank returns `step: password`, continue.
 3. `confirm_password(password)` → session minted. Persists `session.json`.
 
@@ -70,12 +70,21 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 4. P2P transfer / bill pay  (signed)
 
-1. `payment_commission(body)` → preview the fee (`payParameters`, same shape as transfer).
-2. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
+1. `transfer_sbp_resolve(phone)` → resolve a phone to its SBP recipient banks
+   (`GET /v1/get_requisites`, read-only). Returns `bankMemberId`/`maskedFIO`/
+   `pointerLinkId` per bank + `isDefaultBank`. **Required for a NEW (unsaved)
+   recipient** before commission/transfer; if several banks and no default, ask the
+   user which bank (never silently pick — wrong bank = money gone).
+2. `payment_commission(body)` → preview the fee (`payParameters`, same shape as
+   transfer — with the resolved `providerFields`, `paymentType:"Transfer"`,
+   `pointerType:"8276"`, `pointer:"+7…"`. Do NOT use the old `pointerType:"ACCOUNT"`,
+   the bank rejects it → INVALID_REQUEST_DATA).
+3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
    pointer_link_id)` → moves REAL money. The HMAC `x-api-signature` over `/v1/pay`
    (base64(HMAC-SHA256(key=sessionid, msg=METHOD+path_tail+query+body))) is applied
-   INSIDE `transfer`. phone/СБП needs recipient member fields; `provider="transfer-inner"`
-   for between-own-accounts.
+   INSIDE `transfer`. If the member fields are omitted, the recipient is AUTO-resolved
+   (default bank, or single match; several-without-default → `RECIPIENT_MULTIPLE_BANKS`).
+   `provider="transfer-inner"` for between-own-accounts.
 
 > Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
 > is cookie-only.

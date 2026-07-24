@@ -1,6 +1,6 @@
 """T-Bank mobile API MCP server (FastMCP).
 
-32 tools for the agent. Low-level API calls are encapsulated in high-level tools.
+33 tools for the agent. Low-level API calls are encapsulated in high-level tools.
 get_data(section) covers 60+ read endpoints in one tool.
 
 Run: python -m src.server
@@ -578,14 +578,40 @@ def messenger_unread() -> str:
 # ── MONEY (2) ──────────────────────────────────────────────
 
 @mcp.tool()
+def transfer_sbp_resolve(phone: str) -> str:
+    """Резолвинг получателя СБП по номеру (read-only, БЕЗ денег). Возвращает банки
+    получателя (маскированное имя + банк + isDefaultBank) и готовый provider_fields.
+    Используй ПЕРЕД transfer()/payment_commission() для НОВОГО (несохранённого)
+    получателя. provider_fields вставь в payParameters.providerFields комиссии — не
+    пиши 8276 руками. Для transfer() передай bank_member_id+pointer_link_id (или
+    ничего — выберется дефолт); при нескольких банках без дефолта нужен явный выбор."""
+    try:
+        s = _require(); s.ensure_fresh()
+        cands = s.resolve_sbp_recipient(phone)
+        if not cands:
+            return f"{phone}: получатель не зарегистрирован в СБП (или неверный номер)."
+        lines = [f"{phone}: найдено банков СБП — {len(cands)}"]
+        for c in cands:
+            star = " ★ДЕФОЛТ" if c["is_default_bank"] else ""
+            lines.append(f"- {c['masked_fio']} | {c['bank_name']}{star}")
+            lines.append(f"  providerFields: {json.dumps(c['provider_fields'], ensure_ascii=False)}")
+        lines.append("payment_commission: вставь providerFields в payParameters.providerFields "
+                     "(account/moneyAmount/currency/paymentType добавь сам). "
+                     "transfer: передай bank_member_id + pointer_link_id, или ничего (дефолт).")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
 def transfer(amount: float, to_account: str, description: str = "",
              provider: str = "p2p-anybank", bank_member_id: str = "",
              masked_fio: str = "", pointer_link_id: str = "") -> str:
     """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем). Контракт сверен с захватом.
-    phone/СБП (по умолчанию): to_account=телефон, нужны bank_member_id/masked_fio/pointer_link_id
-    получателя (из сохранённого контакта или SBP-резолвинга) — иначе RECIPIENT_NOT_RESOLVED.
-    Между своими счетами: provider='transfer-inner', to_account=счёт-получатель.
-    По реквизитам юр.лица: используй низкоуровневый pay() с явными providerFields."""
+    phone/СБП (по умолчанию): to_account=телефон. Если bank_member_id/masked_fio/
+    pointer_link_id не переданы — получатель резолвится АВТОМАТИЧЕСКИ (transfer_sbp_resolve):
+    выберется дефолтный банк; при нескольких банках без дефолта вернётся RECIPIENT_MULTIPLE_BANKS
+    со списком (тогда передай выбранные поля явно). Между своими счетами: provider='transfer-inner',
+    to_account=счёт-получатель. По реквизитам юр.лица — низкоуровневый pay() с явными providerFields."""
     try:
         s = _require(); s.ensure_fresh()
         s.transfer(amount, to_account, description, provider=provider,
