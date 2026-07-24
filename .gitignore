@@ -34,4 +34,3 @@ build/
 # CA certs regenerated/derivable at runtime
 ca/*.pem
 ca/*.cer
-login_cli.py
