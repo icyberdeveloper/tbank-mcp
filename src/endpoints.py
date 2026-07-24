@@ -1273,7 +1273,7 @@ BUILTIN_ENDPOINTS.update({
     "broker_portfolio_accounts": {"method": "POST", "host": "https://api-invest-gw.t-bank-app.ru", "path": "/invest-portfolio/portfolios/accounts/for-mb", "params": {"withClosingIis": "false", "currency": "RUB"}},
     "my_homes": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/homes", "params": {}},
     "my_home_activities": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/activities", "params": {}},
-    "my_cars": {"method": "GET", "host": "https://myauto.t-bank-app.ru", "path": "/api/my-auto/v2/cars/list-light", "params": {}},
+    "my_cars": {"method": "GET", "host": "https://myauto.t-bank-app.ru", "path": "/api/my-auto/v2/cars/list-light", "params": {"inache": "drivetransitt"}},
     "payment_shortcuts": {"method": "GET", "host": "https://shortcuts.t-bank-app.ru", "path": "/v2/shortcuts", "params": {}},
     "unread_support_requests": {"method": "GET", "host": "https://csc.tbank.ru", "path": "/app/bank/api/v1/tracker/userRequests/unread", "params": {}},
     "resolve_payment_qr": {"method": "POST", "host": "https://api.t-bank-app.ru", "path": "/providers/providers/qr/resolve", "params": {}},

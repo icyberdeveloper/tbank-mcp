@@ -113,6 +113,13 @@ class SessionExpired(TbankApiError):
 _LIVE_QUERY = {"sessionid", "wuid"}
 _LIVE_HEADERS = {"authorization", "cookie"}
 
+# iOS device OS version used in the mobile User-Agent. Not tracked per-session
+# (the device isn't re-queried); matches the value embedded in the auth
+# fingerprint blob (see FINGERPRINT userAgent) and the real app's UA format
+# `iPhone/iOS(<ver>)/TCSMB/<appVersion>(<build>)`. Build is derived from
+# app_version, e.g. 7.31.6 -> 7*1_000_000 + 31*10_000 + 6*1_000 = 7316000.
+_IOS_VERSION = "17.5.1"
+
 
 @dataclass
 class MobileSession:
@@ -137,7 +144,7 @@ class MobileSession:
     connection_type: str = "WiFi"
     ccc: str = "true"
     cpswc: str = "true"
-    inache: str = ""
+    inache: str = "drivetransitt"  # app routing/feature flag (constant) — sent on every request
     cookie_str: str = ""            # the cookie header to replay on reads/refresh
     sso_login_cookie: str = ""      # the LOGIN (auth_code) cookie set incl. SSO_SESSION (long-lived) — for silent re-login
     auth_step_fingerprint: str = "" # the static fingerprint blob sent at auth/step (silent re-login)
@@ -290,6 +297,41 @@ class MobileSession:
             raise TbankApiError("NO_TEMPLATE", f"no endpoint shape for '{key}'")
         return tpl
 
+    def _mobile_ua(self) -> str:
+        """The mobile User-Agent derived from the session (NOT hardcoded):
+        ``iPhone/iOS(<ver>)/TCSMB/<appVersion>(<build>)``. The numeric build is
+        derived from app_version (7.31.6 -> 7316000); the iOS device version is the
+        constant ``_IOS_VERSION``. Returns '' for non-iOS / unknown app_version."""
+        if self.platform != "ios" or not self.app_version:
+            return ""
+        try:
+            a, b, c = (int(x) for x in self.app_version.split("."))
+            build = a * 1_000_000 + b * 10_000 + c * 1_000
+        except ValueError:
+            return ""
+        return f"iPhone/iOS({_IOS_VERSION})/TCSMB/{self.app_version}({build})"
+
+    def _mobile_headers(self) -> dict:
+        """Standard mobile-client headers the real app sends on EVERY request,
+        derived from session attributes. Strict hosts validate these at the gateway:
+        ``myauto.t-bank-app.ru`` (cars) returns HTTP 400 without ``X-App-*`` +
+        the mobile UA; ``id.t-bank-app.ru`` (userinfo) needs equivalent client
+        context. Returning them centrally fixes the whole family (profile-401,
+        cars-400) instead of patching one endpoint at a time. Values come from the
+        session, so an explicit template header still wins via setdefault below."""
+        h: dict[str, str] = {"X-Lang": "ru", "Accept-Language": "ru",
+                             "Accept": "application/json"}
+        if self.app_name:
+            h["X-App-Name"] = self.app_name
+        if self.app_version:
+            h["X-App-Version"] = self.app_version
+        if self.platform:
+            h["X-Platform"] = self.platform
+        ua = self._mobile_ua()
+        if ua:
+            h["User-Agent"] = ua
+        return h
+
     def _call_read(self, template_key: str, *, overrides: dict | None = None,
                    body: dict | None = None, path_override: str | None = None) -> Any:
         """Replay a read endpoint (builtin shape) with fresh sessionid + Bearer.
@@ -305,17 +347,29 @@ class MobileSession:
         params["wuid"] = self.device_id
         # inject the common base params from the session if not in the template
         # (so builtin endpoints with minimal params still send appName/origin/etc.)
+        # inache is the app's routing/feature flag (constant "drivetransitt") — the
+        # real client sends it on EVERY request; centralizing it here (default in the
+        # dataclass) closes the gap for the ~8 templates that had empty params and
+        # omitted it (cars, finhealth presets, my_home, payment_shortcuts, ...).
         for k, v in (("appName", self.app_name), ("appVersion", self.app_version),
                      ("origin", self.origin), ("platform", self.platform),
                      ("ccc", self.ccc), ("cpswc", self.cpswc),
                      ("connectionType", self.connection_type),
-                     ("vendor", self.vendor), ("client_version", self.client_version)):
+                     ("vendor", self.vendor), ("client_version", self.client_version),
+                     ("inache", self.inache)):
             if v and k not in params:
                 params[k] = v
         if overrides:
             params.update(overrides)
         headers = {k: v for k, v in tpl.get("headers", {}).items()
                    if k.lower() not in _LIVE_HEADERS}
+        # Inject the standard mobile-client headers (X-App-Name/Version/Platform,
+        # X-Lang, Accept-Language, mobile User-Agent). Strict hosts (myauto → cars
+        # HTTP 400, id → userinfo 401) reject requests missing them; lenient hosts
+        # (api.t-bank-app.ru BFF) ignore extras. setdefault ⇒ an explicit template
+        # header or the Authorization/Cookie below still wins.
+        for k, v in self._mobile_headers().items():
+            headers.setdefault(k, v)
         headers["Authorization"] = "Bearer " + self.access_token
         # messenger (tm.t-bank-app.ru) uses ONLY the tmsgSessionID cookie, minted
         # on demand from the access_token via issueTokenBySSO; other hosts use the
