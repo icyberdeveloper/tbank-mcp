@@ -120,6 +120,17 @@ _LIVE_HEADERS = {"authorization", "cookie"}
 # app_version, e.g. 7.31.6 -> 7*1_000_000 + 31*10_000 + 6*1_000 = 7316000.
 _IOS_VERSION = "17.5.1"
 
+# Hosts where the real app sends X-App-Name/X-App-Version/X-Platform (capture-
+# verified per-host header profile). ONLY these — everywhere else (the BFF
+# api.t-bank-app.ru, lifestyle grocery, id, api-invest, ...) the app sends just
+# x-lang. Injecting X-App-* on those hosts diverges from the app and BREAKS the
+# grocery cart (lifestyle segments carts by client context → set "OK" but the
+# goods land in a different bucket → cart reads empty). Keep this list capture-tight.
+_STRICT_XAPP_HOSTS = {
+    "social-api.t-bank-app.ru", "api-invest-gw.t-bank-app.ru",
+    "myauto.t-bank-app.ru", "polls.tbank.ru",
+}
+
 
 @dataclass
 class MobileSession:
@@ -311,22 +322,24 @@ class MobileSession:
             return ""
         return f"iPhone/iOS({_IOS_VERSION})/TCSMB/{self.app_version}({build})"
 
-    def _mobile_headers(self) -> dict:
-        """Standard mobile-client headers the real app sends on EVERY request,
-        derived from session attributes. Strict hosts validate these at the gateway:
-        ``myauto.t-bank-app.ru`` (cars) returns HTTP 400 without ``X-App-*`` +
-        the mobile UA; ``id.t-bank-app.ru`` (userinfo) needs equivalent client
-        context. Returning them centrally fixes the whole family (profile-401,
-        cars-400) instead of patching one endpoint at a time. Values come from the
-        session, so an explicit template header still wins via setdefault below."""
+    def _mobile_headers(self, host_url: str = "") -> dict:
+        """Mobile-client headers the real app sends, derived from session attrs.
+        ``X-Lang``/``Accept-Language``/``Accept``/mobile ``User-Agent`` are sent on
+        basically every API host → injected always. But ``X-App-Name``/``Version``/
+        ``Platform`` are sent ONLY on ``_STRICT_XAPP_HOSTS`` (capture-verified
+        per-host profile). Injecting them elsewhere diverges from the app and breaks
+        the grocery cart on lifestyle. An explicit template header still wins
+        (setdefault below)."""
+        hn = (urlparse(host_url).hostname or host_url or "").lower()
         h: dict[str, str] = {"X-Lang": "ru", "Accept-Language": "ru",
                              "Accept": "application/json"}
-        if self.app_name:
-            h["X-App-Name"] = self.app_name
-        if self.app_version:
-            h["X-App-Version"] = self.app_version
-        if self.platform:
-            h["X-Platform"] = self.platform
+        if hn in _STRICT_XAPP_HOSTS:
+            if self.app_name:
+                h["X-App-Name"] = self.app_name
+            if self.app_version:
+                h["X-App-Version"] = self.app_version
+            if self.platform:
+                h["X-Platform"] = self.platform
         ua = self._mobile_ua()
         if ua:
             h["User-Agent"] = ua
@@ -361,26 +374,26 @@ class MobileSession:
                 params[k] = v
         if overrides:
             params.update(overrides)
+        host = tpl.get("host") or self.base_url
         headers = {k: v for k, v in tpl.get("headers", {}).items()
                    if k.lower() not in _LIVE_HEADERS}
-        # Inject the standard mobile-client headers (X-App-Name/Version/Platform,
-        # X-Lang, Accept-Language, mobile User-Agent). Strict hosts (myauto → cars
-        # HTTP 400, id → userinfo 401) reject requests missing them; lenient hosts
-        # (api.t-bank-app.ru BFF) ignore extras. setdefault ⇒ an explicit template
-        # header or the Authorization/Cookie below still wins.
-        for k, v in self._mobile_headers().items():
+        # Inject the mobile-client headers the real app sends on this host:
+        # x-lang/Accept-Language/Accept/UA always; X-App-Name/Version/Platform ONLY
+        # on _STRICT_XAPP_HOSTS (elsewhere the app sends just x-lang — injecting
+        # X-App-* there breaks the lifestyle grocery cart). setdefault ⇒ an explicit
+        # template header or Authorization/Cookie below still wins.
+        for k, v in self._mobile_headers(host).items():
             headers.setdefault(k, v)
         headers["Authorization"] = "Bearer " + self.access_token
         # messenger (tm.t-bank-app.ru) uses ONLY the tmsgSessionID cookie, minted
         # on demand from the access_token via issueTokenBySSO; other hosts use the
         # SSO/sessionid cookie_str.
-        if "tm.t-bank-app.ru" in (tpl.get("host") or ""):
+        if "tm.t-bank-app.ru" in host:
             self._ensure_tmsg()
             if self.tmsg_session_id:
                 headers["Cookie"] = f"tmsgSessionID={self.tmsg_session_id}"
         elif self.cookie_str:
             headers["Cookie"] = self.cookie_str
-        host = tpl.get("host") or self.base_url
         path = path_override or tpl["path"]
         url = f"{host.rstrip('/')}/{path.lstrip('/')}"
         method = (tpl.get("method") or "GET").upper()
