@@ -43,6 +43,12 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 3. Grocery cart assembly → order → pay  (Город) — PROVEN end-to-end
 
+> **Store context is mandatory.** Get `app_id`/`point_id` from `grocery_stores()` and pass
+> them to `grocery_search` / `grocery_plan_order` / `grocery_add_to_cart` / `grocery_cart` /
+> `grocery_checkout`. There is NO silent default store — without explicit context the tools
+> return `NO_STORE_CONTEXT`, and mixing contexts makes the cart look empty. Keep app_id/pointId
+> identical across the whole add → cart → checkout flow.
+
 1. `grocery_goods(category_id, app_id, point_id, page)` → search catalog.
    Requires: `sortBy=DEFAULT` (not `sort`), `onlyDirectGoods=false`, `categoryId`.
 2. `grocery_cart_set(body)` → set cart on mobile API. Auto-fetches full address

@@ -22,23 +22,23 @@ cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
 invest_portfolio | invest_operations | invest_securities | pension | broker_margin | shared.
 
 ## `grocery_add_to_cart`
-Добавить товары в корзину. items = JSON [{id, count}, ...].
+Добавить товары в корзину. items = JSON [{id, count}, ...]. Обязательны app_id/point_id.
 
 ## `grocery_cart`
-Содержимое корзины.
+Содержимое корзины. Обязательны app_id/point_id (те же, что в grocery_add_to_cart).
 
 ## `grocery_checkout`
-Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
+Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. Обязательны app_id/point_id.
 
 ## `grocery_plan_order`
 Спланировать заказ: для каждого ингредиента ищет (custom_ordered → global).
-ingredients = JSON массив, напр. ["свёкла","говядина","капуста"].
+ingredients = JSON массив, напр. ["свёкла","говядина","капуста"]. Обязательны app_id/point_id.
 
 ## `grocery_search`
-Поиск товара по названию. Возвращает товары с тегом likely_raw (сырой/готовый).
+Поиск товара по названию. Возвращает товары с тегом likely_raw (сырой/готовый). Обязательны app_id/point_id.
 
 ## `grocery_stores`
-Список магазинов (название, appId, доставка, кешбэк).
+Список магазинов (название, appId, pointId, доставка, кешбэк). Источник app_id/point_id для всех остальных grocery-тулов.
 
 ## `keepalive`
 Пинг — продлить сессию.

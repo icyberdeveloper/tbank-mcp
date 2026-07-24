@@ -105,6 +105,8 @@ export TBANK_PHONE="+79991234567"
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, requisites, invest_accounts, invest_portfolio, etc.
 
+Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`) require `app_id` + `point_id` taken from `grocery_stores()` — there's no silent default store, so add/cart/checkout always operate on the same cart (no more "Корзина пуста" after adding).
+
 ## Skills (6)
 
 | Skill | What it does |

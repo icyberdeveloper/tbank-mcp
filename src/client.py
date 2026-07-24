@@ -729,25 +729,31 @@ class MobileSession:
 
     # ---- grocery (Город) shopping + checkout + payment (cookie/Bearer, no sig) ----
 
-    def grocery_cart_get(self) -> dict:
-        return self._call_read("grocery_cart_get")
+    def grocery_cart_get(self, app_id: str = "", point_id: str = "") -> dict:
+        """Read the cart for a specific store. app_id/point_id scope which
+        store's cart is read — without them the backend returns the default
+        (often empty) cart, which is the 'Корзина пуста' mismatch."""
+        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
+        return self._call_read("grocery_cart_get", overrides=ov or None)
 
-    def grocery_cart_set(self, body: dict | None = None) -> dict:
+    def grocery_cart_set(self, body: dict | None = None,
+                         app_id: str = "", point_id: str = "") -> dict:
         """Build/set the grocery cart (POST). If body is None, gets the full
         delivery address (with details) from GET cart + uses it — the backend
         requires address.details (flat, houseType, etc.) or it crashes."""
+        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
         if body is None:
             # get the full address (with details) from the current cart
-            cart = self._call_read("grocery_cart")
+            cart = self._call_read("grocery_cart_get", overrides=ov or None)
             if isinstance(cart, dict):
                 delivery = cart.get("delivery", {}) or cart.get("cart", {}).get("delivery", {})
                 addr = delivery.get("address", {})
-                pid = delivery.get("pointId", "700")
+                pid = delivery.get("pointId", point_id or "700")
                 body = {
                     "goods": [], "cartSetMode": "SINGLE_CART",
                     "delivery": {"isExpress": False, "comment": "", "pointId": pid,
                                  "deliveryType": "IN_PERSON", "address": addr}}
-        return self._call_read("grocery_cart_set", body=body, overrides={"appId": app_id, "pointId": point_id})
+        return self._call_read("grocery_cart_set", body=body, overrides=ov or None)
 
     def grocery_cart_check(self) -> dict:
         return self._call_read("grocery_cart_check")
@@ -1393,12 +1399,17 @@ class MobileSession:
                          "deliveryType": "IN_PERSON", "address": addr}}
         return self._call_read("grocery_cart_set", body=body, overrides={"appId": app_id, "pointId": point_id})
 
-    def grocery_checkout(self, app_id: str = "578", client_email: str = "", account: str = "") -> dict:
+    def grocery_checkout(self, app_id: str = "", point_id: str = "",
+                         client_email: str = "", account: str = "") -> dict:
         """Full grocery checkout: web cart sync → deliveries → order/create →
-        payment_gate_pay. One call → order paid. Requires Playwright."""
+        payment_gate_pay. One call → order paid. Requires Playwright.
+        The mobile cart read is store-aware (appId+pointId). NOTE: src/checkout.py
+        still hardcodes appId=578 (Азбука Вкуса) in the Playwright web flow;
+        generalizing the web flow to other stores is Phase 3 (#7/#8)."""
         from .checkout import checkout as _checkout
-        # get sum from mobile cart (fallback if web cart not available)
-        cart = self._call_read("grocery_cart_get", overrides={"appId": app_id})
+        # get sum from the SAME store's cart (appId + pointId) — not a bare appId
+        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
+        cart = self._call_read("grocery_cart_get", overrides=ov or None)
         sum_val = 0
         if isinstance(cart, dict):
             sum_val = cart.get("goodsSum", 0) or cart.get("sum", 0)

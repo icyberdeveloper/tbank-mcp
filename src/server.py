@@ -80,6 +80,19 @@ def _err(e):
     return f"{type(e).__name__}: {e}"
 
 
+def _store(app_id: str, point_id: str) -> tuple[str, str]:
+    """Resolve explicit grocery store context. The agent MUST pass appId/pointId
+    taken from grocery_stores() — there is NO silent 578/700 default here.
+    Without this, add_to_cart / cart / checkout would silently operate on
+    different stores and the cart would look empty ('Корзина пуста')."""
+    if not app_id or not point_id:
+        raise TbankApiError("NO_STORE_CONTEXT",
+            "Передай app_id и point_id из grocery_stores() в КАЖДЫЙ grocery-тул. "
+            "Без явного магазина add_to_cart, cart и checkout разъедутся по разным "
+            "корзинам — дефолтный магазин вслепую не подставляется.")
+    return app_id, point_id
+
+
 # ── LOGIN (4) ──────────────────────────────────────────────
 
 @mcp.tool()
@@ -249,24 +262,30 @@ def grocery_stores() -> str:
         return _err(e)
 
 @mcp.tool()
-def grocery_search(query: str) -> str:
-    """Поиск товара по названию. Возвращает товары с тегом likely_raw (сырой/готовый)."""
+def grocery_search(query: str, app_id: str = "", point_id: str = "") -> str:
+    """Поиск товара по названию. app_id/point_id — из grocery_stores() (обязательны).
+    Возвращает товары с тегом likely_raw (сырой/готовый)."""
     try:
         s = _require(); s.ensure_fresh()
-        results = s.grocery_search(query)
-        return "\n".join(f"- id={r['id']} | {r['name'][:40]} | {r['price']}₽ | {'RAW' if r.get('likely_raw') else 'PREP'}"
+        app_id, point_id = _store(app_id, point_id)
+        results = s.grocery_search(query, app_id=app_id, point_id=point_id)
+        body = "\n".join(f"- id={r['id']} | {r['name'][:40]} | {r['price']}₽ | {'RAW' if r.get('likely_raw') else 'PREP'}"
             for r in results) or f"Не нашёл '{query}'"
+        return f"[store appId={app_id} pointId={point_id}]\n" + body
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def grocery_plan_order(ingredients: str) -> str:
+def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -> str:
     """Спланировать заказ: для каждого ингредиента ищет (custom_ordered → global).
-    ingredients = JSON массив, напр. ["свёкла","говядина","капуста"]."""
+    ingredients = JSON массив, напр. ["свёкла","говядина","капуста"].
+    app_id/point_id — из grocery_stores() (обязательны)."""
     try:
         s = _require(); s.ensure_fresh()
-        plan = s.grocery_plan_order(json.loads(ingredients))
-        lines = [f"Total: {plan['total_sum']}₽"]
+        app_id, point_id = _store(app_id, point_id)
+        plan = s.grocery_plan_order(json.loads(ingredients),
+                                    store_app_id=app_id, store_point_id=point_id)
+        lines = [f"[store appId={app_id} pointId={point_id}] Total: {plan['total_sum']}₽"]
         for i in plan["items"]:
             lines.append(f"✓ {i['name'][:40]} | {i['price']}₽ | {i['source']}")
         if plan["missing"]:
@@ -276,36 +295,56 @@ def grocery_plan_order(ingredients: str) -> str:
         return _err(e)
 
 @mcp.tool()
-def grocery_add_to_cart(items: str) -> str:
-    """Добавить товары в корзину. items = JSON [{id, count}, ...]."""
+def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str:
+    """Добавить товары в корзину. items = JSON [{id, count}, ...].
+    app_id/point_id — из grocery_stores() (обязательны). Запомни их — тот же
+    магазин нужен для grocery_cart и grocery_checkout."""
     try:
         s = _require(); s.ensure_fresh()
-        r = s.grocery_add_to_cart(json.loads(items))
+        app_id, point_id = _store(app_id, point_id)
+        r = s.grocery_add_to_cart(json.loads(items), app_id=app_id, point_id=point_id)
         pl = r if isinstance(r, dict) else {}
-        return f"OK: goodsSum={pl.get('goodsSum','?')}"
+        return f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl.get('goodsSum','?')}"
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def grocery_cart() -> str:
-    """Содержимое корзины."""
+def grocery_cart(app_id: str = "", point_id: str = "") -> str:
+    """Содержимое корзины. app_id/point_id — из grocery_stores() (обязательны) и
+    должны совпадать с теми, что использовались в grocery_add_to_cart."""
     try:
         s = _require(); s.ensure_fresh()
-        r = s._call_read("grocery_cart_get")
+        app_id, point_id = _store(app_id, point_id)
+        r = s.grocery_cart_get(app_id=app_id, point_id=point_id)
         cart = r.get("cart", r) if isinstance(r, dict) else {}
-        goods = cart.get("goods", [])
-        return "\n".join(f"- {g.get('name','')[:35]} | {g.get('count',1)} | "
+        goods = cart.get("goods", []) if isinstance(cart, dict) else []
+        # defensive context check: if the response echoes a DIFFERENT store than
+        # requested, flag it instead of silently showing an empty cart.
+        resp_app = str(cart.get("applicationId") or cart.get("appId") or "")
+        resp_point = str((cart.get("delivery", {}) or {}).get("pointId")
+                         or cart.get("pointId") or "")
+        mismatch = ""
+        if resp_app and resp_app != str(app_id):
+            mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ appId={resp_app} ≠ запрошенный {app_id}\n"
+        elif resp_point and resp_point != str(point_id):
+            mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ pointId={resp_point} ≠ запрошенный {point_id}\n"
+        body = "\n".join(f"- {g.get('name','')[:35]} | {g.get('count',1)} | "
             f"{(g.get('price') or {}).get('value','?')}₽" for g in goods) or "Корзина пуста"
+        return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{body}"
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def grocery_checkout() -> str:
-    """Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ."""
+def grocery_checkout(app_id: str = "", point_id: str = "") -> str:
+    """Полный чекаут: корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
+    app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
+    ВНИМАНИЕ: web-flow (src/checkout.py) пока поддерживает appId=578; для других
+    магазинов нужна Phase 3. Всегда показывай состав и сумму и жди явного подтверждения."""
     try:
         s = _require(); s.ensure_fresh()
-        r = s.grocery_checkout()
-        return f"✓ ORDER {r['order_id']} PAID. sum={r['sum']}₽"
+        app_id, point_id = _store(app_id, point_id)
+        r = s.grocery_checkout(app_id=app_id, point_id=point_id)
+        return f"[store appId={app_id} pointId={point_id}] ✓ ORDER {r['order_id']} PAID. sum={r['sum']}₽"
     except Exception as e:
         return _err(e)
 
