@@ -41,6 +41,11 @@ DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
 # custom_ordered category is Azbuka-specific), NEVER as a silent default.
 AZBUKA_APP_ID = "578"
 AZBUKA_POINT_ID = "700"
+# SBP "pointer type" enum for a phone-number pointer. Verified CONSTANT across all
+# phone/SBP transfers in captures.xml (6 different recipients, different bankMemberId,
+# always pointerType="8276") — it is NOT the recipient's bank code (that's bankMemberId),
+# so it's a fixed protocol constant, analogous to currencyCode "643" for RUB.
+SBP_PHONE_POINTER_TYPE = "8276"
 
 
 def _need_store(app_id: str, point_id: str) -> tuple[str, str]:
@@ -1534,7 +1539,7 @@ class MobileSession:
             "no Current RUB account with a positive balance to use as transfer source")
 
     def transfer(self, amount: float, to_account: str, description: str = "",
-                 provider: str = "p2p-anybank", pointer_type: str = "8276",
+                 provider: str = "p2p-anybank", pointer_type: str = SBP_PHONE_POINTER_TYPE,
                  bank_member_id: str = "", masked_fio: str = "",
                  pointer_link_id: str = "") -> Any:
         """Transfer via signed /v1/pay (REAL money). Body shape is capture-verified
