@@ -172,19 +172,26 @@ class MobileSession:
             "Accept": "application/json",
             "x-lang": "ru",
         })
-        if _CA_BUNDLE:
-            self._http.verify = _CA_BUNDLE
         if self.proxy:
             self._http.proxies = {"http": self.proxy, "https": self.proxy}
-        # self-healing TLS: rebuild the CA bundle on startup (handles cert
-        # rotation since the last run) + mount an adapter that retries on SSL
-        # failure by refreshing the host's chain into the bundle.
+        # self-healing TLS: rebuild the CA bundle on startup (handles cert rotation
+        # since the last run) + mount an adapter that retries on SSL failure by
+        # refreshing the host's chain into the bundle.
+        _bundle_path = _CA_BUNDLE  # latched at import; may be None on a fresh machine
         try:
             from . import tls as _tls
             _tls.rebuild_bundle()
             self._http.mount("https://", _tls.RobustTLSAdapter())
+            _bundle_path = _tls.BUNDLE  # canonical path — now exists (rebuild built it)
         except Exception:
             pass
+        # Set verify AFTER rebuild_bundle, re-checked at runtime. The module-level
+        # _CA_BUNDLE is evaluated ONCE at import: on a fresh machine where ca/bundle.pem
+        # didn't exist yet, it latches to None and the old `if _CA_BUNDLE: verify=...`
+        # (run BEFORE rebuild) never set verify → requests fell back to system CAs (no
+        # Russian Trusted Root CA) → SSL CERTIFICATE_VERIFY_FAILED. (#latch-bug)
+        if _bundle_path and os.path.exists(_bundle_path):
+            self._http.verify = _bundle_path
         # Normalize token_url: a legacy session.json may have stored an explicit
         # "" (the old default). An empty value would make refresh() POST to "",
         # so force the canonical default. The dataclass default alone can't
