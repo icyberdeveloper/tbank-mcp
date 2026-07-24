@@ -249,6 +249,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if email:
                 order_obj["clientEmail"] = email
             order_body = json.dumps(order_obj)
+            # Point of no return: a crash / network drop during or after this POST
+            # means the backend MAY have created the order without us seeing the
+            # response → record the blocking ``order_posting`` state NOW so the
+            # server's generic-exception handler treats it as UNKNOWN (no blind retry).
+            _safe_record(attempt_id, "order_create", "order_posting", amount=actual_sum)
             _t0 = time.time()
             order_res = page.evaluate("""async (a) => {
                 const o = JSON.parse(a.body);

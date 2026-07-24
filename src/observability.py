@@ -78,9 +78,16 @@ def _redact_value(v):
 
 
 def _append(rec: dict) -> None:
+    """Append one event with 0600 perms (owner-only), mirroring journal._append /
+    server._save_session. Previously used a bare ``open(..., "a")`` → 0664."""
     os.makedirs(os.path.dirname(EVENTS_FILE), exist_ok=True)
-    with open(EVENTS_FILE, "a", encoding="utf-8") as fh:
+    fd = os.open(EVENTS_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(EVENTS_FILE, 0o600)  # enforce 0600 even if the file pre-existed
+    except OSError:
+        pass
 
 
 def emit(step: str, **fields) -> None:

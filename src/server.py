@@ -7,9 +7,11 @@ Run: python -m src.server
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -22,6 +24,11 @@ _SESSION_FILE = os.environ.get(
     "TBANK_SESSION",
     os.path.expanduser("~/.local/share/tbank-mcp/session.json"),
 )
+# Serializes grocery checkouts. FastMCP runs sync tools in the event-loop thread,
+# but checkout is async + offloaded to a worker thread (sync_playwright cannot run
+# inside the loop). A concurrent checkout would race two browsers on one cart →
+# duplicate order. This lock makes the whole attempt body mutually exclusive.
+_CHECKOUT_LOCK = threading.Lock()
 
 
 def _blank_session():
@@ -353,17 +360,34 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         return _err(e)
 
 @mcp.tool()
-def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) -> str:
+async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) -> str:
     """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
     Счёт оплаты выбирается автоматически (первый Current RUB с балансом).
     При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
     сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
     пользователь ЯВНО подтвердил, что прошлого заказа нет. Всегда показывай состав и
-    сумму и жди явного подтверждения перед вызовом."""
+    сумму и жди явного подтверждения перед вызовом.
+
+    Реализация: тул асинхронный и запускает браузер Playwright в отдельном worker-потоке
+    (asyncio.to_thread) — sync_playwright падает, если звать его внутри event-loop, а
+    FastMCP крутит sync-тулы именно в loop. Если тул падает с Playwright-ошибкой —
+    проверь `python -m playwright install chromium` (в окружении MCP)."""
     try:
-        from . import journal
-        from .checkout import CheckoutError, CheckoutUnknown
+        return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force)
+    except Exception as e:
+        # errors before an attempt was created (NO_SESSION, NO_STORE_CONTEXT, etc.)
+        return _err(e)
+
+
+def _do_grocery_checkout(app_id: str, point_id: str, force: bool) -> str:
+    """Sync checkout body — runs in a worker thread (no running event loop there, so
+    Playwright's sync API works; calling it directly in FastMCP's loop raises
+    "It looks like you are using Playwright Sync API inside the asyncio loop")."""
+    from . import journal
+    from . import observability as obs
+    from .checkout import CheckoutError, CheckoutUnknown
+    with _CHECKOUT_LOCK:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
         # 1. read the cart → goods + amount + a stable cart hash
@@ -374,7 +398,7 @@ def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) 
             return f"[store appId={app_id} pointId={point_id}] Корзина пуста — не из чего оформлять заказ."
         amount = cart.get("goodsSum", 0) or cart.get("sum", 0) or 0
         chash = journal.cart_hash_of(goods)
-        # 2. block-check: an unknown/paid prior attempt for THIS cart → no auto-retry (#10)
+        # 2. block-check: a blocking prior attempt for THIS cart → no auto-retry (#10)
         blocked, last = journal.is_retry_blocked(chash)
         if blocked and not force:
             return (f"[store appId={app_id} pointId={point_id}] BLOCKED: предыдущая попытка checkout для "
@@ -386,6 +410,8 @@ def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) 
         #    agreement from user/payment/account/last (capture-verified) + customer email
         #    from get-customer-information. #8/#9
         attempt_id = journal.new_attempt(app_id, point_id, chash, amount)
+        obs.emit("checkout_start", attempt_id=attempt_id, app_id=app_id,
+                 point_id=point_id, amount=amount, item_count=len(goods))
         try:
             r = s.grocery_checkout(app_id=app_id, point_id=point_id,
                                    sum_val=amount, attempt_id=attempt_id)
@@ -395,10 +421,30 @@ def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) 
             return (f"[store appId={app_id} pointId={point_id}] UNKNOWN RESULT (attempt {attempt_id}): {e} "
                     f"Повтор ЗАБЛОКИРОВАН — заказ мог создаться. Проверь grocery_attempts() / grocery_order_status() и заказ в приложении.")
         except CheckoutError as e:
-            journal.record(attempt_id, "failed", "failed", error=str(e)[:160])
+            journal.record(attempt_id, "checkout", "failed", error=str(e)[:160])
+            obs.emit("checkout", attempt_id=attempt_id, result="failed",
+                     error=str(e)[:160], blame="client")
             return _err(e)
-    except Exception as e:
-        return _err(e)
+        except Exception as e:
+            # A runtime error checkout.py did NOT classify as CheckoutError/Unknown.
+            # Historically this was the Playwright "Sync API inside asyncio loop" Error
+            # (now impossible: we run in a worker thread), but it also covers any other
+            # crash. Decide retry-safety by how far we got: if we already passed the
+            # order/create point-of-no-return (last status blocking) → UNKNOWN, else
+            # FAILED (safe). Without this, the attempt stayed at `started` and a retry
+            # was wrongly allowed even if it crashed mid-order/create.
+            err_msg = f"{type(e).__name__}: {str(e)[:120]}"
+            already_blocking = journal.last_status_of_attempt(attempt_id) in journal.BLOCKING_STATUSES
+            obs.emit("checkout", attempt_id=attempt_id,
+                     result="unknown" if already_blocking else "failed",
+                     error=err_msg, blame="client")
+            if already_blocking:
+                journal.record(attempt_id, "checkout", "unknown", error=err_msg)
+                return (f"[store appId={app_id} pointId={point_id}] UNKNOWN RESULT (attempt {attempt_id}, "
+                        f"runtime {type(e).__name__}). Дошли до order/create? Повтор ЗАБЛОКИРОВАН — "
+                        f"проверь grocery_attempts()/diagnostics() и заказ в приложении. ({err_msg})")
+            journal.record(attempt_id, "checkout", "failed", error=err_msg)
+            return _err(e)
 
 @mcp.tool()
 def grocery_attempts() -> str:
