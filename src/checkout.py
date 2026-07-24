@@ -38,6 +38,7 @@ import json
 import time
 
 from . import journal
+from . import observability as obs
 
 
 class CheckoutError(RuntimeError):
@@ -181,6 +182,7 @@ def checkout(session, app_id: str = "578", point_id: str = "",
 
             # 3. POST deliveries (appId + pointId) → CHECK status. Fire-and-forget
             # was the old bug: a delivery failure silently led to a stale sum + bad order.
+            _t0 = time.time()
             deliv = page.evaluate("""async (args) => {
                 const r = await fetch('/api/supreme/lifestyle/api/grocery/deliveries?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios&appId=' + args.appId + '&pointId=' + args.pointId, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -188,10 +190,16 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                 });
                 return {status: r.status, body: await r.json().catch(() => ({}))};
             }""", {"appId": app_id, "pointId": point_id})
+            _dur = int((time.time() - _t0) * 1000)
             dbody = deliv.get("body", {}) if isinstance(deliv, dict) else {}
             d_err = ""
+            d_code = ""
             if isinstance(dbody, dict):
-                d_err = str(dbody.get("errorMessage") or dbody.get("errorCode") or "")
+                d_err = str(dbody.get("errorMessage") or "")
+                d_code = str(dbody.get("errorCode") or dbody.get("resultCode") or dbody.get("code") or "")
+            obs.emit("delivery", attempt_id=attempt_id, app_id=app_id, point_id=point_id,
+                     item_count=pre_count, http_status=deliv.get("status"), app_code=d_code,
+                     duration_ms=_dur, blame=obs.blame_of(deliv.get("status"), d_code))
             if deliv.get("status", 0) >= 400 or d_err:
                 raise CheckoutError(
                     f"deliveries failed (http={deliv.get('status')}, err={d_err[:120]})")
@@ -215,6 +223,7 @@ def checkout(session, app_id: str = "578", point_id: str = "",
             if client_email:
                 order_obj["clientEmail"] = client_email
             order_body = json.dumps(order_obj)
+            _t0 = time.time()
             order_res = page.evaluate("""async (body) => {
                 const o = JSON.parse(body);
                 const r = await fetch('/api/supreme/lifestyle/api/grocery/order/create?appId=' + o.appId + '&appName=grocery_evo&appVersion=7.31.6&platform=webview_ios&sum=' + o.sum, {
@@ -222,9 +231,16 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                 });
                 return {status: r.status, body: await r.json().catch(() => ({}))};
             }""", order_body)
+            _dur = int((time.time() - _t0) * 1000)
             obody = order_res.get("body", {}) if isinstance(order_res, dict) else {}
             order = obody.get("payload", {}).get("order", {}) if isinstance(obody, dict) else {}
             order_id = order.get("id", "")
+            o_code = str(obody.get("resultCode") or obody.get("errorCode") or obody.get("code") or "") if isinstance(obody, dict) else ""
+            obs.emit("order_create", attempt_id=attempt_id, app_id=app_id,
+                     item_count=len(post_goods), amount=actual_sum,
+                     http_status=order_res.get("status"), app_code=o_code,
+                     order_id_present=bool(order_id), duration_ms=_dur,
+                     blame=obs.blame_of(order_res.get("status"), o_code))
             if not order_id:
                 # We POSTed order/create but got no orderId. Statically we CANNOT prove
                 # the backend created nothing → treat as UNKNOWN (block retry). (#10)
@@ -245,16 +261,24 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                          "holdUsingMapi": False, "applicationId": app_id},
                 "amount": {"type": "simple", "amount": actual_sum, "currencyCode": "643"},
             })
+            _t0 = time.time()
             pay_res = page.evaluate("""async (body) => {
                 const r = await fetch('/api/common/pg-api/v1/payment-gate/payments?origin=web,ib5,platform', {
                     method: 'POST', headers: {'Content-Type': 'application/json'}, body: body
                 });
                 return {status: r.status, body: await r.json().catch(() => ({}))};
             }""", pay_body)
+            _dur = int((time.time() - _t0) * 1000)
             pbody = pay_res.get("body", {}) if isinstance(pay_res, dict) else {}
             stage = pbody.get("stage", {}) if isinstance(pbody, dict) else {}
             payment_id = pbody.get("paymentId", "") if isinstance(pbody, dict) else ""
             status = stage.get("status", "")
+            p_code = str(pbody.get("resultCode") or pbody.get("errorCode") or status or "") if isinstance(pbody, dict) else ""
+            obs.emit("payment", attempt_id=attempt_id, app_id=app_id, amount=actual_sum,
+                     http_status=pay_res.get("status"), app_code=p_code,
+                     order_id_present=bool(order_id), payment_id_present=bool(payment_id),
+                     payment_status=status, duration_ms=_dur,
+                     blame=obs.blame_of(pay_res.get("status"), p_code))
             if status == "SUCCESS":
                 _safe_record(attempt_id, "payment", "paid",
                              order_id=order_id, payment_id=payment_id)

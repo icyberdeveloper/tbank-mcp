@@ -45,3 +45,8 @@ agent (Claude/Codex/etc.), then call `flows` for the ordered tool sequences.
   Reconcile via `grocery_attempts`, and pass `force=True` only after the user
   confirms no order exists. The payment account is auto-selected (first Current
   RUB with a positive balance).
+- Checkout stages and session refresh emit redacted structured events to
+  `~/.local/share/tbank-mcp/events.jsonl` — step, http_status, app_code, blame,
+  duration, order/payment id presence. NEVER tokens, cookies, address, phone,
+  email, or account numbers. Call `diagnostics()` to reconstruct an attempt / find
+  the last confirmed step.

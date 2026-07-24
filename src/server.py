@@ -149,18 +149,30 @@ def refresh_session() -> str:
     """Обновить сессию. Сначала пробует refresh_token, при invalid_grant —
     silent re-login через SSO_SESSION (без OTP). Если оба пути не работают — REAUTH_REQUIRED."""
     try:
+        from . import observability as obs
         s = _require()
+        grant = None
         try:
             s.refresh()
+            grant = "refresh_token"
         except SessionExpired:
             # refresh_token invalid — try silent re-login via SSO_SESSION
             if s.sso_login_cookie and s.auth_step_fingerprint:
                 s.silent_relogin()
+                grant = "sso_silent"
             else:
+                obs.emit("refresh", grant="none", result="reauth_required", blame="app",
+                         error="refresh_token invalid, no SSO_SESSION")
                 return "REAUTH_REQUIRED: refresh_token истёк и нет SSO_SESSION. Нужен полный логин (login + OTP + password)."
         _save_session(s)
+        obs.emit("refresh", grant=grant, result="ok")
         return f"OK. sessionid={s.mobile_sessionid[:12]}…"
     except Exception as e:
+        try:
+            from . import observability as obs
+            obs.emit("refresh", result="error", blame="app", error=str(e)[:160])
+        except Exception:
+            pass
         return _err(e)
 
 @mcp.tool()
@@ -396,6 +408,49 @@ def grocery_attempts() -> str:
             f"| {r.get('amount', '?')}₽ | order={r.get('order_id') or '-'} "
             f"| {(r.get('error') or r.get('payment_status') or '')[:60]}"
             for r in rows)
+    except Exception as e:
+        return _err(e)
+
+
+# ── DIAGNOSTICS (1) ────────────────────────────────────────
+
+@mcp.tool()
+def diagnostics(limit: int = 40) -> str:
+    """Недавние redacted-события (checkout delivery/order/payment + refresh сессии)
+    для диагностики — БЕЗ секретов. reconstruct попытку / найти последний
+    подтверждённый шаг. Источник: ~/.local/share/tbank-mcp/events.jsonl."""
+    try:
+        from . import observability as obs
+        rows = obs.recent(limit)
+        if not rows:
+            return "Событий пока нет (events.jsonl пуст)."
+        lines = []
+        for r in rows:
+            parts = [f"step={r.get('step')}", f"blame={r.get('blame', '-')}"]
+            if r.get("attempt_id"):
+                parts.append(f"attempt={r.get('attempt_id')}")
+            if r.get("app_id"):
+                parts.append(f"appId={r.get('app_id')}")
+            if "http_status" in r:
+                parts.append(f"http={r.get('http_status')}")
+            if r.get("app_code"):
+                parts.append(f"code={r.get('app_code')}")
+            if "amount" in r:
+                parts.append(f"sum={r.get('amount')}")
+            if "order_id_present" in r:
+                parts.append(f"order={'Y' if r.get('order_id_present') else 'N'}")
+            if "payment_id_present" in r:
+                parts.append(f"payId={'Y' if r.get('payment_id_present') else 'N'}")
+            if r.get("duration_ms") is not None:
+                parts.append(f"{r.get('duration_ms')}ms")
+            if r.get("result"):
+                parts.append(f"result={r.get('result')}")
+            if r.get("payment_status"):
+                parts.append(f"payStatus={r.get('payment_status')}")
+            if r.get("error"):
+                parts.append(f"err={str(r.get('error'))[:50]}")
+            lines.append(" | ".join(parts))
+        return "\n".join(lines)
     except Exception as e:
         return _err(e)
 

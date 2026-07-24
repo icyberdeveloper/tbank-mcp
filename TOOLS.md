@@ -11,6 +11,11 @@
 ## `confirm_pin`
 Отправить PIN (re-auth).
 
+## `diagnostics`
+Недавние redacted-события (checkout delivery/order/payment + refresh сессии) для
+диагностики — без секретов. reconstruct попытку / найти последний подтверждённый шаг.
+Источник: `~/.local/share/tbank-mcp/events.jsonl`.
+
 ## `flows`
 Гид по флоу (заказ продуктов, переводы, логин, мессенджер, инвест).
 

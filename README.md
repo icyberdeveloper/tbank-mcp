@@ -4,7 +4,7 @@
 
 ## Features
 
-- **26 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
+- **27 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
 - **6 skills**: grocery order, bill pay, transfer, budget analysis, invest advisor, login
 - **Self-healing TLS**: handles Russian Trusted Root CA + HARICA cert rotation
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
@@ -91,7 +91,7 @@ export TBANK_PHONE="+79991234567"
 }
 ```
 
-## Tools (26)
+## Tools (27)
 
 | Group | Tools |
 |---|---|
@@ -101,7 +101,7 @@ export TBANK_PHONE="+79991234567"
 | **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer`, `payment_commission` |
-| **Utility** | `flows` |
+| **Utility** | `flows`, `diagnostics` |
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, requisites, invest_accounts, invest_portfolio, etc.
 
@@ -126,6 +126,9 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
   При старте MCP логирует только путь/размер/права доступа, без токенов и cookies.
 - **Пароль/PIN** — НЕ в git, НЕ в коде, НЕ в контексте LLM (если используешь login_cli.py).
 - **0 hardcoded secrets** in code (verified by audit).
+- **`events.jsonl` + `attempts.jsonl`** — redacted diagnostics-логи (`~/.local/share/tbank-mcp/`).
+  Содержат только step / http_status / blame / сумму / order id — никогда токены, cookies,
+  адрес, телефон, email, номера счетов. Безопасны для расшаривания при дебаге (читаются тулом `diagnostics`).
 - Money tools (`transfer`, `grocery_checkout`) требуют подтверждения.
 
 ## Disclaimer

@@ -124,5 +124,9 @@ You normally just call a read tool; the above runs under the hood. Call
   (`~/.local/share/tbank-mcp/attempts.jsonl`). After an UNKNOWN result (order may
   exist) the auto-retry is BLOCKED — reconcile via `grocery_attempts`, and only
   force a retry after the user confirms no order exists.
+- Diagnostics: checkout stages (delivery/order/payment) and session refresh emit
+  redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
+  secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
+  confirmed step.
 - Money tools (`pay`, `payment_gate_pay`, `grocery_order_create`,
   `checkout_process_order`) are REAL — confirm the body before running.
