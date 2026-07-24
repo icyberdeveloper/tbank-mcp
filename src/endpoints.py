@@ -1269,7 +1269,7 @@ BUILTIN_ENDPOINTS = {
 # 14 additional valuable endpoints found by the completeness audit.
 BUILTIN_ENDPOINTS.update({
     "detected_merchant_subscriptions": {"method": "GET", "host": "https://api.t-bank-app.ru", "path": "/subscriptions/merchant/v2/subscriptions", "params": {}},
-    "user_profile": {"method": "GET", "host": "https://id.t-bank-app.ru", "path": "/userinfo/userinfo", "params": {}},
+    "user_profile": {"method": "GET", "host": "https://id.t-bank-app.ru", "path": "/userinfo/userinfo", "params": {"ccc": "true", "cpswc": "true", "client_id": "gorod-app"}},
     "broker_portfolio_accounts": {"method": "POST", "host": "https://api-invest-gw.t-bank-app.ru", "path": "/invest-portfolio/portfolios/accounts/for-mb", "params": {"withClosingIis": "false", "currency": "RUB"}},
     "my_homes": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/homes", "params": {}},
     "my_home_activities": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/activities", "params": {}},

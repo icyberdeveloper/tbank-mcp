@@ -29,6 +29,12 @@ BANK_HOSTS = [
     "lifestyle.t-bank-app.ru", "api-invest.t-bank-app.ru",
     "api-invest-gw.t-bank-app.ru", "shopping.t-bank-app.ru",
     "webview.t-bank-app.ru", "tm.t-bank-app.ru",
+    # additional product/infra subdomains reached by some get_data sections
+    # (audit: were absent → only the system CA verified them; add so cert
+    # rotation self-heals for these too).
+    "api.tbank.ru", "csc.tbank.ru", "my-home.tinkoff.ru",
+    "myauto.t-bank-app.ru", "shortcuts.t-bank-app.ru",
+    "push-history-api.t-bank-app.ru", "api-common-gw.t-bank-app.ru",
 ]
 
 _PEM_RE = re.compile(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)

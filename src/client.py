@@ -727,7 +727,27 @@ class MobileSession:
                                              overrides={"brokerAccountId": broker_account_id}))
 
     def session_status(self) -> dict:
+        # www.tbank.ru/api/common/v1/session_status (web gateway) — confirmed WORKING
+        # with the mobile session: the SSO cookie in cookie_str authenticates it.
+        # (Audit flagged www.tbank.ru as a 'different realm', but live use proves it
+        # returns accessLevel/SSO TTL/userId — do NOT reroute or 'fix'.)
         return self._call_read("session_status")
+
+    def _call_userinfo(self) -> dict:
+        """GET /userinfo/userinfo (id.t-bank-app.ru) — the gorod-app SSO IdP OIDC
+        UserInfo. Capture-verified shape: client_id=<gorod-app> + ccc/cpswc +
+        Authorization: Bearer + the t-bank-app.ru jar cookies (which carry the SSO
+        tracking set). The generic _call_read OMITS client_id and adds mobile-BFF
+        params, which the IdP rejects with HTTP 401 (research-workflow confirmed
+        across 3 captures). Reuses self.client_id (= gorod-app), no new literal."""
+        r = self._http.get(
+            "https://id.t-bank-app.ru/userinfo/userinfo",
+            params={"ccc": "true", "cpswc": "true", "client_id": self.client_id or "gorod-app"},
+            headers={"Accept": "*/*",
+                     "Authorization": "Bearer " + self.access_token,
+                     **({"Cookie": self.cookie_str} if self.cookie_str else {})},
+            timeout=30)
+        return self._unwrap(r)
 
     def keepalive(self) -> Any:
         """POST v1/ping — keep the mobile session alive (unsigned)."""
@@ -1031,7 +1051,10 @@ class MobileSession:
         return self._as_list(self._call_read("payment_shortcuts"))
 
     def unread_support_requests(self) -> list[dict]:
-        """Unread support/tracker request IDs."""
+        """csc.tbank.ru support/tracker realm — uses a WEBSESS/support session, NOT the
+        mobile session. The mobile Bearer+cookie auth here will likely be REJECTED
+        (401/403). Not wired to any MCP tool / get_data section today (orphan).
+        Capture-verify the support-session auth before exposing it."""
         return self._as_list(self._call_read("unread_support_requests"))
 
     def resolve_payment_qr(self, body: dict | None = None) -> dict:
@@ -1642,6 +1665,10 @@ class MobileSession:
             "appointments": "appointment_deliveries",
             "qr_resolve": "resolve_payment_qr",
         }
+        if section.lower() == "profile":
+            # /userinfo/userinfo needs client_id=gorod-app + no mobile-BFF params —
+            # route through _call_userinfo, not the generic _call_read (which 401s).
+            return self._call_userinfo()
         key = _SECTIONS.get(section.lower(), section)
         return self._call_read(key)
 
