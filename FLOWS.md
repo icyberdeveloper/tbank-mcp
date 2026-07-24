@@ -119,11 +119,12 @@ You normally just call a read tool; the above runs under the hood. Call
 - On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
   no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
   (login + OTP + password).
-- `grocery_checkout` is safer now: post-delivery sum (cart re-read after deliveries),
-  auto-selected payment account, and an attempt journal
-  (`~/.local/share/tbank-mcp/attempts.jsonl`). After an UNKNOWN result (order may
-  exist) the auto-retry is BLOCKED — reconcile via `grocery_attempts`, and only
-  force a retry after the user confirms no order exists.
+- `grocery_checkout` contract is verified against captures.xml: agreement from
+  `user/payment/account/last`, clientEmail from `get-customer-information`,
+  post-delivery sum from deliveries `payload.cartPrice`, and no blind sleep (it polls
+  the cart API instead). After an UNKNOWN result the auto-retry is BLOCKED — reconcile
+  via `grocery_attempts` + `grocery_order_status(order_id)`, and force only after the
+  user confirms no order exists.
 - Diagnostics: checkout stages (delivery/order/payment) and session refresh emit
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last

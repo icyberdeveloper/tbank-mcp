@@ -281,7 +281,7 @@ def grocery_search(query: str, app_id: str = "", point_id: str = "") -> str:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
         results = s.grocery_search(query, app_id=app_id, point_id=point_id)
-        body = "\n".join(f"- id={r['id']} | {r['name'][:40]} | {r['price']}₽ | {'RAW' if r.get('likely_raw') else 'PREP'}"
+        body = "\n".join(f"- id={r['id']} | {r['name'][:40]} | {r['price']}₽ | {r.get('weight','') or '-'} | {'RAW' if r.get('likely_raw') else 'PREP'}"
             for r in results) or f"Не нашёл '{query}'"
         return f"[store appId={app_id} pointId={point_id}]\n" + body
     except Exception as e:
@@ -340,8 +340,9 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ appId={resp_app} ≠ запрошенный {app_id}\n"
         elif resp_point and resp_point != str(point_id):
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ pointId={resp_point} ≠ запрошенный {point_id}\n"
-        body = "\n".join(f"- {g.get('name','')[:35]} | {g.get('count',1)} | "
-            f"{(g.get('price') or {}).get('value','?')}₽" for g in goods) or "Корзина пуста"
+        body = "\n".join(f"- {g.get('name','')[:35]} | x{g.get('count',1)} | "
+            f"{(g.get('price') or {}).get('value','?')}₽ | {g.get('weight','') or g.get('quant','') or '-'}"
+            for g in goods) or "Корзина пуста"
         return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{body}"
     except Exception as e:
         return _err(e)
@@ -357,7 +358,7 @@ def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) 
     сумму и жди явного подтверждения перед вызовом."""
     try:
         from . import journal
-        from .checkout import select_payment_account, CheckoutError, CheckoutUnknown
+        from .checkout import CheckoutError, CheckoutUnknown
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
         # 1. read the cart → goods + amount + a stable cart hash
@@ -376,18 +377,18 @@ def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) 
                     f"attempt={last.get('attempt_id')}, order={last.get('order_id') or '-'}). Заказ мог быть "
                     f"создан/оплачен — сначала grocery_attempts() и проверь заказ в приложении. "
                     f"Принудительный повтор (force=True) — только если пользователь подтвердил отсутствие заказа.")
-        # 3. select a payment account (rejects empty — fixes the old empty-agreement bug, #9)
-        account = select_payment_account(s)
-        # 4. new journal attempt + run the web checkout
+        # 3. new journal attempt + run the web checkout. checkout resolves the payment
+        #    agreement from user/payment/account/last (capture-verified) + customer email
+        #    from get-customer-information. #8/#9
         attempt_id = journal.new_attempt(app_id, point_id, chash, amount)
         try:
-            r = s.grocery_checkout(app_id=app_id, point_id=point_id, account=account,
+            r = s.grocery_checkout(app_id=app_id, point_id=point_id,
                                    sum_val=amount, attempt_id=attempt_id)
             return (f"[store appId={app_id} pointId={point_id}] ✓ ORDER {r['order_id']} PAID. "
                     f"sum={r['sum']}₽ (attempt {attempt_id})")
         except CheckoutUnknown as e:
             return (f"[store appId={app_id} pointId={point_id}] UNKNOWN RESULT (attempt {attempt_id}): {e} "
-                    f"Повтор ЗАБЛОКИРОВАН — заказ мог создаться. Проверь grocery_attempts() и заказ в приложении.")
+                    f"Повтор ЗАБЛОКИРОВАН — заказ мог создаться. Проверь grocery_attempts() / grocery_order_status() и заказ в приложении.")
         except CheckoutError as e:
             journal.record(attempt_id, "failed", "failed", error=str(e)[:160])
             return _err(e)
@@ -408,6 +409,31 @@ def grocery_attempts() -> str:
             f"| {r.get('amount', '?')}₽ | order={r.get('order_id') or '-'} "
             f"| {(r.get('error') or r.get('payment_status') or '')[:60]}"
             for r in rows)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def grocery_order_status(order_id: str, app_id: str = "") -> str:
+    """Reconciliation: статус grocery-заказа по orderId (GET /api/grocery/order).
+    Read-only. Проверь после UNKNOWN checkout, создался/оплатился ли заказ на бэкенде."""
+    try:
+        s = _require(); s.ensure_fresh()
+        r = s.grocery_order_get(order_id=order_id, app_id=app_id)
+        payload = r.get("payload", r) if isinstance(r, dict) else {}
+        order = payload.get("order", payload) if isinstance(payload, dict) else {}
+        if not isinstance(order, dict):
+            order = {}
+        def g(*keys):
+            for k in keys:
+                if order.get(k) is not None:
+                    return order.get(k)
+            return ""
+        pay = order.get("paymentInfo", {}) if isinstance(order, dict) else {}
+        status = g("status", "orderStatus", "paymentStatus")
+        summ = g("sum", "goodsSum", "amount") or (pay.get("amount") if isinstance(pay, dict) else "")
+        return (f"order={order_id} | status={status or '?'} | sum={summ or '?'} | "
+                f"service={g('serviceName')} | app={g('applicationName', 'appId')} | "
+                f"paid={bool(pay.get('paid')) if isinstance(pay, dict) else '?'}")
     except Exception as e:
         return _err(e)
 

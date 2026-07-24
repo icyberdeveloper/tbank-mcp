@@ -4,7 +4,7 @@
 
 ## Features
 
-- **27 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
+- **28 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
 - **6 skills**: grocery order, bill pay, transfer, budget analysis, invest advisor, login
 - **Self-healing TLS**: handles Russian Trusted Root CA + HARICA cert rotation
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
@@ -91,14 +91,14 @@ export TBANK_PHONE="+79991234567"
 }
 ```
 
-## Tools (27)
+## Tools (28)
 
 | Group | Tools |
 |---|---|
 | **Login** | `login`, `confirm_otp`, `confirm_password`, `confirm_pin` |
 | **Session** | `refresh_session`, `session_status`, `keepalive` |
 | **Reads** | `list_accounts`, `list_operations`, `spending_categories`, `operations_histogram`, `get_data` |
-| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts` |
+| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer`, `payment_commission` |
 | **Utility** | `flows`, `diagnostics` |

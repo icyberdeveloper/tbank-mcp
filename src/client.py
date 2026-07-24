@@ -758,8 +758,11 @@ class MobileSession:
     def grocery_cart_check(self) -> dict:
         return self._call_read("grocery_cart_check")
 
-    def grocery_order_get(self) -> dict:
-        return self._call_read("grocery_order_get")
+    def grocery_order_get(self, order_id: str = "", app_id: str = "") -> dict:
+        """Look up a grocery order by orderId (GET /api/grocery/order). For
+        reconciliation after an UNKNOWN checkout (#10)."""
+        ov = {k: v for k, v in (("orderId", order_id), ("appId", app_id)) if v}
+        return self._call_read("grocery_order_get", overrides=ov or None)
 
     def grocery_order_create(self, body: dict | None = None) -> dict:
         """Create a grocery order (POST, replays the request body or override)."""
@@ -1135,61 +1138,112 @@ class MobileSession:
                                        "category": cat.get("name", "")})
         except Exception:
             pass
-        return stores
+        # dedupe by (appId, pointId) — the retailers list can repeat a store (#14)
+        seen = set()
+        uniq = []
+        for st in stores:
+            key = (st.get("appId"), st.get("pointId"))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(st)
+        return uniq
 
     def grocery_plan_order(self, ingredients: list[str], store_app_id: str = "",
                            store_point_id: str = "") -> dict:
-        """Plan a grocery order: for each ingredient, search in priority order:
-        1. favorites / custom_ordered (items ordered before) — PRIORITY
-        2. global search (search/fulltext with inStockFilter) — fallback
-        Returns a plan: {store, items, total_sum, missing, substitutions}.
+        """Plan a grocery order. #12: custom_ordered is loaded ONCE per store and
+        matched in memory (was re-read per ingredient → N+1, up to ~28 requests for 7
+        ingredients). Ingredient queries are normalized (qty/units/stopwords stripped:
+        'картофель 1 кг' → 'картофель'). Missing ingredients fall back to global search
+        run in parallel (concurrency-capped).
 
-        ingredients = list of product names, e.g. ["свёкла","говядина","капуста"].
-        One store only (no cross-store mixing)."""
-        plan = {"store": store_app_id, "items": [], "total_sum": 0,
+        Returns {store, items, total_sum, missing, substitutions}."""
+        import re as _re
+        app_id = store_app_id or "578"
+        point_id = store_point_id or "700"
+        plan = {"store": app_id, "items": [], "total_sum": 0,
                 "missing": [], "substitutions": []}
-        for ingredient in ingredients:
-            q = ingredient.lower().strip().replace("ё", "е")
-            found = None
-            source = None
 
-            # 1. Search in custom_ordered ("Вы заказывали") — PRIORITY
+        def norm(s: str) -> str:
+            s = s.lower().strip().replace("ё", "е")
+            # strip "1 кг", "2 шт", "100 г", "0.5 л" — quantities + common units
+            s = _re.sub(r"\b\d+([.,]\d+)?\s*(кг|г|гр|грамм|л|мл|литр|шт|упак|пачк|банк|дол|зубч)?\b", " ", s)
+            s = _re.sub(r"\b(сырой|сырая|сырого|свежий|свежая|очищен|вкусн)\S*", " ", s)
+            return _re.sub(r"\s+", " ", s).strip()
+
+        # 1. load custom_ordered ONCE (up to 3 pages), match all ingredients in memory
+        _custom = None
+
+        def custom_once():
+            nonlocal _custom
+            if _custom is not None:
+                return _custom
+            _custom = []
             for page in range(1, 4):
                 items = self._as_list(self._call_read("grocery_goods", overrides={
-                    "appId": store_app_id or "578", "pointId": store_point_id or "700",
+                    "appId": app_id, "pointId": point_id,
                     "categoryId": "custom_ordered_azbuka_vkusa",
                     "page": str(page), "count": "50"}))
-                if not items: break
-                for g in items:
-                    if not isinstance(g, dict): continue
-                    name = g.get("name", "").lower().replace("ё", "е")
-                    if q not in name: continue
-                    # no prepared-food filter — user may want готовая еда
+                if not items:
+                    break
+                _custom.extend(g for g in items if isinstance(g, dict))
+            return _custom
+
+        missing = []
+        for ingredient in ingredients:
+            q = norm(ingredient)
+            found = None
+            for g in custom_once():
+                name = g.get("name", "").lower().replace("ё", "е")
+                if q and q in name:
                     price = g.get("price", {})
                     pv = price.get("value", 0) if isinstance(price, dict) else 0
                     found = {"id": str(g.get("id", "")), "name": g.get("name", ""),
-                             "price": pv, "source": "custom_ordered"}
-                    source = "custom_ordered"
+                             "price": pv, "source": "custom_ordered", "query": q}
                     break
-                if found: break
-
-            # 2. Global search (search/fulltext with inStockFilter) — fallback
-            if not found:
-                results = self.grocery_search(ingredient, app_id=store_app_id or "578",
-                                              point_id=store_point_id or "700")
-                if results:
-                    g = results[0]
-                    found = {"id": g.get("id", ""), "name": g.get("name", ""),
-                             "price": g.get("price", 0), "source": "search"}
-                    source = "search"
-
             if found:
                 plan["items"].append(found)
                 plan["total_sum"] += found.get("price", 0) or 0
             else:
-                plan["missing"].append(ingredient)
+                missing.append((ingredient, q))
 
+        # 2. global search for the rest — in parallel (concurrency-capped), #12
+        if missing:
+            queries = [q for _, q in missing if q]
+            hits = self._parallel_search(queries, app_id, point_id)
+            for ingredient, q in missing:
+                g = hits.get(q)
+                if g:
+                    found = {"id": g.get("id", ""), "name": g.get("name", ""),
+                             "price": g.get("price", 0), "source": "search", "query": q}
+                    plan["items"].append(found)
+                    plan["total_sum"] += found.get("price", 0) or 0
+                else:
+                    plan["missing"].append(ingredient)
         return plan
+
+    def _parallel_search(self, queries: list[str], app_id: str, point_id: str,
+                         max_workers: int = 4) -> dict:
+        """Run global grocery searches in parallel (concurrency-capped). Returns
+        {normalized_query: first_hit_dict}. #12"""
+        from concurrent.futures import ThreadPoolExecutor
+        out: dict[str, dict] = {}
+        if not queries:
+            return out
+
+        def one(q):
+            try:
+                r = self.grocery_search(q, app_id=app_id, point_id=point_id)
+                return q, (r[0] if r else None)
+            except Exception:
+                return q, None
+
+        workers = max(1, min(max_workers, len(queries)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for q, hit in ex.map(one, queries):
+                if hit:
+                    out[q] = hit
+        return out
 
     @staticmethod
     def _as_list(d: Any) -> list[dict]:
@@ -1373,10 +1427,14 @@ class MobileSession:
             results.append({
                 "id": str(src.get("goodForeignId", src.get("id", ""))),
                 "name": name, "price": pv,
-                "weight": f"{wv} {wu}" if wv else "",
+                "weight": f"{wv} {wu}".strip(),
+                "unit": wu,
+                "inStock": True,  # inStockFilter is applied to the search
+                "likely_raw": likely_raw,
+                "appId": str(app_id),
+                "pointId": str(point_id),
                 "store_app_id": str(src.get("applicationId", app_id)),
                 "imageUrl": src.get("imageUrl", ""),
-                "likely_raw": likely_raw,
             })
             if len(results) >= 10:
                 break
@@ -1403,8 +1461,8 @@ class MobileSession:
                          client_email: str = "", account: str = "",
                          sum_val: float = 0, attempt_id: str | None = None) -> dict:
         """Full grocery checkout (web flow): deliveries → order/create → payment_gate_pay.
-        `app_id`/`point_id` scope the store; `account` is the selected payment
-        agreement (from checkout.select_payment_account); `sum_val` is a mobile-cart
+        `app_id`/`point_id` scope the store; the payment agreement is resolved
+        inside checkout from user/payment/account/last; `sum_val` is a mobile-cart
         fallback sum (the post-delivery WEB sum is used inside); `attempt_id` records
         progress in the journal. Raises checkout.CheckoutError (safe to retry) or
         checkout.CheckoutUnknown (order may exist — retry must be blocked)."""

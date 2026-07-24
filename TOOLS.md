@@ -34,13 +34,18 @@ invest_portfolio | invest_operations | invest_securities | pension | broker_marg
 
 ## `grocery_checkout`
 Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. Обязательны app_id/point_id.
-Счёт выбирается автоматически. При неопределённом результате (заказ мог создаться) повтор
-блокируется — сначала `grocery_attempts()`. `force=True` — только после явного подтверждения,
-что прошлого заказа нет.
+Контракт сверен с captures.xml: agreement из `user/payment/account/last`, email из
+`get-customer-information`, сумма = post-delivery `cartPrice`. При неопределённом результате
+повтор блокируется — сначала `grocery_attempts()` / `grocery_order_status()`. `force=True` —
+только после явного подтверждения, что прошлого заказа нет.
 
 ## `grocery_attempts`
 Недавние попытки checkout (read-only) — reconciliation после UNKNOWN: status, order_id,
 attempt_id, сумма.
+
+## `grocery_order_status`
+Reconciliation: статус заказа по orderId (GET /api/grocery/order). Read-only — проверь после
+UNKNOWN checkout, создался/оплатился ли заказ на бэкенде.
 
 ## `grocery_plan_order`
 Спланировать заказ: для каждого ингредиента ищет (custom_ordered → global).

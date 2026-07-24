@@ -50,39 +50,6 @@ class CheckoutUnknown(CheckoutError):
     blocked until the user reconciles (grocery_attempts / checks the app)."""
 
 
-def select_payment_account(session) -> str:
-    """Pick a funding account for grocery payment. Returns the account id to use as
-    the payment ``agreement``. Selects the first Current (debit) account with a
-    positive RUB balance; raises CheckoutError if none.
-
-    NOTE: which identifier the web payment endpoint expects as ``agreement`` (account
-    id vs card/agreement number) needs confirmation from a frontend trace — we use the
-    account id as the best available match."""
-    accs = session.list_accounts() or []
-    for a in accs:
-        if not isinstance(a, dict):
-            continue
-        if (a.get("accountType") or "") != "Current":
-            continue
-        money = a.get("moneyAmount") or {}
-        bal = money.get("value", 0) if isinstance(money, dict) else 0
-        try:
-            bal = float(bal)
-        except (TypeError, ValueError):
-            bal = 0.0
-        if bal <= 0:
-            continue
-        cur = a.get("currency")
-        cur_name = cur.get("name") if isinstance(cur, dict) else cur
-        if cur_name and str(cur_name).upper() not in ("RUB", "RUBLES", "РОССИЙСКИЙ РУБЛЬ", "₽"):
-            continue
-        aid = a.get("id")
-        if aid:
-            return str(aid)
-    raise CheckoutError(
-        "no RUB Current account with a positive balance found — cannot select a payment source")
-
-
 def _safe_record(attempt_id, step, status, **fields):
     """Record a journal event without letting journal failures break checkout."""
     if not attempt_id:
@@ -99,17 +66,21 @@ def checkout(session, app_id: str = "578", point_id: str = "",
     """Run the grocery checkout via headless browser. `session` is a MobileSession
     with a valid access_token + cookies (from login/silent_relogin).
 
-    `account` = the payment agreement id (from select_payment_account); required.
+    Contract verified against captures.xml (2026-07-24):
+      - agreement   = accountId from GET /api/supreme/lifestyle/api/user/payment/account/last
+                      (the `account` arg is only a fallback if that fetch is empty)
+      - clientEmail = email from GET /mybank/api/shopping/mobile/v1/checkout/get-customer-information
+                      (the `client_email` arg is only a fallback)
+      - order/create body = {appId, clientEmail, sum}
+      - payment-gate body = {paymentMethod:{type:"agreement",agreement}, flow:{type:"marketplace",
+                      orderId, holdUsingMapi:false, applicationId}, amount:{type:"simple",
+                      amount, currencyCode:"643"}}
+      - post-delivery sum = deliveries response payload.cartPrice (weight items recompute)
     `attempt_id` = journal attempt id (created by the caller); steps are recorded.
-    `sum_val` = mobile-cart sum fallback (the post-delivery WEB sum is preferred).
 
     Returns {order_id, payment_id, status, sum} or raises CheckoutError (safe retry)
     / CheckoutUnknown (retry blocked)."""
     from playwright.sync_api import sync_playwright
-
-    if not account:
-        # defense-in-depth: the server selects an account, but never pay with empty.
-        raise CheckoutError("no payment account selected (account is empty)")
 
     web_ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
               "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1")
@@ -156,11 +127,6 @@ def checkout(session, app_id: str = "578", point_id: str = "",
 
             page = context.new_page()
 
-            # 1. load the checkout page
-            page.goto(checkout_url, wait_until="domcontentloaded", timeout=30000)
-            print("[checkout] page loaded, waiting 8s for JS init ...")
-            time.sleep(8)
-
             def web_cart(app):
                 """GET web cart, return (sum, goods, raw)."""
                 wc = page.evaluate("""async (appId) => {
@@ -171,6 +137,21 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                 cart = body.get("payload", {}).get("cart", {}) if isinstance(body, dict) else {}
                 s = cart.get("goodsSum", 0) or cart.get("sum", 0)
                 return s, cart.get("goods", []), wc
+
+            # 1. load the checkout page, then wait for the cart API to be ready
+            # (replaces a blind sleep(8) — poll the cart endpoint until it answers
+            # with goods, or ~10s timeout). #15
+            page.goto(checkout_url, wait_until="domcontentloaded", timeout=30000)
+            _waited = 0
+            while _waited < 10000:
+                try:
+                    _, _g, _ = web_cart(app_id)
+                except Exception:
+                    _g = []
+                if _g:
+                    break
+                time.sleep(0.5); _waited += 500
+            print(f"[checkout] page ready (cart API answered in ~{_waited}ms)")
 
             # 2. GET web cart → pre-delivery sum + goods
             pre_sum, goods, _ = web_cart(app_id)
@@ -205,23 +186,59 @@ def checkout(session, app_id: str = "578", point_id: str = "",
                     f"deliveries failed (http={deliv.get('status')}, err={d_err[:120]})")
             print(f"[checkout] deliveries ok (http={deliv.get('status')})")
 
-            # 4. re-read the web cart AFTER deliveries → post-delivery sum (weight
-            # items may recompute, e.g. 1630.00 → 1600.20). USE the post-delivery sum.
+            # 4. post-delivery: the deliveries RESPONSE carries payload.cartPrice (weight
+            # items recompute here — e.g. 1630.00 → 1600.20). Use it as the authoritative
+            # sum; re-read the cart for an item-count comparison. Validate the selected
+            # slot's pointId matches the requested store. (#7)
+            dpayload = dbody.get("payload", {}) if isinstance(dbody, dict) else {}
+            d_delivery = dpayload.get("delivery", {}) if isinstance(dpayload, dict) else {}
+            selected = (d_delivery.get("selected") or {}) if isinstance(d_delivery, dict) else {}
+            sel_point = str(selected.get("pointId", "") or "")
+            if sel_point and sel_point != str(point_id):
+                raise CheckoutError(
+                    f"delivery selected pointId={sel_point} ≠ requested {point_id}")
+            cart_price = dpayload.get("cartPrice")
             post_sum, post_goods, _ = web_cart(app_id)
-            if post_sum:
-                if post_sum != actual_sum:
-                    print(f"[checkout] sum adjusted after delivery: {actual_sum} → {post_sum}")
+            if cart_price:
+                if cart_price != actual_sum:
+                    print(f"[checkout] sum adjusted after delivery: {actual_sum} → {cart_price}")
+                actual_sum = cart_price
+            elif post_sum:
                 actual_sum = post_sum
             if len(post_goods) < pre_count:
                 # items dropped after recalculation (out of stock?) — surface it
                 print(f"[checkout] WARN: item count changed {pre_count} → {len(post_goods)} after delivery")
             _safe_record(attempt_id, "delivery", "delivery_ready", amount=actual_sum)
 
-            # 5. POST order/create with the POST-DELIVERY sum. Omit clientEmail when
-            # empty (the old body sent "clientEmail": "").
+            # 5. resolve the payment agreement + customer email from the capture-
+            # verified endpoints (NOT a guess from list_accounts). #8/#9
+            agr_res = page.evaluate("""async () => {
+                const r = await fetch('/api/supreme/lifestyle/api/user/payment/account/last?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios', {headers: {'Accept': 'application/json'}});
+                return {status: r.status, body: await r.json().catch(() => ({}))};
+            }""")
+            agr_body = agr_res.get("body", {}) if isinstance(agr_res, dict) else {}
+            agr_payload = agr_body.get("payload", {}) if isinstance(agr_body, dict) else {}
+            agreement = (agr_payload.get("accountId") if isinstance(agr_payload, dict) else "") or account
+            obs.emit("payment_account", attempt_id=attempt_id, http_status=agr_res.get("status"),
+                     agreement_present=bool(agreement), blame=obs.blame_of(agr_res.get("status")))
+            if not agreement:
+                raise CheckoutError("no payment account: user/payment/account/last returned no accountId")
+
+            ci_res = page.evaluate("""async () => {
+                const r = await fetch('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?appName=grocery_evo&appVersion=7.31.6&platform=webview_ios', {headers: {'Accept': 'application/json'}});
+                return {status: r.status, body: await r.json().catch(() => ({}))};
+            }""")
+            ci_body = ci_res.get("body", {}) if isinstance(ci_res, dict) else {}
+            ci_email = ci_body.get("email") if isinstance(ci_body, dict) else ""
+            if not ci_email and isinstance(ci_body, dict):
+                ci_email = (ci_body.get("payload", {}) or {}).get("email", "")
+            email = client_email or ci_email
+
+            # 6. POST order/create with the POST-DELIVERY sum + the customer email
+            # (omit clientEmail only if both caller and customer-info lack one).
             order_obj = {"appId": app_id, "sum": actual_sum}
-            if client_email:
-                order_obj["clientEmail"] = client_email
+            if email:
+                order_obj["clientEmail"] = email
             order_body = json.dumps(order_obj)
             _t0 = time.time()
             order_res = page.evaluate("""async (body) => {
@@ -253,10 +270,10 @@ def checkout(session, app_id: str = "578", point_id: str = "",
             print(f"[checkout] order created: id={order_id}")
             _safe_record(attempt_id, "order_create", "order_posted", order_id=order_id)
 
-            # 6. POST payment_gate_pay IMMEDIATELY (before auto-cancel). The agreement
-            # is the selected account id (was an undefined `account` NameError). #9
+            # 7. POST payment_gate_pay IMMEDIATELY (before auto-cancel). agreement =
+            # accountId from user/payment/account/last (capture-verified). #9
             pay_body = json.dumps({
-                "paymentMethod": {"type": "agreement", "agreement": account},
+                "paymentMethod": {"type": "agreement", "agreement": agreement},
                 "flow": {"type": "marketplace", "orderId": order_id,
                          "holdUsingMapi": False, "applicationId": app_id},
                 "amount": {"type": "simple", "amount": actual_sum, "currencyCode": "643"},

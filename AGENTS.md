@@ -42,9 +42,10 @@ agent (Claude/Codex/etc.), then call `flows` for the ordered tool sequences.
 - `grocery_checkout` records an attempt journal
   (`~/.local/share/tbank-mcp/attempts.jsonl`); after an UNKNOWN result (order may
   have been created) an automatic retry is BLOCKED to prevent duplicate orders.
-  Reconcile via `grocery_attempts`, and pass `force=True` only after the user
-  confirms no order exists. The payment account is auto-selected (first Current
-  RUB with a positive balance).
+  Reconcile via `grocery_attempts` + `grocery_order_status(order_id)`, and pass
+  `force=True` only after the user confirms no order exists. The checkout contract
+  (agreement from `user/payment/account/last`, email from `get-customer-information`,
+  post-delivery `cartPrice`) is verified against captures.xml.
 - Checkout stages and session refresh emit redacted structured events to
   `~/.local/share/tbank-mcp/events.jsonl` — step, http_status, app_code, blame,
   duration, order/payment id presence. NEVER tokens, cookies, address, phone,
