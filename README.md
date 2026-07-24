@@ -6,48 +6,78 @@
 
 - **25 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
 - **6 skills**: grocery order, bill pay, transfer, budget analysis, invest advisor, login
-- **Self-bootstrap**: `login(phone)` → SMS OTP → password → session. No capture, no emulator, no frida.
 - **Self-healing TLS**: handles Russian Trusted Root CA + HARICA cert rotation
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
+- **Secure login**: password/PIN stay OUT of the LLM context (local CLI or env var)
 
 ## Quick Install
 
-### Option A: Claude Plugin
-
 ```bash
-# In Claude Code:
-/plugin marketplace add neondelph/tbank-mcp
-/plugin install tbank-mcp
-```
-
-Then:
-```
-> login(+79991234567)
-> [SMS code]
-> confirm_otp(1234)
-> [if bank asks password]
-> confirm_password(YourPassword)
-```
-
-Done. Ask: «покажи счета», «закажи продукты для борща», «сколько трачу на подписки».
-
-### Option B: Manual
-
-```bash
-git clone https://github.com/neondelph/tbank-mcp.git
+git clone https://github.com/icyberdeveloper/tbank-mcp.git
 cd tbank-mcp
 python -m venv .venv && . .venv/bin/activate
 pip install -e .
 python -m playwright install chromium
 
-# MCP:
+# MCP server:
 claude mcp add tbank -- ./.venv/bin/python -m src.server
 
 # Skills:
 cp -r skills/* ~/.claude/skills/
 ```
 
-### Option C: Other agents (Codex, ChatGPT, Hermes, OpenClaw)
+## 🔒 Login — БЕЗОПАСНО (пароль не попадает к агенту)
+
+Пароль и PIN — это секреты. Они **НЕ передаются в контекст модели (LLM)**.
+Логин выполняется локальным скриптом ИЛИ через env-переменную.
+
+### Способ 1 (рекомендуемый): локальный CLI
+
+```bash
+cd tbank-mcp
+
+# Пароль спросит скрипт (getpass — не отображается в терминале):
+.venv/bin/python login_cli.py +79991234567
+# [1/3] login(+79991234567) ... SMS отправлена
+# [2/3] SMS-код: ****        ← вводишь код из SMS (скрытый ввод)
+# [3/3] Пароль (не отображается): ****   ← вводишь пароль (скрытый ввод)
+# ✓ ГОТОВО! session.json сохранён (права 0600).
+#   Запусти Claude Code в этом репозитории.
+#   Пароль НЕ передан агенту — он работает с сохранённой сессией.
+```
+
+Или с паролем в env (CI/скрипты):
+```bash
+TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +79991234567
+```
+
+После логина — **запусти Claude Code**. Агент видит сохранённую сессию и работает
+без пароля. Пароль никогда не попадает в контекст LLM.
+
+### Способ 2: через агента (удобно, но пароль виден LLM)
+
+Если тебе удобно передавать пароль агенту:
+
+```
+> login(+79991234567)
+> [SMS code] 1234
+> confirm_otp("1234")
+> [bank asks password]
+> confirm_password("YourPassword")
+```
+
+⚠️ **Внимание:** пароль попадает в контекст модели и журналы вызовов.
+Для чувствительных аккаунтов используй Способ 1.
+
+### Способ 3: env-переменная (CI/автоматизация)
+
+```bash
+export TBANK_PASSWORD="пароль"
+export TBANK_PHONE="+79991234567"
+# login() автоматически подхватит пароль из env после confirm_otp()
+```
+
+## Other agents (Codex, ChatGPT, Hermes, OpenClaw)
 
 ```jsonc
 {
@@ -86,20 +116,12 @@ cp -r skills/* ~/.claude/skills/
 | `tbank-invest-advisor` | Portfolio, P&L, rebalancing, tax optimization |
 | `tbank-login` | Multi-step login, session management |
 
-## How it works
-
-1. **Login** — phone → SMS OTP → password (first device) → session
-2. **Headless** — silent re-login (~2h, no OTP), self-healing TLS
-3. **Reads** — cookie + Bearer (no per-request signature)
-4. **Grocery** — search/fulltext → cart/set (mobile API) → checkout (Playwright web cart sync)
-5. **P2P pay** — HMAC-SHA256 `x-api-signature` (key = sessionid)
-
 ## Security
 
-- `session.json` is **gitignored** — never commit
-- No hardcoded secrets in code (verified by audit)
-- Money tools require explicit confirmation
-- `ca/bundle.pem` regenerated from public CAs
+- **`session.json`** — gitignored, права 0600 (owner-only). Содержит токены.
+- **Пароль/PIN** — НЕ в git, НЕ в коде, НЕ в контексте LLM (если используешь login_cli.py).
+- **0 hardcoded secrets** in code (verified by audit).
+- Money tools (`transfer`, `grocery_checkout`) требуют подтверждения.
 
 ## Disclaimer
 
