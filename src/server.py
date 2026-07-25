@@ -120,6 +120,79 @@ def _err(e):
     return f"{type(e).__name__}: {safe(e)}"
 
 
+def _biggest_list(obj, path=()):
+    """The longest list anywhere in a JSON-ish structure, with its path.
+
+    Used to trim the part of a payload that is actually big, instead of slicing the
+    serialized text — which cuts inside a token and yields something that looks like
+    truncated JSON but parses as nothing."""
+    best = (0, None, None)
+    if isinstance(obj, list):
+        best = (len(obj), obj, path)
+    if isinstance(obj, (dict, list)):
+        items = obj.items() if isinstance(obj, dict) else enumerate(obj)
+        for k, v in items:
+            n, lst, p = _biggest_list(v, path + (k,))
+            if n > best[0]:
+                best = (n, lst, p)
+    return best
+
+
+def _set_in(obj, path, value):
+    for step in path[:-1]:
+        obj = obj[step]
+    obj[path[-1]] = value
+
+
+def _json_out(data, limit: int = 5000) -> str:
+    """Serialize a payload for the agent WITHOUT losing records silently.
+
+    The old code returned json.dumps(...)[:N]. On real data that severs an object
+    mid-token: get_data("merchant_subs") serializes to 5871 chars holding 8
+    subscriptions, and the 5000-char cut left 6 of them plus half of a seventh. The
+    string still looked like data, so the budget skill happily under-reported the
+    user's monthly spend with no signal that anything was missing.
+
+    Now: trim the biggest list to whole elements and SAY how many were dropped. If
+    the payload has no list to trim, cut the text but prefix a marker loud enough
+    that the result cannot be mistaken for the whole answer."""
+    full = json.dumps(data, ensure_ascii=False, default=str)
+    if len(full) <= limit:
+        return full
+
+    count, lst, path = _biggest_list(data)
+    if lst and count > 1 and path:
+        import copy
+        trimmed = copy.deepcopy(data)
+        keep = count
+        while keep > 0:
+            _set_in(trimmed, path, lst[:keep])
+            body = json.dumps(trimmed, ensure_ascii=False, default=str)
+            if len(body) <= limit:
+                where = ".".join(str(p) for p in path)
+                return (f"# ПОКАЗАНО {keep} из {count} записей в «{where}» "
+                        f"(ответ не помещается целиком). Остальные НЕ включены — "
+                        f"не считай по этому фрагменту итогов и сумм.\n{body}")
+            keep = keep * 3 // 4 if keep > 4 else keep - 1
+
+    return (f"# ОТВЕТ ОБРЕЗАН: {limit} из {len(full)} символов, и это НЕ валидный "
+            f"JSON. Данные неполные — не делай по ним выводов о суммах и количестве."
+            f"\n{full[:limit]}")
+
+
+def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: str = "") -> str:
+    """Render a list of rows with an honest header.
+
+    list_operations used to print `for o in ops[:50]` with no count and no limit
+    argument: a 30-day request returning 229 operations showed the newest 50 — four
+    days — presented as a month, with operations 51+ unreachable by any argument."""
+    shown = rows[:limit] if limit > 0 else rows
+    head = f"{header}: {total} всего, показано {len(shown)}"
+    if len(shown) < total:
+        head += f" (новые сверху). {more_hint or f'Передай limit={total}, чтобы увидеть все.'}"
+    return "\n".join([head] + [render(r) for r in shown])
+
+
 def _store(app_id: str, point_id: str) -> tuple[str, str]:
     """Resolve explicit grocery store context. The agent MUST pass appId/pointId
     taken from grocery_stores() — there is NO silent 578/700 default here.
@@ -221,7 +294,7 @@ def session_status() -> str:
     портальной сессии (~11 минут) успело закрыться."""
     try:
         s = _require(); s.ensure_client_session()
-        return json.dumps(s.session_status(), ensure_ascii=False, default=str)[:1000]
+        return _json_out(s.session_status(), 1000)
     except Exception as e:
         return _err(e)
 
@@ -250,8 +323,11 @@ def list_accounts() -> str:
         return _err(e)
 
 @mcp.tool()
-def list_operations(account_id: str, days: int = 30) -> str:
-    """Операции за период."""
+def list_operations(account_id: str, days: int = 30, limit: int = 50) -> str:
+    """Операции за период, новые сверху.
+
+    limit — сколько показать (0 = все). В шапке всегда указано, сколько операций
+    всего за период, поэтому видно, обрезан ли ответ."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -267,11 +343,12 @@ def list_operations(account_id: str, days: int = 30) -> str:
             return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M")
         def sign(o):
             return "-" if (o.get("type") == "Debit") else "+"
-        return "\n".join(
-            f"- [{when(o)}] {sign(o)}{(o.get('amount') or {}).get('value','?')} "
-            f"{((o.get('amount') or {}).get('currency') or {}).get('name','')} | "
-            f"{(o.get('description') or '')[:40]}"
-            for o in ops[:50])
+        def render(o):
+            return (f"- [{when(o)}] {sign(o)}{(o.get('amount') or {}).get('value','?')} "
+                    f"{((o.get('amount') or {}).get('currency') or {}).get('name','')} | "
+                    f"{(o.get('description') or '')[:40]}")
+        return _rows_out(ops, render, limit=limit, total=len(ops),
+                         header=f"[account {account_id}] операции за {days} дн.")
     except Exception as e:
         return _err(e)
 
@@ -300,8 +377,8 @@ def operations_histogram(account_id: str = "", days: int = 30,
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
-        return json.dumps(s.operations_histogram(account_id or None, start, end,
-            period=period, group_by=group_by), ensure_ascii=False, default=str)[:4000]
+        return _json_out(s.operations_histogram(account_id or None, start, end,
+                                                period=period, group_by=group_by), 4000)
     except Exception as e:
         return _err(e)
 
@@ -314,7 +391,7 @@ def get_data(section: str) -> str:
     pension | broker_margin | shared. (invest_portfolio/operations/securities — отдельные тулы.)"""
     try:
         s = _require(); s.ensure_fresh()
-        return json.dumps(s.get_data(section), ensure_ascii=False, default=str)[:5000]
+        return _json_out(s.get_data(section), 5000)
     except Exception as e:
         return _err(e)
 
@@ -745,7 +822,7 @@ def payment_commission(body: str = "") -> str:
         b = json.loads(body) if body else None
         # via the client method — it form-encodes and defaults the isTransferStatus/
         # isUrgentTransfer flags. Calling _call_read directly posts JSON → 400.
-        return json.dumps(s.payment_commission(b), ensure_ascii=False)[:1000]
+        return _json_out(s.payment_commission(b), 1000)
     except Exception as e:
         return _err(e)
 
@@ -768,18 +845,26 @@ def invest_portfolio(broker_account_id: str, days: int = 30) -> str:
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
-        return json.dumps(s.invest_portfolio(broker_account_id, start, end),
-                          ensure_ascii=False, default=str)[:4000]
+        return _json_out(s.invest_portfolio(broker_account_id, start, end), 4000)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
 def invest_operations(broker_account_id: str, operation_type: str = "", limit: int = 50) -> str:
-    """Брокерские операции. operation_type — фильтр (пусто = все)."""
+    """Брокерские операции, новые сверху. operation_type — фильтр (пусто = все).
+    limit применяется и к запросу, и к выводу (0 = все, что вернул банк)."""
     try:
         s = _require(); s.ensure_fresh()
         ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
-        return "\n".join(f"- [{(o.get('date',''))}] {(o.get('amount') or {}).get('value','?')} | {o.get('description','')[:40]}" for o in ops[:50]) or "нет операций"
+        if not ops:
+            return "нет операций"
+        def render(o):
+            return (f"- [{o.get('date','')}] {(o.get('amount') or {}).get('value','?')} "
+                    f"| {o.get('description','')[:40]}")
+        # limit was passed to the API AND then ignored here by a hardcoded [:50],
+        # so invest_operations(limit=200) silently showed 50.
+        return _rows_out(ops, render, limit=limit, total=len(ops),
+                         header="Брокерские операции")
     except Exception as e:
         return _err(e)
 
@@ -1321,19 +1406,22 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
 # ── CINEMA ──────────────────────────────────────────────────
 
 @mcp.tool()
-def cinema_search(query: str = "", city: str = "Москва") -> str:
+def cinema_search(query: str = "", city: str = "Москва", limit: int = 20) -> str:
     """Найти фильм в прокате и его eventId (нужен для cinema_schedule).
-    query — часть названия; пусто = вся сегодняшняя афиша города."""
+    query — часть названия; пусто = вся сегодняшняя афиша города (её видно
+    целиком только при limit=0 — по умолчанию показаны первые 20)."""
     try:
         s = _require(); s.ensure_fresh()
         movies = s.cinema_movies(city=city, query=query)
         if not movies:
             return f"В прокате ({city}) ничего не найдено по запросу {query!r}."
-        return "\n".join(
-            f"- {m.get('name','?')} [{m.get('ageRestriction','')}] "
-            f"| {', '.join(m.get('genres') or [])} | {m.get('country','')} "
-            f"| eventId={m.get('eventId','?')}"
-            for m in movies[:20])
+        def render(m):
+            return (f"- {m.get('name','?')} [{m.get('ageRestriction','')}] "
+                    f"| {', '.join(m.get('genres') or [])} | {m.get('country','')} "
+                    f"| eventId={m.get('eventId','?')}")
+        return _rows_out(movies, render, limit=limit, total=len(movies),
+                         header=f"В прокате ({city})",
+                         more_hint="Уточни query или передай limit=0.")
     except Exception as e:
         return _err(e)
 
