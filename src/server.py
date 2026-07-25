@@ -15,7 +15,7 @@ import re
 import sys
 import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -347,7 +347,10 @@ def session_status() -> str:
 def keepalive() -> str:
     """Пинг — продлить сессию."""
     try:
-        return str(_require().keepalive())[:200]
+        # _json_out, not str(dict)[:200]: the repr uses single quotes, so an agent
+        # that tried to parse the answer got invalid JSON, and the character cut
+        # could sever it mid-key.
+        return _json_out(_require().keepalive(), 1000)
     except Exception as e:
         return _err(e)
 
@@ -408,10 +411,15 @@ def spending_categories(account_id: str, days: int = 30) -> str:
         start, end = ms_for_period(days)
         rep = s.spending_categories(account_id, start, end)
         cats = rep["categories"]
-        lines = [f"Траты за {days} дн.: {rep['total_spent']:,.2f} {rep['currency']} "
-                 f"по {len(cats)} категориям (поступления {rep['total_earned']:,.2f})"]
+        # Digit grouping with spaces, as _money and every other tool here does. A
+        # comma group («3,466,386.89») reads as a decimal comma in Russian, which is
+        # the worst possible ambiguity to put next to a sum of money.
+        def num(v, width=0):
+            return f"{v:>{width},.2f}".replace(",", " ")
+        lines = [f"Траты за {days} дн.: {num(rep['total_spent'])} {rep['currency']} "
+                 f"по {len(cats)} категориям (поступления {num(rep['total_earned'])})"]
         for c in cats:
-            lines.append(f"- {c['category'][:25]:25} {c['amount']:>12,.2f} {c['share_pct']:5.1f}%")
+            lines.append(f"- {c['category'][:25]:25} {num(c['amount'], 12)} {c['share_pct']:5.1f}%")
         if not cats:
             lines.append("(категорий нет — за период не было расходных операций)")
         return "\n".join(lines)
@@ -747,14 +755,32 @@ def grocery_attempts() -> str:
     неопределённого результата (UNKNOWN). Показывает status/order_id/attempt_id/sum."""
     try:
         from . import journal
-        rows = journal.recent(15)
+        rows = journal.recent(60)
         if not rows:
             return "Попыток checkout пока не было."
-        return "\n".join(
-            f"- {r.get('attempt_id')} | {r.get('status')} | appId={r.get('app_id')} "
-            f"| {r.get('amount', '?')}₽ | order={r.get('order_id') or '-'} "
-            f"| {(r.get('error') or r.get('payment_status') or '')[:60]}"
-            for r in rows)
+        # One row per ATTEMPT, not per journal line. The journal writes an `init`
+        # record carrying app_id/amount and then a progress record per step carrying
+        # only what that step knew — so printing the raw tail showed «appId=None ?₽»
+        # for every step after the first, i.e. for almost every line.
+        merged: dict = {}
+        for r in rows:
+            aid = r.get("attempt_id")
+            if not aid:
+                continue
+            cur = merged.setdefault(aid, {"attempt_id": aid})
+            cur.update({k: v for k, v in r.items() if v not in (None, "")})
+        def render(a):
+            bits = [f"- {a['attempt_id']}", a.get("status", "?"), a.get("step", "?")]
+            if a.get("app_id"):
+                bits.append(f"appId={a['app_id']}")
+            if a.get("amount") not in (None, ""):
+                bits.append(f"{a['amount']}₽")
+            bits.append(f"order={a.get('order_id') or '-'}")
+            tail = (a.get("error") or a.get("payment_status") or "")
+            if tail:
+                bits.append(str(tail)[:60])
+            return " | ".join(bits)
+        return "\n".join(render(a) for a in list(merged.values())[-15:])
     except Exception as e:
         return _err(e)
 
@@ -1193,21 +1219,40 @@ def payment_commission(body: str = "") -> str:
 
 @mcp.tool()
 def invest_accounts() -> str:
-    """Инвест-счета (InvestBox/брокерские). Возьми brokerAccountId для следующих тулов."""
+    """Инвест-счета: брокерские и InvestBox. brokerAccountId отсюда — единственный
+    аргумент invest_portfolio/invest_operations/invest_securities."""
     try:
-        s = _require(); s.ensure_fresh()
+        s = _require(); s.ensure_client_session()
         accs = s.invest_accounts()
-        return "\n".join(f"- {a.get('brokerAccountId', a.get('id','?'))} | {a.get('name','')[:30]}" for a in accs) or "нет инвест-счетов"
+        if not accs:
+            return "нет инвест-счетов"
+        def render(a):
+            return (f"- {a.get('brokerAccountId') or a.get('id') or '?'} "
+                    f"| {a.get('brokerAccountType', '?')} "
+                    f"| {a.get('brokerAccountStatus', '?')} "
+                    f"| всего {_money(a.get('totalBalance'))} "
+                    f"| доступно {_money(a.get('authBalance'))} "
+                    f"| доход {_money(a.get('totalYield'))}"
+                    + (" | ЗАБЛОКИРОВАН" if a.get("isBlocked") else ""))
+        return "\n".join(render(a) for a in accs)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
 def invest_portfolio(broker_account_id: str, days: int = 30) -> str:
-    """Статистика портфеля (P&L) за период. broker_account_id — из invest_accounts()."""
+    """Статистика портфеля (ввод/вывод, купоны, дивиденды, стоимость по месяцам) за
+    период. broker_account_id — из invest_accounts()."""
     try:
-        s = _require(); s.ensure_fresh()
-        start, end = ms_for_period(days)
-        return _json_out(s.invest_portfolio(broker_account_id, start, end), 4000)
+        s = _require(); s.ensure_client_session()
+        # Этот эндпоинт хочет ДАТЫ, а не миллисекунды, как остальные чтения здесь.
+        today = datetime.now().date()
+        data = s.invest_portfolio(broker_account_id,
+                                  (today - timedelta(days=max(1, days))).isoformat(),
+                                  today.isoformat())
+        if isinstance(data, dict) and data.get("errorCode"):
+            return (f"Банк отказал ({data.get('errorCode')}): "
+                    f"{redact_text(str(data.get('errorMessage')))[:160]}")
+        return _json_out(data, 4000)
     except Exception as e:
         return _err(e)
 
@@ -1216,18 +1261,22 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
     """Брокерские операции, новые сверху. limit применяется и к запросу, и к
     выводу (0 = всё, что вернул банк).
 
-    operation_type — фильтр по типу; пусто = все. Полного списка банк нигде не
-    отдаёт; в захвате приложения встретились ровно два значения — «payIn»
-    (пополнение) и «outMulti» (вывод). Всё остальное — догадка, поэтому сначала
-    вызови без фильтра и посмотри, какие типы реально пришли в ответе."""
+    operation_type — фильтр по типу; пусто = все. Полного списка банк не публикует.
+    Наблюдались: buy, sell, payIn, payOut, tax, taxBack (живой ответ) и outMulti
+    (захват приложения). Список не полон — сначала вызови без фильтра и посмотри,
+    какие типы реально пришли в ответе, потом фильтруй по ним."""
     try:
-        s = _require(); s.ensure_fresh()
+        s = _require(); s.ensure_client_session()
         ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
         if not ops:
             return "нет операций"
         def render(o):
-            return (f"- [{o.get('date','')}] {(o.get('amount') or {}).get('value','?')} "
-                    f"| {o.get('description','')[:40]}")
+            # `payment`, not `amount`: the field never existed under that name, so
+            # every row printed «?» for the one number that matters.
+            return (f"- [{str(o.get('date', ''))[:16]}] "
+                    f"{_money(o.get('payment') or o.get('paymentRub'))} "
+                    f"| {o.get('type', '')} | {str(o.get('description', ''))[:40]} "
+                    f"| {o.get('status', '')}")
         # limit was passed to the API AND then ignored here by a hardcoded [:50],
         # so invest_operations(limit=200) silently showed 50.
         return _rows_out(ops, render, limit=limit, total=len(ops),
@@ -1236,12 +1285,38 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
         return _err(e)
 
 @mcp.tool()
-def invest_securities(broker_account_id: str) -> str:
-    """Купленные бумаги (акции/облигации/ETF) по брокерскому счёту."""
+def invest_securities(broker_account_id: str = "") -> str:
+    """Бумаги в портфеле: тикер, количество, текущая цена, доля и доходность.
+    broker_account_id — из invest_accounts(); пусто = все портфели.
+
+    Учти: у брокерского счёта может быть НЕСКОЛЬКО портфелей (рублёвый, валютный),
+    и brokerAccountId портфеля не совпадает с id счёта из invest_accounts() —
+    поэтому пустой ответ на конкретный id ещё не значит «бумаг нет». Вызови без
+    аргумента и посмотри, какие портфели есть."""
     try:
-        s = _require(); s.ensure_fresh()
-        secs = s.invest_securities(broker_account_id)
-        return "\n".join(f"- {sec.get('ticker', sec.get('name','?'))[:12]} | {sec.get('balance','?')} | {sec.get('name','')[:30]}" for sec in secs) or "нет бумаг"
+        s = _require(); s.ensure_client_session()
+        folios = s.invest_securities(broker_account_id)
+        if not folios:
+            return ("Портфелей не найдено"
+                    + (f" для счёта {broker_account_id}. Вызови invest_securities() "
+                       f"без аргумента — id портфеля и id счёта различаются."
+                       if broker_account_id else "."))
+        lines = []
+        for p in folios:
+            lines.append(f"[{p.get('name') or '?'} | brokerAccountId={p.get('brokerAccountId')}]")
+            for pos in p["positions"]:
+                prices = pos.get("prices") or {}
+                cur = (prices.get("currentPrice") or {})
+                y = ((pos.get("yields") or {}).get("yield") or {})
+                lines.append(
+                    f"- {str(pos.get('ticker', '?'))[:14]:14} | {pos.get('securityType', '')[:6]:6} "
+                    f"| {pos.get('currentBalance', '?')} шт "
+                    f"| {_money(cur.get('value'), cur.get('currency', ''))} "
+                    f"| {pos.get('portfolioPercent', '?')}% "
+                    f"| доход {_money((y.get('absolute') or {}).get('value'), 'RUB')}")
+            if not p["positions"]:
+                lines.append("  (пусто)")
+        return "\n".join(lines)
     except Exception as e:
         return _err(e)
 

@@ -997,17 +997,50 @@ class MobileSession:
 
 # ---- messenger / support chat (tm.t-bank-app.ru) — Bearer+cookie, no sig ----
 
+    # The messenger answers an expired token with HTTP 200 and an error object in
+    # the BODY: [{"errorCode": "AUTH_REQUIRED", "errorMessage": "Token inactive"}].
+    # It is a list, so it flowed straight through as if it were the conversations,
+    # and the tool rendered it as one chat with an empty id — an error displayed as
+    # content, which is the worst way to fail: nothing to retry, nothing to read.
+    _TMSG_AUTH_CODES = {"AUTH_REQUIRED", "TOKEN_EXPIRED", "UNAUTHORIZED"}
+
+    @staticmethod
+    def _tmsg_auth_error(data) -> str:
+        rec = data[0] if isinstance(data, list) and data else data
+        if isinstance(rec, dict) and rec.get("errorCode") in MobileSession._TMSG_AUTH_CODES:
+            return str(rec.get("errorMessage") or rec["errorCode"])
+        return ""
+
+    def _messenger_read(self, *, path_override=None, overrides=None, key="messenger_base"):
+        """One messenger read, re-minting the token if the server says it is dead.
+
+        _tmsg_expired() only decodes the JWT's own `exp`, so a token the SERVER has
+        invalidated early still looks fine locally and no re-mint is attempted."""
+        data = self._call_read(key, path_override=path_override, overrides=overrides)
+        why = self._tmsg_auth_error(data)
+        if not why:
+            return data
+        self.tmsg_session_id = ""             # force a re-mint, then try once more
+        self._ensure_tmsg()
+        data = self._call_read(key, path_override=path_override, overrides=overrides)
+        why = self._tmsg_auth_error(data)
+        if why:
+            raise SessionExpired("TMSG_AUTH_REQUIRED",
+                f"Мессенджер отклонил токен даже после переоформления ({why}). "
+                f"Вызови refresh_session() и повтори.")
+        return data
+
     def messenger_conversations(self, archived: bool = False, offset: int = 0) -> list[dict]:
         ov = {"use_is_archived": str(archived).lower(), "offset": str(offset)}
-        return self._as_list(self._call_read("messenger_base",
-                       path_override="/app/bank/messenger/conversations/mobile", overrides=ov))
+        return self._as_list(self._messenger_read(
+            path_override="/app/bank/messenger/conversations/mobile", overrides=ov))
 
     def messenger_messages(self, conversation_id: str, direction: str = "before",
                            message_id: str = "") -> list[dict]:
         ov = {"direction": direction}
         if message_id:
             ov["messageId"] = message_id
-        return self._as_list(self._call_read("messenger_base", overrides=ov,
+        return self._as_list(self._messenger_read(overrides=ov,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages"))
 
     def messenger_hints(self, conversation_id: str) -> list[dict]:
@@ -1063,24 +1096,73 @@ class MobileSession:
                                              overrides={"loyaltyId": loyalty_id, "codes": codes}))
 
     def invest_accounts(self) -> list[dict]:
-        return self._as_list(self._call_read("investbox_accounts"))
+        """The brokerage and InvestBox accounts, unwrapped from payload.accounts.
 
-    def invest_portfolio(self, broker_account_id: str, start: str, end: str,
-                          currency: str = "RUB") -> dict:
+        _as_list knows about `list` and `payload`; this endpoint answers
+        {"accounts": [...]}, which it therefore returned as ONE element — the whole
+        envelope — so the caller printed a single row with no brokerAccountId. That
+        id is the only argument invest_portfolio/operations/securities take, so the
+        entire investment side was unreachable through its own entry point while
+        get_data("invest_accounts") held the same data all along.
+
+        Unwrapped here rather than by teaching _as_list about "accounts": the shape
+        belongs to this endpoint, and a generic rule would start guessing at every
+        other payload that happens to carry a key by that name."""
+        data = self._call_read("investbox_accounts")
+        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+            return [a for a in data["accounts"] if isinstance(a, dict)]
+        return self._as_list(data)
+
+    def invest_portfolio(self, broker_account_id: str, date_from: str, date_to: str,
+                          currency: str = "RUB", resolution: str = "MONTH") -> dict:
+        """Portfolio statistics. `date_from`/`date_to` are ISO **DATES** (2026-01-31).
+
+        They used to be passed the millisecond timestamps every other read here
+        takes, and /api/v1/user/portfolio/statistics answered 400 «неверный формат
+        входных данных» — which _json_out then printed as if it were the portfolio.
+        The captured call also carries resolution and include_cash_in_periods; without
+        them the response has no `dates` series at all."""
         return self._call_read("ca_portfolio_statistics",
                                 overrides={"brokerAccountId": broker_account_id,
-                                           "from": start, "to": end, "currency": currency})
+                                           "from": date_from, "to": date_to,
+                                           "currency": currency,
+                                           "resolution": resolution,
+                                           "include_cash_in_periods": "true"})
 
     def invest_operations(self, broker_account_id: str, operation_type: str = "",
                            limit: int = 50) -> list[dict]:
         ov = {"brokerAccountId": broker_account_id, "limit": str(limit)}
         if operation_type:
             ov["operationType"] = operation_type
-        return self._as_list(self._call_read("ca_operations", overrides=ov))
+        data = self._call_read("ca_operations", overrides=ov)
+        # {"items": [...], "hasNext": …, "nextCursor": …} — _as_list does not know
+        # this key and returned the envelope as a single element, so the caller
+        # printed one row reading «- [] ? |».
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return [o for o in data["items"] if isinstance(o, dict)]
+        return self._as_list(data)
 
-    def invest_securities(self, broker_account_id: str) -> list[dict]:
-        return self._as_list(self._call_read("purchased_securities",
-                                             overrides={"brokerAccountId": broker_account_id}))
+    def invest_securities(self, broker_account_id: str = "") -> list[dict]:
+        """Positions, as [{brokerAccountId, name, positions: [...]}, …].
+
+        The endpoint takes NO account filter — the captured call sends only sort
+        parameters and returns every portfolio. Passing brokerAccountId to it did not
+        error, it just came back with `portfolios: []`, so the tool reported an empty
+        portfolio for an account holding millions. Filtering is ours, done here."""
+        data = self._call_read("purchased_securities",
+                               overrides={"stocksSort": "by_name", "stocksSortOrder": "asc",
+                                          "bondsSort": "by_name", "bondsSortOrder": "asc",
+                                          "etfSort": "by_name", "etfSortOrder": "asc"})
+        out = []
+        for p in (data.get("portfolios") or []) if isinstance(data, dict) else []:
+            acc = (p.get("brokerAccount") or {}) if isinstance(p, dict) else {}
+            if broker_account_id and str(acc.get("brokerAccountId")) != str(broker_account_id):
+                continue
+            out.append({"brokerAccountId": acc.get("brokerAccountId"),
+                        "name": acc.get("name") or acc.get("brokerCyrillic") or "",
+                        "positions": [x for x in (p.get("positions") or [])
+                                      if isinstance(x, dict)]})
+        return out
 
     def session_status(self) -> dict:
         # www.tbank.ru/api/common/v1/session_status (web gateway) — confirmed WORKING
@@ -2946,8 +3028,12 @@ class MobileSession:
     # argument. `providers` hits /providers/compatible/filter, which the app calls as
     # ?ids=fns-rf,gibdd-online-rf,… — with no ids it is a filter with no filter, so
     # the tool could never list anything. `requisites` is the SBP pointer lookup and
-    # needs the phone.
-    _SECTION_ARG = {"providers": "ids", "requisites": "pointer"}
+    # needs the phone. `statements` needs the account: both captured calls send
+    # account + dateFrom + itemsOrder, and without them /v1/statements answers
+    # INVALID_REQUEST_DATA — so the section was advertised in the tool description
+    # and could not work, for anyone, ever. dateFrom/itemsOrder are supplied below.
+    _SECTION_ARG = {"providers": "ids", "requisites": "pointer",
+                    "statements": "account"}
 
     def get_data(self, section: str, arg: str = "") -> Any:
         """Unified getter for banking data.
@@ -2995,10 +3081,17 @@ class MobileSession:
                        "(capture-verified) — they cannot be enumerated through this "
                        "endpoint, only looked up."
                        if arg_key == "ids" else
+                       "Pass the account id from list_accounts()."
+                       if arg_key == "account" else
                        "For a recipient lookup prefer transfer_sbp_resolve(phone), "
                        "which parses the same response; for YOUR OWN account details "
                        "use account_requisites(account_id) — a different endpoint."))
-            return self._call_read(key, overrides={arg_key: arg})
+            ov = {arg_key: arg}
+            if section.lower() == "statements":
+                # The other two query params the app always sends with the account.
+                start, _ = ms_for_period(30)
+                ov.update({"dateFrom": str(start), "itemsOrder": "desc"})
+            return self._call_read(key, overrides=ov)
         return self._call_read(key)
 
 

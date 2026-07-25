@@ -123,6 +123,52 @@ def test_conversation_ids_survive_intact():
     print("  messenger_conversations: full ids, bot names, unread counts, honest empty")
 
 
+def test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat():
+    """The messenger answers an expired token with HTTP 200 and an error object in
+    the BODY — a LIST, so it flowed through as if it were the conversations and the
+    tool printed «- ? | id= |»: one chat with no id, no name and nothing to retry.
+
+    Found by calling every read tool against the live API twice, 25 minutes apart:
+    the second run returned that row. _tmsg_expired() only decodes the token's own
+    `exp`, so a token the SERVER retired early still looks valid locally and no
+    re-mint is attempted."""
+    DEAD = [{"errorId": "99c4bb", "errorCode": "AUTH_REQUIRED",
+             "errorMessage": "Token inactive"}]
+    ALIVE = [{"conversationId": "c-1", "title": "Поддержка",
+              "updatedAt": "2026-07-25T10:00:00Z"}]
+
+    class Tmsg(Stub):
+        def __init__(self, answers):
+            super().__init__()
+            self.answers = list(answers)
+            self.tmsg_session_id = "jwt.header.payload"
+            self.remints = 0
+
+        def _ensure_tmsg(self):
+            self.remints += 1
+            self.tmsg_session_id = "fresh"
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            return self.answers.pop(0) if self.answers else ALIVE
+
+    s = Tmsg([DEAD, ALIVE])
+    out = run(server.messenger_conversations, s)
+    check("Поддержка" in out,
+          f"the retry after a re-mint must return the real chats: {out!r}")
+    check("id= " not in out and "- ? " not in out,
+          f"an error envelope was rendered as a conversation: {out!r}")
+    check(s.remints == 1, f"exactly one re-mint expected, got {s.remints}")
+    check(s.tmsg_session_id == "fresh", "the dead token was not replaced")
+
+    # Still dead after re-minting → say so, actionably. Never a fake chat.
+    s2 = Tmsg([DEAD, DEAD])
+    out2 = run(server.messenger_conversations, s2)
+    check("SESSION EXPIRED" in out2 or "refresh_session" in out2,
+          f"a token that stays dead must point at the recovery tool: {out2!r}")
+    check("Token inactive" in out2, f"the bank's reason must survive: {out2!r}")
+    print("  messenger: a retired token is re-minted once, never shown as a chat")
+
+
 def test_the_cart_prints_the_ids_it_must_be_edited_by():
     """grocery_set_cart addresses goods BY ID and replaces the whole cart, and
     grocery_cart is the only tool that says what is in it. Printing names alone left
@@ -252,6 +298,77 @@ def test_the_store_list_shows_and_sorts_by_delivery_speed():
     print("  grocery_stores: window and price shown, speed/price/min_sum sortable")
 
 
+def test_the_invest_envelopes_are_unwrapped():
+    """One bug in four places, found by calling every read tool against the live API.
+
+    _as_list understands `list` and `payload`. These three endpoints answer with
+    their own key — {"accounts": …}, {"items": …}, {"portfolios": …} — so it returned
+    the ENVELOPE as a single element and every tool rendered one useless row:
+    «- ? | », «- [] ? | ». Nothing raised and nothing was empty, so it looked like an
+    account with no data rather than a parser that missed.
+
+    The one that mattered is invest_accounts: brokerAccountId is the only argument
+    the other three take, so its bad row made the whole investment side unreachable —
+    while get_data("invest_accounts") had been returning the same payload all along."""
+    accounts = {"accounts": [
+        {"brokerAccountId": "2000000001", "brokerAccountType": "InvestBox",
+         "brokerAccountStatus": "NORM",
+         "totalBalance": {"currency": "RUB", "value": 4459.28},
+         "authBalance": {"currency": "RUB", "value": 1178.4},
+         "totalYield": {"currency": "RUB", "value": 1.48}},
+        {"brokerAccountId": "2000000002", "brokerAccountType": "Fdr",
+         "brokerAccountStatus": "NORM", "isBlocked": True,
+         "totalBalance": {"currency": "RUB", "value": 7344144.96}}]}
+
+    class InvestStub(Stub):
+        def ensure_client_session(self, *a, **kw):
+            return None
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            return {"investbox_accounts": accounts,
+                    "ca_operations": {"hasNext": True, "nextCursor": "1", "items": [
+                        {"date": "2026-07-21T17:34:51+03:00", "type": "payOut",
+                         "description": "Вывод со счета", "status": "executed",
+                         "payment": {"currency": "RUB", "value": -150000}}]},
+                    "purchased_securities": {"totals": {}, "portfolios": [
+                        {"brokerAccount": {"brokerAccountId": "2001145214",
+                                           "name": "Рублевый"},
+                         "positions": [{"ticker": "AMD", "securityType": "stock",
+                                        "currentBalance": 28, "portfolioPercent": 7.65,
+                                        "prices": {"currentPrice": {"value": 521.51,
+                                                                    "currency": "USD"}},
+                                        "yields": {"yield": {"absolute": {
+                                            "value": 1200.0, "currency": "RUB"}}}}]}]},
+                    }[key]
+
+    out = run(server.invest_accounts, InvestStub())
+    check(out.count("\n") == 1, f"both accounts must be listed: {out!r}")
+    check("2000000001" in out and "2000000002" in out,
+          f"the brokerAccountId is the only key to the rest of the vertical: {out!r}")
+    check("?" not in out.split("|")[0], f"the id must resolve, not print «?»: {out!r}")
+    check("4 459.28 RUB" in out, f"the balance must be shown: {out!r}")
+    check("ЗАБЛОКИРОВАН" in out, f"a blocked account must say so: {out!r}")
+
+    ops = run(server.invest_operations, InvestStub(), "2000000001", "", 10)
+    check("-150 000.00 RUB" in ops,
+          f"the amount lives under `payment`, not `amount`: {ops!r}")
+    check("Вывод со счета" in ops and "payOut" in ops, f"operation detail: {ops!r}")
+    check("[]" not in ops, f"the envelope leaked into the row: {ops!r}")
+
+    secs = run(server.invest_securities, InvestStub())
+    check("AMD" in secs and "28 шт" in secs, f"positions must be listed: {secs!r}")
+    check("521.51 USD" in secs, f"the price must keep its currency: {secs!r}")
+    check("2001145214" in secs,
+          f"the PORTFOLIO id differs from the account id and must be shown: {secs!r}")
+
+    # Filtering by an account id that names no portfolio must say why, not answer
+    # "no securities" — the ids are from different namespaces.
+    none = run(server.invest_securities, InvestStub(), "2000000001")
+    check("без аргумента" in none,
+          f"an empty filter result must explain the id mismatch: {none!r}")
+    print("  invest: accounts, operations and positions unwrapped from their envelopes")
+
+
 def test_money_formatting_is_unambiguous():
     """A bare float used to fall through to str(), so every caller holding a plain
     number printed «1000.0» — no separator, no currency, easy to misread."""
@@ -281,9 +398,11 @@ def main():
     print("response parsers:")
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
+    test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
     test_delivery_speed_is_read_from_both_slot_shapes()
     test_the_store_list_shows_and_sorts_by_delivery_speed()
+    test_the_invest_envelopes_are_unwrapped()
     test_money_formatting_is_unambiguous()
     if failures:
         print("\nFAILED:")
