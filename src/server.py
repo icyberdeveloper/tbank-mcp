@@ -1,7 +1,8 @@
 """T-Bank mobile API MCP server (FastMCP).
 
-48 tools for the agent. Low-level API calls are encapsulated in high-level tools.
-get_data(section) covers 60+ read endpoints in one tool.
+Low-level API calls are encapsulated in high-level tools; get_data(section)
+covers 60+ read endpoints in one tool. The tool docstrings ARE the agent-facing
+reference — there is no separate tool list to keep in sync.
 
 Run: python -m src.server
 """
@@ -19,6 +20,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
+from .observability import redact_text
 
 mcp = FastMCP("tbank")
 _session: MobileSession | None = None
@@ -100,11 +102,22 @@ def _require():
 
 
 def _err(e):
+    """The error path for every tool — and therefore the last thing standing between
+    a live credential and the model's context.
+
+    The mobile sessionid (the HMAC key for /v1/pay) travels as a QUERY PARAM on every
+    request, and requests/urllib3 put the whole URL into the text of ConnectionError,
+    MaxRetryError and the HTTPError from raise_for_status(). So a plain network blip —
+    no attacker needed — used to publish the session credential into the transcript.
+    Redact before returning, on every branch: an API error message can carry a URL too.
+    """
+    def safe(msg):
+        return redact_text(str(msg))[:300]
     if isinstance(e, SessionExpired):
-        return f"SESSION EXPIRED: call refresh_session(). {str(e.message)[:300]}"
+        return f"SESSION EXPIRED: call refresh_session(). {safe(e.message)}"
     if isinstance(e, TbankApiError):
-        return f"API error ({e.result_code}): {str(e.message)[:300]}"
-    return f"{type(e).__name__}: {str(e)[:300]}"
+        return f"API error ({e.result_code}): {safe(e.message)}"
+    return f"{type(e).__name__}: {safe(e)}"
 
 
 def _store(app_id: str, point_id: str) -> tuple[str, str]:
@@ -120,7 +133,7 @@ def _store(app_id: str, point_id: str) -> tuple[str, str]:
     return app_id, point_id
 
 
-# ── LOGIN (4) ──────────────────────────────────────────────
+# ── LOGIN ───────────────────────────────────────────────────
 
 @mcp.tool()
 def login(phone: str) -> str:
@@ -169,7 +182,7 @@ def confirm_pin(pin: str) -> str:
         return _err(e)
 
 
-# ── SESSION (3) ──────────────────────────────────────────────
+# ── SESSION ─────────────────────────────────────────────────
 
 @mcp.tool()
 def refresh_session() -> str:
@@ -221,7 +234,7 @@ def keepalive() -> str:
         return _err(e)
 
 
-# ── CORE READS (5) ─────────────────────────────────────────
+# ── CORE READS ──────────────────────────────────────────────
 
 @mcp.tool()
 def list_accounts() -> str:
@@ -269,9 +282,13 @@ def spending_categories(account_id: str, days: int = 30) -> str:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
         rep = s.spending_categories(account_id, start, end)
-        lines = [f"Total: {rep['total_spent']} {rep['currency']}"]
-        for c in rep["categories"]:
-            lines.append(f"- {c['category'][:25]:25} {c['amount']:>8.0f} {c['share_pct']:5.1f}%")
+        cats = rep["categories"]
+        lines = [f"Траты за {days} дн.: {rep['total_spent']:,.2f} {rep['currency']} "
+                 f"по {len(cats)} категориям (поступления {rep['total_earned']:,.2f})"]
+        for c in cats:
+            lines.append(f"- {c['category'][:25]:25} {c['amount']:>12,.2f} {c['share_pct']:5.1f}%")
+        if not cats:
+            lines.append("(категорий нет — за период не было расходных операций)")
         return "\n".join(lines)
     except Exception as e:
         return _err(e)
@@ -302,7 +319,7 @@ def get_data(section: str) -> str:
         return _err(e)
 
 
-# ── GROCERY (6) ────────────────────────────────────────────
+# ── GROCERY ─────────────────────────────────────────────────
 
 @mcp.tool()
 def grocery_stores() -> str:
@@ -538,7 +555,7 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
         return _err(e)
 
 
-# ── DIAGNOSTICS (1) ────────────────────────────────────────
+# ── DIAGNOSTICS ─────────────────────────────────────────────
 
 @mcp.tool()
 def diagnostics(limit: int = 40) -> str:
@@ -581,7 +598,7 @@ def diagnostics(limit: int = 40) -> str:
         return _err(e)
 
 
-# ── MESSENGER (4) ──────────────────────────────────────────
+# ── MESSENGER ───────────────────────────────────────────────
 
 @mcp.tool()
 def messenger_conversations() -> str:
@@ -674,7 +691,7 @@ def messenger_unread() -> str:
         return _err(e)
 
 
-# ── MONEY (2) ──────────────────────────────────────────────
+# ── MONEY ───────────────────────────────────────────────────
 
 @mcp.tool()
 def transfer_sbp_resolve(phone: str) -> str:
@@ -733,7 +750,7 @@ def payment_commission(body: str = "") -> str:
         return _err(e)
 
 
-# ── INVEST (4) ─────────────────────────────────────────────
+# ── INVEST ──────────────────────────────────────────────────
 
 @mcp.tool()
 def invest_accounts() -> str:
@@ -777,7 +794,7 @@ def invest_securities(broker_account_id: str) -> str:
         return _err(e)
 
 
-# ── CARDS & ACCOUNT DETAILS (5) ────────────────────────────
+# ── CARDS & ACCOUNT DETAILS ─────────────────────────────────
 
 # A handful of endpoints validate the mobile *sessionid*, not just the Bearer
 # token, and refuse an ANONYMOUS-level session. The CLIENT window is only ~11
@@ -922,7 +939,7 @@ def account_requisites(account_id: str, currencies: str = "RUB") -> str:
         return _err(e)
 
 
-# ── IDENTITY DOCUMENTS (1) ─────────────────────────────────
+# ── IDENTITY DOCUMENTS ──────────────────────────────────────
 
 _DOC_TITLES = {
     "RusNationalID": "Паспорт РФ", "RusInternationalID": "Загранпаспорт",
@@ -993,7 +1010,7 @@ def documents(kind: str = "", include_others: bool = False) -> str:
         return _err_session(e)
 
 
-# ── ORDERS ACROSS EVERY VERTICAL (2) ───────────────────────
+# ── ORDERS ACROSS EVERY VERTICAL ────────────────────────────
 
 _ORDER_KINDS = {
     "афиша": ("cinema", "concerthall", "club", "sports", "other"),
@@ -1132,7 +1149,7 @@ def travel_order_details(order_id: str) -> str:
         return _err(e)
 
 
-# ── GROCERY NUTRITION (2) ──────────────────────────────────
+# ── GROCERY NUTRITION ───────────────────────────────────────
 
 @mcp.tool()
 def grocery_good_info(good_id: str, app_id: str = "", point_id: str = "") -> str:
@@ -1229,7 +1246,7 @@ def grocery_rank(query: str, app_id: str = "", point_id: str = "",
         return _err(e)
 
 
-# ── APP SEARCH (1) ─────────────────────────────────────────
+# ── APP SEARCH ──────────────────────────────────────────────
 
 # Pure UI scaffolding in the search response — carries no searchable entity.
 _SEARCH_NOISE = {"masterWidget", "block_marker"}
@@ -1301,7 +1318,7 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
         return _err(e)
 
 
-# ── CINEMA (2) ─────────────────────────────────────────────
+# ── CINEMA ──────────────────────────────────────────────────
 
 @mcp.tool()
 def cinema_search(query: str = "", city: str = "Москва") -> str:
@@ -1326,7 +1343,9 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
                     city: str = "Москва") -> str:
     """Сеансы фильма на дату. event_id — из cinema_search(), date — YYYY-MM-DD.
     cinema — подстрока названия кинотеатра ("каро 11"), around — время "17:00",
-    window_min — допуск в минутах вокруг него."""
+    window_min — допуск в минутах вокруг него.
+    Отдаёт objectId площадки и slotId каждого сеанса — оба нужны для
+    cinema_seats() и cinema_book(), поодиночке бесполезны."""
     try:
         s = _require(); s.ensure_fresh()
         venues = s.cinema_schedule(event_id, date, city=city)
@@ -1357,8 +1376,13 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
                     continue
                 shown += 1
                 km = (geo.get("distance") or 0) / 1000.0
+                # objectId identifies the VENUE and is required by cinema_seats /
+                # cinema_book alongside the slotId. Without it the documented flow
+                # dead-ends: the agent holds a slotId it cannot use and has no other
+                # tool that yields a cinema objectId. concert_schedule already prints it.
                 lines.append(f"{name} — {geo.get('address','')}"
-                             + (f"  [{km:.1f} км]" if km else ""))
+                             + (f"  [{km:.1f} км]" if km else "")
+                             + f" | objectId={info.get('objectId','?')}")
                 lines += [f"    {x}" for x in slots]
         if not lines:
             hint = f", фильтр «{cinema}»" if cinema else ""
@@ -1369,7 +1393,7 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
         return _err(e)
 
 
-# ── TICKET BOOKING (6) ─────────────────────────────────────
+# ── TICKET BOOKING ──────────────────────────────────────────
 
 def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "") -> list[str]:
     """Vacant seats grouped by row, cheapest rows first."""
@@ -1564,7 +1588,7 @@ def ticket_cancel(order_id: str, kind: str = "movie") -> str:
                 "Если он всё ещё активен, отмени через приложение.")
 
 
-# ── EXTRAS (3) ─────────────────────────────────────────────
+# ── EXTRAS ──────────────────────────────────────────────────
 
 @mcp.tool()
 def bank_documents() -> str:
@@ -1625,13 +1649,79 @@ def payment_receipt(payment_id: str, save_to: str = "") -> str:
         return _err(e)
 
 
-# ── UTILITY (1) ────────────────────────────────────────────
+# ── UTILITY ─────────────────────────────────────────────────
+
+_FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "FLOWS.md")
+
+# Words an agent is likely to use, per section. Matched against the query in
+# addition to the section title, so a Russian request finds an English heading.
+_FLOW_KEYWORDS = {
+    "bootstrap": "логин вход авторизация otp смс пароль пин первый login",
+    "session": "сессия токен refresh keepalive expired протух",
+    "read accounts": "счета счёт баланс операции покупки траты расходы категории",
+    "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",
+    "transfer": "перевод перевести деньги сбп телефону получатель комиссия оплата счёта",
+    "messenger": "чат чаты поддержка сообщение написать непрочитанные",
+    "invest": "инвестиции акции облигации портфель брокер бумаги доходность",
+    "credit": "кредит кредиты долг задолженность график платежей рейтинг выписка",
+    "cards": "карта карты реквизиты лимиты cvv пин документы паспорт снилс инн права",
+    "orders": "заказы заказ история покупок отель поездка путешествия авиа поезд",
+    "nutrition": "кбжу калории белки жиры углеводы питание состав диета",
+    "tickets": "билет билеты кино фильм сеанс концерт афиша театр места бронь",
+    "global search": "поиск найти искать search",
+}
+
+
+def _flow_sections() -> list[tuple[str, str]]:
+    """FLOWS.md split on '## ' headings → [(title, body), …]."""
+    if not os.path.exists(_FLOWS_PATH):
+        return []
+    text = open(_FLOWS_PATH, encoding="utf-8").read()
+    out = []
+    for chunk in re.split(r"^## ", text, flags=re.M)[1:]:
+        title, _, body = chunk.partition("\n")
+        out.append((title.strip(), body.rstrip()))
+    return out
+
 
 @mcp.tool()
-def flows() -> str:
-    """Гид по флоу (заказ продуктов, переводы, логин, мессенджер, инвест)."""
-    path = os.path.join(os.path.dirname(__file__), "..", "FLOWS.md")
-    return open(path, encoding="utf-8").read()[:6000] if os.path.exists(path) else "FLOWS.md not found"
+def flows(topic: str = "") -> str:
+    """Гид по флоу: порядок вызовов для конкретной задачи.
+
+    topic — что тебе нужно, своими словами: «продукты», «перевод», «билеты»,
+    «карты», «заказы», «кбжу», «инвест», «кредит», «чат», «поиск», «логин».
+    Без аргумента — список тем и общие правила (там же про тулы с реальными
+    деньгами). Отдаёт только подходящие разделы, а не весь файл."""
+    sections = _flow_sections()
+    if not sections:
+        return f"FLOWS.md not found at {_FLOWS_PATH}"
+
+    def body_of(name_part: str) -> str:
+        for title, body in sections:
+            if name_part.lower() in title.lower():
+                return f"## {title}\n{body}"
+        return ""
+
+    q = topic.strip().lower()
+    if not q:
+        toc = "\n".join(f"- {t}" for t, _ in sections if not t.lower().startswith("notes"))
+        return ("Разделы FLOWS.md — вызови flows(topic) с нужным:\n" + toc +
+                "\n\n" + body_of("Notes"))
+
+    tokens = [w for w in re.split(r"[^\wа-яёА-ЯЁ]+", q) if len(w) > 2]
+    scored = []
+    for title, body in sections:
+        hay = (title + " " + _FLOW_KEYWORDS.get(
+            next((k for k in _FLOW_KEYWORDS if k in title.lower()), ""), "")).lower()
+        score = sum(1 for w in tokens if w in hay)
+        if score:
+            scored.append((score, title, body))
+    if not scored:
+        toc = "\n".join(f"- {t}" for t, _ in sections if not t.lower().startswith("notes"))
+        return (f"По запросу «{topic}» раздел не найден. Есть эти:\n" + toc +
+                "\n\nВызови flows(topic) с одним из них.")
+    scored.sort(key=lambda x: -x[0])
+    return "\n\n".join(f"## {t}\n{b}" for _, t, b in scored[:3])
 
 
 def main():

@@ -1678,40 +1678,64 @@ class MobileSession:
                    if isinstance(o, dict) and str(o.get("account", "")) == str(account_id)]
         return ops
 
+    @staticmethod
+    def _histogram_side(side: dict | None) -> tuple[float, dict[str, float]]:
+        """Sum one side of an operations_histogram payload by category.
+
+        The shape is a TREE, not a list: {summary:{value}, intervals:[{summary,
+        aggregated:[{groupBy, amount:{value}, category:{id,name}}], start, end}]}
+        — one interval per `period` (31 of them for a 30-day daily request), each
+        holding that day's categories. Iterating the side itself yields the two
+        dict KEYS, which is what the previous version did: every entry failed the
+        isinstance(dict) test, so the tool reported Total 0 and no categories on
+        a payload whose summary was 3.87M RUB (captures.xml #52).
+        """
+        if not isinstance(side, dict):
+            return 0.0, {}
+        by_cat: dict[str, float] = {}
+        for iv in side.get("intervals") or []:
+            if not isinstance(iv, dict):
+                continue
+            for a in iv.get("aggregated") or []:
+                if not isinstance(a, dict):
+                    continue
+                name = ((a.get("category") or {}).get("name")
+                        or a.get("groupBy") or a.get("groupByKey") or "?")
+                amt = a.get("amount") or {}
+                try:
+                    val = abs(float(amt.get("value") if isinstance(amt, dict) else amt))
+                except (TypeError, ValueError):
+                    continue
+                by_cat[name] = by_cat.get(name, 0.0) + val
+        # The bank's own total is authoritative; summing the tree is the fallback
+        # (they agree to the kopeck on the capture, but a partial page would not).
+        summary = side.get("summary") or {}
+        try:
+            total = abs(float(summary.get("value")))
+        except (TypeError, ValueError):
+            total = sum(by_cat.values())
+        return total, by_cat
+
     def spending_categories(self, account_id: str | None, start_ms: int, end_ms: int) -> dict:
-        """operations_histogram?groupBy=category -> {earning:[...], spending:[...]}."""
+        """operations_histogram?groupBy=category, flattened to per-category totals."""
         ov = {"start": str(start_ms), "end": str(end_ms), "groupBy": "category",
               "period": "day", "config": "allNotInner", "timeZone": "+03:00"}
         if account_id:
             ov["accounts"] = account_id
         data = self._call_read("operations_histogram", overrides=ov)
         payload = data.get("payload", data) if isinstance(data, dict) else {}
-        spending = payload.get("spending") or []
-        earning = payload.get("earning") or []
-        total = 0.0
-        cats = []
-        for c in spending:
-            if not isinstance(c, dict):
-                continue
-            amt = c.get("amount") or c.get("credit") or {}
-            v = amt.get("value") if isinstance(amt, dict) else amt
-            try:
-                fv = abs(float(v))
-            except (TypeError, ValueError):
-                fv = 0.0
-            total += fv
-            cats.append({
-                "category": c.get("name") or c.get("categoryName") or c.get("spendingCategory") or "?",
-                "amount": round(fv, 2), "count": c.get("count") or c.get("operationsCount") or 0,
-                "mcc": str(c.get("mcc")) if c.get("mcc") is not None else "",
-            })
-        for c in cats:
-            c["share_pct"] = round(c["amount"] / total * 100, 2) if total else 0.0
+        total, by_cat = self._histogram_side(payload.get("spending"))
+        earned, _ = self._histogram_side(payload.get("earning"))
+        cats = [{"category": name, "amount": round(amount, 2),
+                 "share_pct": round(amount / total * 100, 2) if total else 0.0}
+                for name, amount in by_cat.items()]
+        currency = (((payload.get("spending") or {}).get("summary") or {})
+                    .get("currency") or {}).get("name") or "RUB"
         return {
             "period": {"start_ms": start_ms, "end_ms": end_ms},
-            "total_spent": round(total, 2), "currency": "RUB",
+            "total_spent": round(total, 2), "currency": currency,
             "categories": sorted(cats, key=lambda x: x["amount"], reverse=True),
-            "earning_categories": len(earning),
+            "total_earned": round(earned, 2),
         }
 
     # -- low-level envelope --------------------------------------------------

@@ -44,6 +44,24 @@ _RE_CARD = re.compile(r"\b(?:\d[ -]?){13,19}\b")
 # (cart_hash=16, uuid=32, order_id=12 digits) are NOT matched.
 _RE_BLOB = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
 
+# Secrets ride in the QUERY STRING of every request (client._call_read appends
+# sessionid/deviceId/wuid), and requests/urllib3 embed the full URL in the text of
+# ConnectionError / MaxRetryError / HTTPError. _RE_BLOB does NOT catch the sessionid:
+# it is 61 chars but the '.' in the middle splits it into a 32- and a 28-char run,
+# both under the 40-char threshold. So scrub by parameter NAME as well.
+_RE_QS_SECRET = re.compile(
+    r"(?i)\b(sessionid|session_id|wuid|deviceid|olddeviceid|access_token|refresh_token|"
+    r"id_token|client_assertion|fingerprint|code|pointer|phone)=[^&\s\"'<>]+")
+
+
+def redact_text(s: str) -> str:
+    """Scrub a free-text string (an exception message, a URL) before it reaches a
+    log or the model's context. Safe on any input."""
+    return _RE_BLOB.sub("<redacted-blob>",
+        _RE_CARD.sub("<card>",
+            _RE_JWT.sub("<jwt>",
+                _RE_QS_SECRET.sub(r"\1=<redacted>", str(s)))))
+
 
 def _is_sensitive_key(k: str) -> bool:
     kl = str(k).lower()
@@ -63,9 +81,7 @@ def _redact_value(v):
             parsed = None
         if isinstance(parsed, (dict, list)):
             return json.dumps(_redact_value(parsed), ensure_ascii=False)[:_MAX_VAL]
-        v = _RE_JWT.sub("<jwt>", v)
-        v = _RE_CARD.sub("<card>", v)
-        v = _RE_BLOB.sub("<redacted-blob>", v)
+        v = redact_text(v)
         if len(v) > _MAX_VAL:
             v = v[:_MAX_VAL] + "…<trunc>"
         return v

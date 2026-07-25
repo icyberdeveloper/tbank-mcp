@@ -4,8 +4,10 @@
 
 ## Features
 
-- **32 tools**: accounts, operations, grocery ordering, transfers, messenger, investments
-- **6 skills**: grocery order, bill pay, transfer, budget analysis, invest advisor, login
+- **56 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+  concert tickets, orders, transfers, messenger, investments
+- **7 skills**: grocery order, tickets, bill pay, transfer, budget analysis,
+  invest advisor, login
 - **Self-healing TLS**: handles Russian Trusted Root CA + HARICA cert rotation
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
 - **Secure login**: password/PIN stay OUT of the LLM context (local CLI or env var)
@@ -91,16 +93,24 @@ export TBANK_PHONE="+7XXXXXXXXXX"
 }
 ```
 
-## Tools (32)
+## Tools
+
+Each tool's docstring is the reference — this table is only a map of the surface.
 
 | Group | Tools |
 |---|---|
 | **Login** | `login`, `confirm_otp`, `confirm_password`, `confirm_pin` |
 | **Session** | `refresh_session`, `session_status`, `keepalive` |
 | **Reads** | `list_accounts`, `list_operations`, `spending_categories`, `operations_histogram`, `get_data` |
+| **Cards & accounts** | `list_cards`, `card_limits`, `card_requisites`, `card_operations`, `account_requisites` |
+| **Documents** | `documents`, `bank_documents`, `insurance_policies`, `payment_receipt` |
 | **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status` |
+| **Nutrition** | `grocery_good_info`, `grocery_rank` |
+| **Orders** | `orders`, `order_details`, `travel_order_details` |
+| **Tickets** | `cinema_search`, `cinema_schedule`, `cinema_seats`, `concert_schedule`, `concert_hall`, `cinema_book`, `ticket_pay`, `ticket_cancel` |
+| **Search** | `search_app` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
-| **Money** | `transfer`, `payment_commission` |
+| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Utility** | `flows`, `diagnostics` |
 
@@ -113,6 +123,7 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | Skill | What it does |
 |---|---|
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
+| `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
 | `tbank-bill-pay` | Phone, internet, ЖКХ, taxes, fines |
 | `tbank-transfer-money` | P2P, СБП, account transfers |
 | `tbank-budget-analyzer` | Spending analysis, subscription audit, savings tips |
@@ -130,7 +141,8 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 - **`events.jsonl` + `attempts.jsonl`** — redacted diagnostics-логи (`~/.local/share/tbank-mcp/`).
   Содержат только step / http_status / blame / сумму / order id — никогда токены, cookies,
   адрес, телефон, email, номера счетов. Безопасны для расшаривания при дебаге (читаются тулом `diagnostics`).
-- Money tools (`transfer`, `grocery_checkout`) требуют подтверждения.
+- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) требуют подтверждения
+  конкретной суммы — просьба «купи» подтверждением не считается.
 
 ## Disclaimer
 

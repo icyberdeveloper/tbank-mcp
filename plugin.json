@@ -19,6 +19,7 @@
   "skills": [
     "skills/tbank-login",
     "skills/tbank-grocery-order",
+    "skills/tbank-tickets",
     "skills/tbank-transfer-money",
     "skills/tbank-bill-pay",
     "skills/tbank-budget-analyzer",

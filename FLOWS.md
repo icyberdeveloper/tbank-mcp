@@ -4,8 +4,11 @@ Ordered tool-call sequences for common tasks. The session self-refreshes
 (`ensure_fresh` → silent re-login, no OTP) on the first call of each flow, so you
 don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 
-> **Tool names:** the **48 MCP tools** are the authoritative interface (see TOOLS.md
-> and the skills). Some sections below describe INTERNAL api steps — e.g. the web
+Served section-by-section by the `flows(topic)` tool — call it with no argument
+for the list of topics. Reading the whole file is rarely what you want.
+
+> **Tool names:** the **56 MCP tools** and their docstrings are the authoritative
+> interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
 > `grocery_goods`, `grocery_cart_set`, `active_loans` are NOT MCP tools).
@@ -104,16 +107,18 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 5. Messenger / support chat  (read + send)
 
-1. `messenger_conversations()` → list chats (find the support chat
+1. `messenger_unread()` → how many unread, and in which chats (by name).
+2. `messenger_conversations()` → list chats (find the support chat
    `conversationId`, e.g. title "Поддержка").
-2. `messenger_messages(conversation_id)` → read the chat history (newest first;
+3. `messenger_messages(conversation_id)` → read the chat history (newest first;
    `direction`/`message_id` to page).
-3. `messenger_hints(conversation_id)` → quick-reply suggestions.
-4. `messenger_faq(conversation_id)` → self-help FAQ.
-5. `messenger_send(conversation_id, text)` → **send** a reply (real
-   message, not money). `body` = JSON message body (or empty to replay).
-6. `messenger_mark_read(conversation_id, message_id)` → mark read.
-7. `messenger_unread()` → unread count across chats.
+4. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
+   real support agent — not money, but not undoable either; say what you are
+   about to send before sending it.
+
+> `messenger_hints`, `messenger_faq` and `messenger_mark_read` exist on the client
+> but are NOT exposed as tools — quick replies and FAQ add nothing an agent cannot
+> write itself, and marking a chat read is a side effect the user did not ask for.
 
 > Messenger needs a `tmsgSessionID` (JWT, ~1h), auto-minted via `issueTokenBySSO`
 > from the silent-relogin access_token. No OTP — works as long as the long-lived
@@ -125,16 +130,20 @@ You normally just call a read tool; the above runs under the hood. Call
 2. `invest_portfolio(broker_account_id, days)` → portfolio statistics.
 3. `invest_operations(broker_account_id, operation_type, limit)` → broker ops.
 4. `invest_securities(broker_account_id)` → purchased stocks/bonds/ETF.
-5. `investbox_offers()` / `investbox_product_yield()` / `broker_margin()` /
-   `invest_pension_profile()` → extras.
+
+Extras have no tool of their own — reach them through `get_data(section)`:
+`invest_offers`, `invest_yield`, `broker_margin`, `pension`.
 
 ## 7. Credit / debt
 
-1. `active_loans()` → active credits.
-2. `credit_payment_schedule()` → payment schedule.
-3. `credit_rating()` / `credit_recommendations()` → rating + advice.
-4. `full_debt_amount()` / `account_details()` → debt + account detail.
-5. `statements()` / `statement_exist()` → statements.
+There are no dedicated tools here. Every one of these is a `get_data(section)`
+call returning raw JSON:
+
+1. `get_data("loans")` → active credits.
+2. `get_data("credit_schedule")` → payment schedule.
+3. `get_data("credit_rating")` / `get_data("credit_recommendations")` → rating + advice.
+4. `get_data("full_debt_amount")` / `get_data("account_details")` → debt + account detail.
+5. `get_data("statements")` / `get_data("statement_exist")` → statements.
 
 ## 8. Cards, account details, identity documents
 
@@ -166,8 +175,17 @@ You normally just call a read tool; the above runs under the hood. Call
 concerts, flights, trains and hotels together (188 orders back to 2018).
 `kind` = "афиша" | "кино" | "путешествия" | "продукты" or a raw `objectType`.
 `order_details(order_id)` adds hall/seats/booking code for entertainment orders;
-groceries have their own `grocery_order_status`, and travel orders carry no extra
-detail on this host.
+groceries have their own `grocery_order_status`.
+
+Travel is split by vertical, because each one authorizes differently:
+- **Hotels** — `travel_order_details(order_id)` works: `hotels.t-bank-app.ru`
+  accepts the plain Bearer, and returns dates, city, hotel, room, guests, price.
+- **Flights and trains** are BLOCKED, and not by a request-shape bug. Both need a
+  separate link-token minted outside this host — trains via
+  `tsocial.tinkoff.ru/.../game/link-token` (answers `B002D965`), flights via
+  `/v1/travel_link_auth_token` (answers `INSUFFICIENT_PRIVILEGES`, even on a
+  CLIENT-level session). `travel_order_details` says so instead of retrying;
+  the summary from `orders()` is all there is.
 
 ## 10. Grocery nutrition / lowest-calorie shopping
 
@@ -176,20 +194,56 @@ detail on this host.
    per package. Nutrition comes in two shapes: some retailers fill the structured
    protein/fat/carb/energy fields, ВкусВилл leaves them empty and publishes only
    free text ("белки 3,3 г, жиры 3 г, углеводы 18,4 г; 113,8 ккал") — both parsed.
-3. `grocery_pick_lightest(query, …)` → the same search, ranked by kcal/100 g.
-   Goods whose nutrition the retailer does not publish sort LAST, not zero.
+3. `grocery_rank(query, …, sort_by, order)` → the same search, ranked. `sort_by` ∈
+   `price | weight | kcal | kcal_pack | protein | fat | carb`; empty = the store's
+   own order. Nutrition keys auto-load the КБЖУ (one extra request per candidate),
+   so pass them only when the user asked for a nutritional criterion.
+   Goods whose nutrition the retailer does not publish sort LAST in BOTH
+   directions — "not published" is not zero, and must never win a "most calories"
+   query. The MCP ranks; WHICH ranking to use for a given phrase lives in the
+   grocery skill, and applies only on an explicit request.
 
-## 11. Cinema
+## 11. Tickets — cinema and concerts  (REAL money at step 5)
 
-1. `cinema_search(query, city)` → eventId (city-independent).
+Full detail, including the confirmation wording, lives in the `tbank-tickets`
+skill. The order here is the part you must not improvise:
+
+1. `cinema_search(query, city)` → `eventId` (city-independent). For concerts,
+   theatre and exhibitions use `search_app(query, screen="afisha")` instead.
 2. `cinema_schedule(event_id, date, cinema="каро 11", around="17:00")` → showtimes
    per venue, filtered by venue-name substring and a time window (`window_min`).
-   Returns `slotId` per showing — the handle a future booking flow would need.
+   Concerts: `concert_schedule(event_id)` — their showings are not date-keyed.
+   Take **both** `slotId` and `objectId`; a `slotId` without its venue is useless.
+3. `cinema_seats(event_id, slot_id, object_id, row, max_price, kind)` → free seats
+   with prices. Empty for a concert usually means free seating — `concert_hall(…)`
+   shows those sectors, but they are **read-only**: the capture has no
+   order/create example for that screen, so the MCP will not invent one.
+4. `cinema_book(…, seats="7:10,7:11")` → creates the order, moves NO money.
+   Returns `orderId` and `nfsPaymentToken`. **The token is returned here and
+   nowhere else** — `order_details()` does not carry it. Lose it and the booking
+   can never be paid, only re-made.
+5. `ticket_pay(order_id, amount, nfs_payment_token, account_id)` → **REAL money.**
+   Only after the user confirms a concrete sum and concrete seats. The tool
+   re-reads the order from the backend and refuses to pay a mismatched amount.
+6. `order_details(order_id)` → booking code, hall, seats.
+
+> Cancellation (`ticket_cancel`) is NOT proven: both paths answered 500 in the
+> capture. On error the order status is UNKNOWN, not "still booked" — check
+> `orders("афиша")` before doing anything else, and never retry blind.
+
+## 12. Global search across the app
+
+`search_app(query, screen, limit)` — one full-text search over whatever the given
+screen indexes. `screen` is a strict enum and a wrong value is a 400, not an empty
+result: `services` (banking + everything), `afisha` (cinema/concert/theatre/
+exhibition), `movie_main` (films only), `grocery`. Hits come back grouped by
+`objectType` with their ids; for films the id IS the `eventId` that
+`cinema_schedule` wants, so search → schedule needs no translation step.
 
 ## Notes
 
-- Every tool returns a short string (counts + summaries) or JSON; read its
-  description in [TOOLS.md](TOOLS.md).
+- Every tool returns a short string (counts + summaries) or JSON; its own
+  docstring is the reference — they are the interface the MCP actually exposes.
 - On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
   no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
   (login + OTP + password).
@@ -203,5 +257,7 @@ detail on this host.
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools (`transfer`, `grocery_checkout`) are REAL — confirm the amount/recipient
-  (transfer) and store+sum (grocery_checkout) with the user before running.
+- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) are REAL — confirm the
+  amount/recipient (transfer), store+sum (grocery_checkout) or sum+seats
+  (ticket_pay) with the user before running. A request to buy something is not a
+  confirmation to pay for it; the confirmation is an answer to a concrete sum.
