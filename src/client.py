@@ -780,10 +780,11 @@ class MobileSession:
 
     def operations_histogram(self, account_id: str | None, start_ms: int, end_ms: int,
                              period: str = "day", group_by: str = "category") -> dict:
+        # the app scopes this one by "accounts" (plural) and always sends timeZone
         ov = {"start": str(start_ms), "end": str(end_ms), "period": period,
-              "groupBy": group_by, "config": "allNotInner"}
+              "groupBy": group_by, "config": "allNotInner", "timeZone": "+03:00"}
         if account_id:
-            ov["account"] = account_id
+            ov["accounts"] = account_id
         return self._call_read("operations_histogram", overrides=ov)
 
     def list_regular_payments(self, activity_types: str = "payment") -> list[dict]:
@@ -1460,21 +1461,34 @@ class MobileSession:
         return data
 
     def list_operations(self, account_id: str | None, start_ms: int, end_ms: int) -> list[dict]:
-        ov = {"start": str(start_ms), "end": str(end_ms), "isSuspicious": "true"}
-        if account_id:
-            ov["account"] = account_id
+        """Operations for a period, filtered to one account.
+
+        ``isSuspicious`` is a per-operation FIELD, not a filter flag to set: passing
+        ``isSuspicious=true`` narrows the result to fraud-flagged operations, which is
+        normally none — the capture has one such request (item 105) returning an empty
+        list while every request without it returns 273-440 operations. Sending it
+        unconditionally made this tool always answer "no operations".
+
+        The real app also does not scope /v1/operations by account (it fetches all and
+        filters client-side on the operation's ``account`` field) — so do the same."""
+        ov = {"start": str(start_ms), "end": str(end_ms)}
         data = self._call_read("operations", overrides=ov)
         if isinstance(data, dict):
             pl = data.get("payload")
-            return pl if isinstance(pl, list) else ([pl] if pl else [])
-        return data if isinstance(data, list) else []
+            ops = pl if isinstance(pl, list) else ([pl] if pl else [])
+        else:
+            ops = data if isinstance(data, list) else []
+        if account_id:
+            ops = [o for o in ops
+                   if isinstance(o, dict) and str(o.get("account", "")) == str(account_id)]
+        return ops
 
     def spending_categories(self, account_id: str | None, start_ms: int, end_ms: int) -> dict:
         """operations_histogram?groupBy=category -> {earning:[...], spending:[...]}."""
-        ov = {"start": str(start_ms), "end": str(end_ms),
-              "groupBy": "category", "period": "day", "config": "allNotInner"}
+        ov = {"start": str(start_ms), "end": str(end_ms), "groupBy": "category",
+              "period": "day", "config": "allNotInner", "timeZone": "+03:00"}
         if account_id:
-            ov["account"] = account_id
+            ov["accounts"] = account_id
         data = self._call_read("operations_histogram", overrides=ov)
         payload = data.get("payload", data) if isinstance(data, dict) else {}
         spending = payload.get("spending") or []

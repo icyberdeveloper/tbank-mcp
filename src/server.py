@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import traceback
+from datetime import datetime
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -226,8 +227,21 @@ def list_operations(account_id: str, days: int = 30) -> str:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
         ops = s.list_operations(account_id, start, end)
-        return "\n".join(f"- [{(o.get('operationTime') or o.get('date',''))}] "
-            f"{((o.get('amount') or {}).get('value','?')):>8} | {o.get('description','')[:40]}"
+        if not ops:
+            return f"[account {account_id}] Операций за {days} дн. нет."
+        def when(o):
+            # operationTime is {"milliseconds": 1784658904000}, not a string
+            t = o.get("operationTime") or o.get("debitingTime") or {}
+            ms = t.get("milliseconds") if isinstance(t, dict) else t
+            if not ms:
+                return "?"
+            return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M")
+        def sign(o):
+            return "-" if (o.get("type") == "Debit") else "+"
+        return "\n".join(
+            f"- [{when(o)}] {sign(o)}{(o.get('amount') or {}).get('value','?')} "
+            f"{((o.get('amount') or {}).get('currency') or {}).get('name','')} | "
+            f"{(o.get('description') or '')[:40]}"
             for o in ops[:50])
     except Exception as e:
         return _err(e)

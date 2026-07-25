@@ -23,7 +23,11 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/operations",
   "params": {
-   "isSuspicious": "true",
+   # NO isSuspicious: it is a per-operation FIELD, not a client flag. Passing
+   # isSuspicious=true narrows the result to fraud-flagged operations — verified
+   # live: same request 283 operations without it, 0 with it. It was captured from
+   # a one-off "suspicious operations" screen (item 105, which returned 0) and
+   # mistakenly baked in as a default.
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "appVersion": "7.31.6",
