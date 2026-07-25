@@ -1384,14 +1384,24 @@ class MobileSession:
         for ingredient in ingredients:
             q = norm(ingredient)
             found = None
+            # collect every previously-ordered match, then score them the same way
+            # as search hits — taking the first match picked whatever the history
+            # happened to list first, tiny packs and dried forms included.
+            cands = []
             for g in custom_once():
                 name = (g.get("name") or "").lower().replace("ё", "е")
                 if q and q in name:
                     price = g.get("price", {})
-                    pv = price.get("value", 0) if isinstance(price, dict) else 0
-                    found = {"id": str(g.get("id", "")), "name": g.get("name", ""),
-                             "price": pv, "source": "custom_ordered", "query": q}
-                    break
+                    weight = g.get("weight", {})
+                    cands.append({
+                        "id": str(g.get("id", "")), "name": g.get("name", ""),
+                        "price": price.get("value", 0) if isinstance(price, dict) else 0,
+                        "weight": (f"{weight.get('value','')} {weight.get('unit','')}".strip()
+                                   if isinstance(weight, dict) else ""),
+                        "likely_raw": name.startswith(q)})
+            best = self._pick_candidate(cands, q)
+            if best:
+                found = {**best, "source": "custom_ordered", "query": q}
             if found:
                 plan["items"].append(found)
                 plan["total_sum"] += found.get("price", 0) or 0
@@ -1406,17 +1416,135 @@ class MobileSession:
                 g = hits.get(q)
                 if g:
                     found = {"id": g.get("id", ""), "name": g.get("name", ""),
-                             "price": g.get("price", 0), "source": "search", "query": q}
+                             "price": g.get("price", 0), "source": "search", "query": q,
+                             "weight": g.get("weight", ""),
+                             "likely_raw": g.get("likely_raw", False)}
                     plan["items"].append(found)
                     plan["total_sum"] += found.get("price", 0) or 0
                 else:
                     plan["missing"].append(ingredient)
         return plan
 
+    # Forms that are the ingredient in name only — a recipe asking for "чеснок"
+    # does not want ground dried garlic. Only penalized when the ingredient itself
+    # is not a spice (see _pick_candidate).
+    _NOT_THE_FRESH_THING = ("сушен", "молот", "приправа", "смесь", "концентрат",
+                            "экстракт", "ароматизат", "в горшочке", "семена")
+    _SPICE_QUERIES = ("приправ", "перец", "специ", "паприк", "куркум", "зира",
+                      "кориц", "лавров", "базилик", "орегано", "хмели")
+    # single-serving packs (30 g of sour cream, 10 g of dried garlic) satisfy the
+    # text match but not the recipe
+    _MIN_SANE_GRAMS = 50.0
+
+    @staticmethod
+    def _grams(item: dict) -> float:
+        """Package weight in grams, 0 when unknown. weight is like '100 GRM'."""
+        raw = (item.get("weight") or "").strip()
+        if not raw:
+            return 0.0
+        parts = raw.split()
+        try:
+            val = float(parts[0])
+        except (ValueError, IndexError):
+            return 0.0
+        unit = (parts[1] if len(parts) > 1 else "").upper()
+        if unit in ("KGRM", "KG", "KGM", "LT", "L"):
+            return val * 1000.0
+        return val
+
+    @staticmethod
+    def _qualifier_stems(full_query: str, used_query: str) -> list[str]:
+        """Stems of the words dropped when falling back to a looser query.
+
+        Falling back from "яйца куриные" to "яйца" throws away the part that says
+        WHICH eggs, and the loose query happily matches "Яйца перепелиные копченые".
+        Keep the dropped words so scoring can still prefer a name that mentions them."""
+        full = set((full_query or "").lower().replace("ё", "е").split())
+        used = set((used_query or "").lower().replace("ё", "е").split())
+        return [w[:5] for w in (full - used) if len(w) >= 4]
+
+    def _pick_candidate(self, results: list[dict], query: str,
+                        qualifiers: list[str] | None = None) -> dict | None:
+        """Choose the best search hit for an ingredient.
+
+        The planner used to take results[0], and grocery_search sorts by
+        (likely_raw, price) — so it always picked the CHEAPEST raw-looking hit.
+        That is how "чеснок" became 10 g of dried ground garlic (52₽, beating fresh
+        at 118₽) and "сметана" became a 30 g single-serving cup (55₽). Score instead:
+        prefer a real, sanely-sized raw ingredient, and only then prefer cheap."""
+        if not results:
+            return None
+        q = (query or "").lower().replace("ё", "е")
+        want_spice = any(w in q for w in self._SPICE_QUERIES)
+
+        def score(it: dict) -> tuple:
+            name = (it.get("name") or "").lower().replace("ё", "е")
+            grams = self._grams(it)
+            # spices are legitimately dried and sold in 20 g jars — neither penalty
+            # applies when the ingredient itself is a spice
+            wrong_form = (not want_spice
+                          and any(w in name for w in self._NOT_THE_FRESH_THING))
+            too_small = (not want_spice) and 0.0 < grams < self._MIN_SANE_GRAMS
+            price = it.get("price")
+            price = price if isinstance(price, (int, float)) else 10 ** 6
+            # a dropped qualifier ("куриные", "докторская") outranks everything:
+            # the right product in the wrong size beats the wrong product
+            missed_qualifier = bool(qualifiers) and not any(s in name for s in qualifiers)
+            # lower is better, field order = priority
+            return (missed_qualifier, wrong_form, too_small,
+                    not it.get("likely_raw", False), not name.startswith(q), price)
+
+        return min(results, key=score)
+
+    def _search_best(self, query: str, app_id: str, point_id: str) -> dict | None:
+        """Search an ingredient, loosening the query until something sane matches.
+
+        Accepts a loose-query hit only if it still honours the words that were
+        dropped; otherwise it keeps looking and falls back to the best seen."""
+        fallback = None
+        for variant in self._query_variants(query):
+            try:
+                r = self.grocery_search(variant, app_id=app_id, point_id=point_id)
+            except Exception:
+                continue
+            quals = self._qualifier_stems(query, variant)
+            best = self._pick_candidate(r, variant, qualifiers=quals)
+            if not best:
+                continue
+            name = (best.get("name") or "").lower().replace("ё", "е")
+            if not quals or any(s in name for s in quals):
+                return best
+            fallback = fallback or best
+        return fallback
+
+    @staticmethod
+    def _query_variants(q: str) -> list[str]:
+        """Progressively looser queries. The catalog search matches on a literal
+        substring of the product name, so a multi-word or inflected request finds
+        nothing: "колбаса докторская" misses "Колбаса вареная ... Докторская", and
+        "яйца куриные" misses "Яйцо куриное". Fall back to the head noun, then to
+        its stem so a plural still matches the singular."""
+        out = [q]
+        head = q.split()[0] if q.split() else q
+        if head != q:
+            out.append(head)
+        # "яйца" -> "яйц" matches "Яйцо куриное"; keep >=3 chars so the stem stays
+        # specific enough not to match arbitrary products
+        if len(head) >= 4:
+            out.append(head[:-1])
+        if len(head) >= 6:
+            out.append(head[:-2])
+        seen, uniq = set(), []
+        for v in out:
+            if v and v not in seen:
+                seen.add(v)
+                uniq.append(v)
+        return uniq
+
     def _parallel_search(self, queries: list[str], app_id: str, point_id: str,
                          max_workers: int = 4) -> dict:
         """Run global grocery searches in parallel (concurrency-capped). Returns
-        {normalized_query: first_hit_dict}. #12"""
+        {normalized_query: best_hit_dict}. #12"""
         from concurrent.futures import ThreadPoolExecutor
         out: dict[str, dict] = {}
         if not queries:
@@ -1424,8 +1552,7 @@ class MobileSession:
 
         def one(q):
             try:
-                r = self.grocery_search(q, app_id=app_id, point_id=point_id)
-                return q, (r[0] if r else None)
+                return q, self._search_best(q, app_id, point_id)
             except Exception:
                 return q, None
 

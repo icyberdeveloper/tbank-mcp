@@ -325,9 +325,17 @@ def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -
                                     store_app_id=app_id, store_point_id=point_id)
         lines = [f"[store appId={app_id} pointId={point_id}] Total: {plan['total_sum']}₽"]
         for i in plan["items"]:
-            lines.append(f"✓ {i['name'][:40]} | {i['price']}₽ | {i['source']}")
+            # id and weight are what the caller actually needs: without the id every
+            # item had to be re-searched by hand before add_to_cart, and without the
+            # weight a 30 g single-serving pack is indistinguishable from a real one.
+            lines.append(
+                f"✓ id={i.get('id','?')} | {i['name'][:38]} | {i['price']}₽"
+                f" | {i.get('weight') or '-'}"
+                f" | {'RAW' if i.get('likely_raw') else 'PREP'} | {i['source']}")
         if plan["missing"]:
             lines.append(f"MISSING: {', '.join(plan['missing'])}")
+        lines.append("Проверь вес/форму позиций перед add_to_cart — id можно "
+                     "передавать в grocery_add_to_cart как есть.")
         return "\n".join(lines)
     except Exception as e:
         return _err(e)
