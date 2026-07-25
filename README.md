@@ -194,6 +194,14 @@ present the tests additionally check the fixtures have not drifted from it.
   `TBANK_DEVICE_TIMEZONE` so your payments do not describe someone else's phone.
 - Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) require confirmation of a
   specific amount — "buy it" is not a confirmation.
+- **Tool annotations.** Every tool declares what it does to the world, so the host
+  can tell them apart: 44 of 58 are `readOnlyHint: true` and may run without a
+  prompt; the other 14 never can. Those are the three that move money, the ones that
+  commit or cancel an order or rewrite a cart, `messenger_send` (it reaches another
+  person), the login steps (they send an SMS), `refresh_session` (it rotates a
+  credential another process may hold) and `payment_receipt` (it writes over a local
+  file). The classification lives in one table, `TOOL_KINDS` in `src/server.py`, and
+  a tool missing from it raises at import rather than defaulting to anything.
 
 ## Disclaimer
 

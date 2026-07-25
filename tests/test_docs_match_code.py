@@ -130,6 +130,84 @@ def test_the_marketplace_entry_matches_the_plugin():
     print(f"  marketplace.json agrees with plugin.json: v{p.get('version')}, {n} skills")
 
 
+def test_every_tool_declares_what_it_does_to_the_world():
+    """`readOnlyHint: true` is what lets a host run a tool without asking.
+
+    Before these annotations every tool prompted alike, so confirming
+    list_accounts looked exactly like confirming transfer — which is how a person
+    learns to click «allow» without reading, on the one call that moves money. The
+    annotations are also a pass/fail item in Anthropic's review criteria, along
+    with a title on every tool and a name of 64 characters or less.
+
+    Asserted against the LIVE registry, which is what a connected agent receives —
+    not against the table in the source, which would just be checking that a dict
+    equals itself."""
+    tools = registered_tools()
+
+    # The tools that must never auto-approve, named here rather than derived from
+    # the table: this list is the SPEC, and the table is the implementation. If
+    # they are generated from the same place the test proves nothing.
+    MUST_CONFIRM = {
+        "transfer", "grocery_checkout", "ticket_pay",        # real money
+        "cinema_book", "ticket_cancel",                      # commits/cancels an order
+        "grocery_add_to_cart", "grocery_set_cart",           # rewrites the cart
+        "messenger_send",                                    # reaches another person
+        "login", "confirm_otp", "confirm_password",          # sends an SMS / auth state
+        "confirm_pin", "refresh_session",                    # rotates a live credential
+        "payment_receipt",                                   # writes over a local file
+    }
+
+    for name, tool in sorted(tools.items()):
+        ann = getattr(tool, "annotations", None)
+        check(ann is not None, f"{name}: no annotations — the host must assume the worst")
+        if ann is None:
+            continue
+        check(bool(ann.title), f"{name}: no title (review criteria require one)")
+        check(len(name) <= 64, f"{name}: tool names must be 64 characters or fewer")
+        check(ann.openWorldHint is True,
+              f"{name}: every tool here talks to the bank — openWorldHint must be set")
+        if name in MUST_CONFIRM:
+            check(ann.readOnlyHint is not True,
+                  f"{name} is marked read-only and may therefore run WITHOUT asking")
+        else:
+            check(ann.readOnlyHint is True,
+                  f"{name} does not claim to be read-only, so it prompts like a "
+                  f"payment does — either it belongs in MUST_CONFIRM or its kind "
+                  f"in TOOL_KINDS is wrong")
+
+    # Money must be the loudest signal available, not merely "not read-only".
+    for name in ("transfer", "grocery_checkout", "ticket_pay"):
+        check(tools[name].annotations.destructiveHint is True,
+              f"{name} moves real money and must be marked destructive")
+        check(tools[name].annotations.idempotentHint is False,
+              f"{name} must not be advertised as safe to retry")
+
+    missing = sorted(set(tools) - set(server.TOOL_KINDS))
+    check(not missing, f"tools with no entry in TOOL_KINDS: {missing}")
+    stale = sorted(set(server.TOOL_KINDS) - set(tools))
+    check(not stale, f"TOOL_KINDS names tools that no longer exist: {stale}")
+
+    auto = sum(1 for t in tools.values() if t.annotations.readOnlyHint)
+    print(f"  annotations: {auto}/{len(tools)} tools may auto-approve, "
+          f"{len(tools) - auto} always ask")
+
+
+def test_a_new_tool_cannot_ship_unclassified():
+    """The failure this guards against is silent: a tool added without an entry
+    would default to «prompts for everything», which looks harmless and trains the
+    same click-through reflex the annotations exist to prevent. So it raises at
+    import instead."""
+    try:
+        server._annotations_for("a_tool_nobody_classified")
+        check(False, "an unclassified tool was annotated instead of refused")
+    except RuntimeError as e:
+        check("TOOL_KINDS" in str(e),
+              f"the refusal must name the table to edit: {e}")
+        check("READ" in str(e) and "ACT" in str(e),
+              f"the refusal must say what the choices mean: {e}")
+    print("  annotations: an unclassified tool is refused at import, not defaulted")
+
+
 def test_every_tool_is_documented():
     """A tool no document mentions is a tool no agent will find."""
     tools = tool_names()
@@ -253,6 +331,8 @@ def test_money_tools_warn_in_the_description_the_agent_receives():
 def main():
     print("docs vs code:")
     test_documented_tools_exist()
+    test_every_tool_declares_what_it_does_to_the_world()
+    test_a_new_tool_cannot_ship_unclassified()
     test_every_tool_is_documented()
     test_every_tool_is_reachable_from_a_skill()
     test_plugin_ships_every_skill()

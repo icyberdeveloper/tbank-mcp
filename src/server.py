@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from . import trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
 from .observability import redact_text
@@ -33,10 +34,124 @@ mcp = FastMCP("tbank")
 # changed here would change what every agent sees.
 _untraced_tool = mcp.tool
 
+# ── What each tool DOES, as the host needs to know it ───────────────────────
+#
+# `readOnlyHint: true` lets a host run a tool WITHOUT asking. That is the whole
+# point: before this table all 58 tools prompted alike, so confirming
+# list_accounts looked exactly like confirming transfer — which is how a person
+# learns to click "allow" without reading, on the one call that moves money.
+#
+# Three kinds, and the boundary is "what happens if this runs when it should not":
+#
+#   READ   nothing changes at the bank or on disk. Safe to auto-approve, safe to
+#          retry. (Refreshing our own session token does not count — every tool
+#          here does that implicitly on the way in.)
+#   ACT    changes something outside this process that we cannot take back: money
+#          moves, an order is created or cancelled, a cart is overwritten, a
+#          message reaches another person. Always confirm.
+#   ASK    no bank-side change, but not free either — sends an SMS, rotates a
+#          credential another process may be holding, writes over a local file.
+#          Neither hint is set, so the host assumes the worst and prompts.
+#
+# A tool missing from this table raises at import. That is deliberate: the
+# alternative is a new tool defaulting to "prompts for everything", which looks
+# harmless and quietly trains the same reflex.
+READ, ACT, ASK = "read", "act", "ask"
+TOOL_KINDS: dict[str, tuple[str, str]] = {
+    # session
+    "login": ("Вход по телефону", ASK),
+    "confirm_otp": ("Подтверждение кода из SMS", ASK),
+    "confirm_password": ("Подтверждение пароля", ASK),
+    "confirm_pin": ("Подтверждение PIN", ASK),
+    "refresh_session": ("Обновление сессии", ASK),
+    "session_status": ("Статус сессии", READ),
+    "keepalive": ("Продление сессии", READ),
+    # accounts and operations
+    "list_accounts": ("Счета", READ),
+    "list_operations": ("Операции по счёту", READ),
+    "spending_categories": ("Траты по категориям", READ),
+    "operations_histogram": ("График трат", READ),
+    "get_data": ("Банковские данные по разделам", READ),
+    # cards and documents
+    "list_cards": ("Карты", READ),
+    "card_limits": ("Лимиты карты", READ),
+    "card_requisites": ("Реквизиты карты", READ),
+    "card_operations": ("Операции по карте", READ),
+    "account_requisites": ("Реквизиты счёта", READ),
+    "documents": ("Документы клиента", READ),
+    "bank_documents": ("Справки банка", READ),
+    "insurance_policies": ("Страховые полисы", READ),
+    "payment_receipt": ("Скачивание чека в файл", ASK),
+    # orders
+    "orders": ("Заказы", READ),
+    "order_details": ("Детали заказа", READ),
+    "travel_order_details": ("Детали поездки", READ),
+    # grocery
+    "grocery_stores": ("Магазины и доставка", READ),
+    "grocery_search": ("Поиск товара", READ),
+    "grocery_rank": ("Товары с сортировкой", READ),
+    "grocery_good_info": ("Карточка товара и КБЖУ", READ),
+    "grocery_plan_order": ("Планирование заказа", READ),
+    "grocery_cart": ("Содержимое корзины", READ),
+    "grocery_attempts": ("Попытки оформления", READ),
+    "grocery_order_status": ("Статус заказа", READ),
+    "grocery_add_to_cart": ("Добавление в корзину", ACT),
+    "grocery_set_cart": ("Перезапись корзины", ACT),
+    "grocery_checkout": ("Оформление и оплата заказа", ACT),
+    # tickets
+    "cinema_search": ("Поиск фильма", READ),
+    "cinema_schedule": ("Расписание сеансов", READ),
+    "cinema_seats": ("Свободные места", READ),
+    "concert_schedule": ("Показы концерта", READ),
+    "concert_hall": ("Секторы концертной площадки", READ),
+    "cinema_book": ("Бронирование мест", ACT),
+    "ticket_pay": ("Оплата брони", ACT),
+    "ticket_cancel": ("Отмена заказа", ACT),
+    # search
+    "search_app": ("Поиск по приложению", READ),
+    # messenger
+    "messenger_conversations": ("Чаты", READ),
+    "messenger_messages": ("История чата", READ),
+    "messenger_unread": ("Непрочитанные", READ),
+    "messenger_send": ("Отправка сообщения", ACT),
+    # money
+    "transfer_sbp_resolve": ("Получатель СБП по телефону", READ),
+    "payment_commission": ("Предпросмотр комиссии", READ),
+    "transfer": ("Перевод денег", ACT),
+    # invest
+    "invest_accounts": ("Инвест-счета", READ),
+    "invest_portfolio": ("Статистика портфеля", READ),
+    "invest_operations": ("Брокерские операции", READ),
+    "invest_securities": ("Бумаги в портфеле", READ),
+    # utility
+    "flows": ("Порядок вызовов по теме", READ),
+    "diagnostics": ("События последних оплат", READ),
+    "debug_report": ("Как использовали этот MCP", READ),
+}
+
+
+def _annotations_for(name: str) -> ToolAnnotations:
+    if name not in TOOL_KINDS:
+        raise RuntimeError(
+            f"tool {name!r} has no entry in TOOL_KINDS. Classify it as READ "
+            f"(nothing changes), ACT (irreversible outside this process) or ASK "
+            f"(no bank-side change, but not free) — see the note above the table.")
+    title, kind = TOOL_KINDS[name]
+    # openWorldHint everywhere: every one of these talks to the bank.
+    ann = {"title": title, "openWorldHint": True}
+    if kind == READ:
+        ann.update(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
+    elif kind == ACT:
+        ann.update(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+    return ToolAnnotations(**ann)
+
 
 def _traced_tool(*a, **kw):
-    register = _untraced_tool(*a, **kw)
-    return lambda fn: register(trace.wrap(fn))
+    def register(fn):
+        title, _ = TOOL_KINDS.get(fn.__name__, ("", ""))
+        opts = {"title": title, "annotations": _annotations_for(fn.__name__), **kw}
+        return _untraced_tool(*a, **opts)(trace.wrap(fn))
+    return register
 
 
 mcp.tool = _traced_tool
