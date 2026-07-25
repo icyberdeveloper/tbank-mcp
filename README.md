@@ -123,7 +123,7 @@ Russian and so is the person reading the answer.
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
-| **Utility** | `flows`, `diagnostics` |
+| **Utility** | `flows`, `diagnostics`, `debug_report` |
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
 
@@ -180,6 +180,14 @@ present the tests additionally check the fixtures have not drifted from it.
   `~/.local/share/tbank-mcp/`. They carry step, http_status, blame, amount and order
   id, and never tokens, cookies, addresses, phone numbers, emails or account numbers.
   Safe to share while debugging; the `diagnostics` tool reads them.
+- **`calls.jsonl`** — one line per tool call, so it can be seen how an agent uses
+  this MCP: the tool, its arguments, the duration, and the FIRST LINE of the answer,
+  which is what the agent actually read. Held to the same promise as the files above:
+  arguments that are free text a person wrote (a chat message, a transfer note) or a
+  credential are measured, never stored; long digit runs — account, card, order and
+  payment ids — are replaced in the recorded line, both to keep them out and because
+  the report groups by that line. The `debug_report` tool reads it. On by default;
+  `TBANK_TRACE=0` disables it, `TBANK_TRACE_FILE` moves it, and it rotates at 5 MB.
 - **Device profile.** Payments carry a 3DS/anti-fraud block whose device facts —
   screen size, locale, timezone — default to the device the traffic was captured
   from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` / `TBANK_DEVICE_LANGUAGE` /

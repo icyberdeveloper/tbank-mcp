@@ -19,10 +19,27 @@ from datetime import datetime
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from . import trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
 from .observability import redact_text
 
 mcp = FastMCP("tbank")
+
+# Every @mcp.tool() below is recorded. Done by replacing the decorator ONCE rather
+# than touching 57 functions: a per-tool opt-in is a list somebody has to remember to
+# extend, and the tool that gets forgotten is the one whose behaviour is a mystery.
+# trace.wrap keeps __wrapped__, so FastMCP still builds its schema and description
+# from the real signature — pinned by tests/test_trace.py, because a schema that
+# changed here would change what every agent sees.
+_untraced_tool = mcp.tool
+
+
+def _traced_tool(*a, **kw):
+    register = _untraced_tool(*a, **kw)
+    return lambda fn: register(trace.wrap(fn))
+
+
+mcp.tool = _traced_tool
 _session: MobileSession | None = None
 _SESSION_FILE = os.environ.get(
     "TBANK_SESSION",
@@ -111,6 +128,11 @@ def _err(e):
     no attacker needed — used to publish the session credential into the transcript.
     Redact before returning, on every branch: an API error message can carry a URL too.
     """
+    # Tell the tracer this call failed, and with what. Every tool funnels its
+    # failures through here, so this one line is what makes the recorded outcome a
+    # fact from the error path instead of a guess made by matching the answer string.
+    trace.note_error(e)
+
     def safe(msg):
         return redact_text(str(msg))[:300]
     if isinstance(e, SessionExpired):
@@ -803,6 +825,54 @@ def diagnostics(limit: int = 40) -> str:
                 parts.append(f"err={str(r.get('error'))[:50]}")
             lines.append(" | ".join(parts))
         return "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def debug_report(runs: int = 0, top: int = 6) -> str:
+    """Как этим MCP пользовались: какие тулы звали, в каком порядке, что получили
+    в ответ и где застряли. Для отладки самого MCP, не для банковских задач.
+
+    Пишется автоматически при каждом вызове любого тула (выключается TBANK_TRACE=0).
+    Секретов и свободного текста в трассе нет — см. src/trace.py.
+
+    runs — сколько последних запусков сервера взять (0 = все, что есть в файле).
+    top — сколько строк показывать в каждом разделе.
+
+    Что смотреть:
+      «повторы» — один и тот же тул с теми же аргументами подряд. Агент не понял
+        ответ. Это самый прямой указатель на плохую формулировку в докстринге.
+      «ответы» — реальные первые строки, которые агент прочитал, с частотой.
+        Отказы и «ничего не найдено» тут видно вперемешку с успехами — намеренно:
+        решать, что из этого проблема, должен человек, а не таблица строк в коде.
+      «переходы» — какой тул за каким. Расходится с флоу в скиле — значит скил
+        читается не так, как написан."""
+    try:
+        rows = trace.load(runs=runs)
+        if not rows:
+            return (f"Трасса пуста ({trace.TRACE_FILE}). "
+                    f"{'Она выключена: TBANK_TRACE=0.' if not trace.enabled() else ''}"
+                    " Вызовы записываются начиная со следующего.")
+        rep = trace.report(rows, top=top)
+        out = [f"{rep['calls']} вызовов за {rep['runs']} запусков сервера "
+               f"({trace.TRACE_FILE})", "", "ТУЛЫ (вызовы/ошибки, задержка, ответ):"]
+        for t in rep["tools"][:max(top * 3, 12)]:
+            out.append(f"- {t['tool']:24} n={t['n']:<4} err={t['err']:<3} "
+                       f"p50={t['p50_ms']}ms p95={t['p95_ms']}ms ~{t['avg_chars']} симв.")
+            for head, n in t["answers"]:
+                out.append(f"      {n:>3}× {head[:110]}")
+        if rep["repeats"]:
+            out += ["", "ПОВТОРЫ (тот же тул, те же аргументы, подряд):"]
+            out += [f"- {r['tool']} ×{r['times']} — {r['head'][:90]}"
+                    for r in rep["repeats"]]
+        if rep["transitions"]:
+            out += ["", "ПЕРЕХОДЫ:"]
+            out += [f"- {a} → {b}  ×{n}" for (a, b), n in rep["transitions"]]
+        if rep["starts"]:
+            out += ["", "С ЧЕГО НАЧИНАЛИ: " +
+                    ", ".join(f"{t}×{n}" for t, n in rep["starts"][:top])]
+        return "\n".join(out)
     except Exception as e:
         return _err(e)
 

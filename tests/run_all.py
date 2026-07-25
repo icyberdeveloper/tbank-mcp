@@ -32,6 +32,9 @@ def main():
     # Never write into ~/.local/share/tbank-mcp/ from a test run.
     env["TBANK_ATTEMPTS"] = os.path.join(tmp, "attempts.jsonl")
     env["TBANK_EVENTS"] = os.path.join(tmp, "events.jsonl")
+    # The call trace is on by default, and a test run drives hundreds of tools —
+    # without this the suite would bury the user's real trace under its own noise.
+    env["TBANK_TRACE_FILE"] = os.path.join(tmp, "calls.jsonl")
 
     width = max(len(f) for f in files)
     failed, results = [], []
