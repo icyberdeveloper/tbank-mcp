@@ -128,11 +128,28 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 |---|---|
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
-| `tbank-bill-pay` | Phone, internet, ЖКХ, taxes, fines |
+| `tbank-bill-pay` | Topping up a phone (a P2P transfer). Service bills — ЖКХ, taxes, fines — are **not** implemented; the skill says so and points at the app |
 | `tbank-transfer-money` | P2P, СБП, account transfers |
 | `tbank-budget-analyzer` | Spending analysis, subscription audit, savings tips |
 | `tbank-invest-advisor` | Portfolio, P&L, rebalancing, tax optimization |
 | `tbank-login` | Multi-step login, session management |
+
+## Tests
+
+No pytest — the tests are standalone scripts. Run them all:
+
+```bash
+.venv/bin/python tests/run_all.py            # 11 files, ~35 s, offline
+.venv/bin/python tests/run_all.py transfer   # only files matching "transfer"
+```
+
+Each runs in its own process, and the runner redirects the attempt/event journals to
+a temp directory so a test run never writes to `~/.local/share/tbank-mcp/`.
+
+Everything needed is in the repo: request contracts are pinned against scrubbed
+fixtures in `tests/fixtures/` (real structure and protocol values, synthetic personal
+data), so the suite is meaningful on a clean clone. Where the original Burp capture is
+present the tests additionally check the fixtures have not drifted from it.
 
 ## Security
 
@@ -141,7 +158,12 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
   Один и тот же файл читают и `login_cli.py`, и MCP-сервер — без ручной настройки.
   При старте MCP логирует только путь/размер/права доступа, без токенов и cookies.
 - **Пароль/PIN** — НЕ в git, НЕ в коде, НЕ в контексте LLM (если используешь login_cli.py).
-- **0 hardcoded secrets** in code (verified by audit).
+- **No secrets in the repo.** Two kinds of committed material look secret-adjacent and
+  are not: `ca/roots/*.pem` are public CA root certificates, shipped on purpose and
+  pinned by SHA-256 in `src/tls.py`; `tests/fixtures/*.json` are request contracts
+  scrubbed from a real capture — real structure and protocol values, synthetic
+  account, phone, address and device ids. The captures themselves are gitignored and
+  never leave the machine.
 - **`events.jsonl` + `attempts.jsonl`** — redacted diagnostics-логи (`~/.local/share/tbank-mcp/`).
   Содержат только step / http_status / blame / сумму / order id — никогда токены, cookies,
   адрес, телефон, email, номера счетов. Безопасны для расшаривания при дебаге (читаются тулом `diagnostics`).
