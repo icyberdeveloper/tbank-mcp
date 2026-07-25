@@ -419,7 +419,16 @@ class MobileSession:
                     post_body = json.loads(raw) if isinstance(raw, str) else raw
                 except json.JSONDecodeError:
                     post_body = raw
-            r = self._http.post(url, params=params, json=post_body, headers=headers, timeout=30)
+            if tpl.get("form"):
+                # A few endpoints (payment_commission) take
+                # application/x-www-form-urlencoded, not JSON — posting JSON there
+                # returns INVALID_REQUEST_DATA. Dict values are JSON-encoded fields.
+                data = {k: (json.dumps(v, ensure_ascii=False)
+                            if isinstance(v, (dict, list)) else v)
+                        for k, v in (post_body or {}).items()}
+                r = self._http.post(url, params=params, data=data, headers=headers, timeout=30)
+            else:
+                r = self._http.post(url, params=params, json=post_body, headers=headers, timeout=30)
         elif method == "PUT":
             r = self._http.put(url, params=params, headers=headers, timeout=30)
         else:
@@ -956,8 +965,18 @@ class MobileSession:
         return self._call_read("payment_gate_pay", body=body)
 
     def payment_commission(self, body: dict | None = None) -> dict:
-        """Compute payment commission (POST)."""
-        return self._call_read("payment_commission", body=body)
+        """Commission preview (POST /v1/payment_commission), no money moved.
+
+        The real app sends application/x-www-form-urlencoded with a single
+        ``payParameters`` field holding the JSON-encoded parameters — NOT a JSON
+        body (capture item 1469). Posting JSON returns INVALID_REQUEST_DATA.
+        ``isTransferStatus``/``isUrgentTransfer`` are string "false" in every
+        captured request; default them so callers need not know."""
+        p = (body or {}).get("payParameters") or body or {}
+        p = dict(p)
+        p.setdefault("isTransferStatus", "false")
+        p.setdefault("isUrgentTransfer", "false")
+        return self._call_read("payment_commission", body={"payParameters": p})
 
     def checkout_process_order(self, body: dict | None = None) -> dict:
         return self._call_read("checkout_process_order", body=body)

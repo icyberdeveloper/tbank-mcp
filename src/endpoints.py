@@ -1139,6 +1139,7 @@ BUILTIN_ENDPOINTS = {
   "method": "POST",
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/payment_commission",
+  "form": True,
   "params": {
    "platform": "ios",
    "inache": "drivetransitt",

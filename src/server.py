@@ -638,7 +638,9 @@ def payment_commission(body: str = "") -> str:
     try:
         s = _require(); s.ensure_fresh()
         b = json.loads(body) if body else None
-        return json.dumps(s._call_read("payment_commission", body=b), ensure_ascii=False)[:1000]
+        # via the client method — it form-encodes and defaults the isTransferStatus/
+        # isUrgentTransfer flags. Calling _call_read directly posts JSON → 400.
+        return json.dumps(s.payment_commission(b), ensure_ascii=False)[:1000]
     except Exception as e:
         return _err(e)
 
