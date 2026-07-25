@@ -1,0 +1,40 @@
+{
+ "_note": "Scrubbed from a Burp capture. Catalogue ids are real (they are the contract); the payer account and order id are synthetic. Regenerate with tests/fixtures/regen.py.",
+ "create_movie": {
+  "slotId": "133073041",
+  "objectId": "10255",
+  "seats": [
+   {
+    "id": "7:10",
+    "type": "basic"
+   }
+  ],
+  "eventId": "103693"
+ },
+ "create_concert": {
+  "eventId": "642413",
+  "slotId": "4820674",
+  "objectId": "23625",
+  "seats": [
+   {
+    "id": "Фанзона|5000§~§54093386|default"
+   }
+  ]
+ },
+ "pay": {
+  "amount": {
+   "amount": 1936,
+   "type": "simple",
+   "currencyCode": "643"
+  },
+  "paymentMethod": {
+   "type": "agreement",
+   "agreement": "0000000000"
+  },
+  "flow": {
+   "orderId": "10000000000",
+   "type": "marketplace",
+   "nfsPaymentToken": "482"
+  }
+ }
+}

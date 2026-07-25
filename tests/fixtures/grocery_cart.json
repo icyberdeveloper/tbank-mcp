@@ -1,0 +1,738 @@
+{
+ "_note": "Scrubbed from a Burp capture: structure and protocol values are real, personal values are synthetic. Regenerate with tests/fixtures/regen.py.",
+ "client_info": {
+  "activeOrders": [],
+  "deliveryInfo": {
+   "addresses": [
+    {
+     "id": "9ec8c668-b216-4f5f-8041-6161795d9fd0",
+     "comment": "",
+     "value": "ул Примерная, д 1, кв 1",
+     "coordinates": {
+      "latitude": 0.0,
+      "longitude": 0.0
+     },
+     "details": {
+      "name": "",
+      "postalCode": "000000",
+      "country": "Россия",
+      "region": "Москва",
+      "city": "Москва",
+      "settlement": "",
+      "street": "Примерная",
+      "house": "1",
+      "houseType": "house",
+      "doorphone": "0000",
+      "doorway": "1",
+      "storey": "1",
+      "flat": "1"
+     }
+    },
+    {
+     "id": "d8ca3cd7-9bcd-42a7-aea0-dae4680e11fe",
+     "value": "ул Примерная, д 1, кв 1",
+     "coordinates": {
+      "latitude": 0.0,
+      "longitude": 0.0
+     },
+     "details": {
+      "name": "",
+      "postalCode": "000000",
+      "country": "Россия",
+      "region": "Москва",
+      "city": "Москва",
+      "settlement": "",
+      "street": "Примерная",
+      "house": "1",
+      "houseType": "house"
+     }
+    },
+    {
+     "id": "982e93d6-e007-484c-aab7-62bf3768a594",
+     "value": "ул Примерная, д 1, кв 1",
+     "coordinates": {
+      "latitude": 0.0,
+      "longitude": 0.0
+     },
+     "details": {
+      "name": "",
+      "country": "Россия",
+      "region": "Москва",
+      "city": "Москва",
+      "settlement": "",
+      "street": "Примерная",
+      "house": "1",
+      "houseType": "house",
+      "doorphone": "0000",
+      "doorway": "1",
+      "storey": "1",
+      "flat": "1"
+     }
+    },
+    {
+     "id": "6ffc4aa4-95a6-44fb-a4a0-1ed1775bf1b1",
+     "value": "ул Примерная, д 1, кв 1",
+     "coordinates": {
+      "latitude": 0.0,
+      "longitude": 0.0
+     },
+     "details": {
+      "name": "",
+      "postalCode": "000000",
+      "country": "Россия",
+      "region": "Москва",
+      "city": "Москва",
+      "settlement": "",
+      "street": "Примерная",
+      "house": "1",
+      "houseType": "house",
+      "flat": "1"
+     }
+    }
+   ],
+   "address": {
+    "value": "ул Примерная, д 1, кв 1",
+    "coordinates": {
+     "latitude": 0.0,
+     "longitude": 0.0
+    },
+    "details": {
+     "name": "",
+     "postalCode": "000000",
+     "country": "Россия",
+     "region": "Москва",
+     "city": "Москва",
+     "settlement": "",
+     "street": "Примерная",
+     "house": "1",
+     "houseType": "house",
+     "doorphone": "0000",
+     "doorway": "1",
+     "storey": "1",
+     "flat": "1"
+    }
+   },
+   "deliveryType": "IN_PERSON",
+   "comment": ""
+  }
+ },
+ "cart_get": {
+  "cart": {
+   "sum": 3243.0,
+   "goodsSum": 3144.0,
+   "minOrderSum": 500.0,
+   "goods": [
+    {
+     "id": "382032",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/h13/h49/9066393632798.jpg",
+     "weight": {
+      "value": 120.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 538.0
+     },
+     "count": 1.0,
+     "countAvailable": 7.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    },
+    {
+     "id": "492313",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/h8e/h39/9360400973854.jpg",
+     "weight": {
+      "value": 650.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 289.0
+     },
+     "count": 1.0,
+     "countAvailable": 5.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    },
+    {
+     "id": "379557",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/h12/h98/9619551748126.jpg",
+     "weight": {
+      "value": 600.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 214.0
+     },
+     "count": 1.0,
+     "countAvailable": 8.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    },
+    {
+     "id": "000958",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/h73/h55/9959411286046.jpg",
+     "weight": {
+      "value": 100.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 312.0
+     },
+     "count": 1.0,
+     "countAvailable": 19.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    },
+    {
+     "id": "491647",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/haa/h5c/9356511772702.jpg",
+     "weight": {
+      "value": 350.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 199.0
+     },
+     "count": 2.0,
+     "countAvailable": 63.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    },
+    {
+     "id": "563651",
+     "name": "",
+     "imageUrl": "https://images.av.ru/av.ru/product/hf1/hac/9846331932702.jpg",
+     "weight": {
+      "value": 150.0,
+      "unit": "GRM"
+     },
+     "price": {
+      "value": 1393.0
+     },
+     "count": 1.0,
+     "countAvailable": 5.0,
+     "quant": {
+      "step": 1.0,
+      "unit": "PCS",
+      "minCountChangeStep": 1.0,
+      "maxCountForSale": 1000.0
+     },
+     "notAvailableReason": [],
+     "legalInfo": {
+      "adult": false
+     }
+    }
+   ],
+   "weightInfo": {
+    "weight": 2.32
+   },
+   "delivery": {
+    "pointId": "2",
+    "address": {
+     "value": "ул Примерная, д 1, кв 1",
+     "coordinates": {
+      "latitude": 0.0,
+      "longitude": 0.0
+     },
+     "details": {
+      "name": "",
+      "postalCode": "000000",
+      "country": "Россия",
+      "region": "Москва",
+      "city": "Москва",
+      "settlement": "",
+      "street": "Примерная",
+      "house": "1",
+      "houseType": "house",
+      "doorphone": "0000",
+      "doorway": "1",
+      "storey": "1",
+      "flat": "1"
+     }
+    },
+    "deliveryTime": {
+     "type": "Relative",
+     "from": "0",
+     "to": "115",
+     "price": 99.0
+    },
+    "comment": "",
+    "replacementOption": {
+     "id": "CALL",
+     "type": "CALL"
+    },
+    "deliveryToDoor": "IN_PERSON",
+    "isExpress": false
+   },
+   "nextStepDelivery": {
+    "deliveryPrice": 0.0,
+    "minOrderSum": 3499.0
+   }
+  }
+ },
+ "retailers": {
+  "categories": [
+   {
+    "retailers": [
+     {
+      "appId": "578",
+      "delivery": {
+       "pointId": "2",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "204",
+      "delivery": {
+       "pointId": "5980",
+       "areaId": "17040911"
+      }
+     },
+     {
+      "appId": "487",
+      "delivery": {
+       "pointId": "c547127e-c716-45bc-b5e5-8cf9740840dc",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "246",
+      "delivery": {
+       "pointId": "0503",
+       "areaId": "12521"
+      }
+     },
+     {
+      "appId": "247",
+      "delivery": {
+       "pointId": "0302",
+       "areaId": "6672"
+      }
+     },
+     {
+      "appId": "465",
+      "delivery": {
+       "pointId": "481169",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "401",
+      "delivery": {
+       "pointId": "5980",
+       "areaId": "17040911"
+      }
+     },
+     {
+      "appId": "468",
+      "delivery": {
+       "pointId": "467666",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "545",
+      "delivery": {
+       "pointId": "77721",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "590",
+      "delivery": {
+       "pointId": "b71712ee-c2a6-49e6-8786-2bf53ae65488",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "588",
+      "delivery": {
+       "pointId": "cb20a6b7-ad8a-4ba4-a5ce-24464aaee75c",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "596",
+      "delivery": {
+       "pointId": "8184f783-a9d9-4d99-9bc9-f1bfdfd8d6e6",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "615",
+      "delivery": {
+       "pointId": "7e417eae-8ac8-4a55-9c96-4a4bd302dd79",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "810",
+      "delivery": {
+       "pointId": "40e1962d-75c3-4096-97b0-c402f9ea8750",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "802",
+      "delivery": {
+       "pointId": "7dd25db0-1fd6-4271-8668-6174debcc92b",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "697",
+      "delivery": {
+       "pointId": "2455e3da-761b-4b23-aaa6-44b3df44dd80",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "808",
+      "delivery": {
+       "pointId": "7e786ae8-e460-4113-996a-842d5873b1f5",
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "487",
+      "delivery": {
+       "pointId": "c547127e-c716-45bc-b5e5-8cf9740840dc",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "247",
+      "delivery": {
+       "pointId": "0302",
+       "areaId": "6672"
+      }
+     },
+     {
+      "appId": "590",
+      "delivery": {
+       "pointId": "b71712ee-c2a6-49e6-8786-2bf53ae65488",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "588",
+      "delivery": {
+       "pointId": "cb20a6b7-ad8a-4ba4-a5ce-24464aaee75c",
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "468",
+      "delivery": {
+       "pointId": "467666",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "11",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "12",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "697",
+      "delivery": {
+       "pointId": "2455e3da-761b-4b23-aaa6-44b3df44dd80",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "4",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "5",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "6",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "7",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     },
+     {
+      "appId": "10",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "401",
+      "delivery": {
+       "pointId": "5980",
+       "areaId": "17040911"
+      }
+     },
+     {
+      "appId": "3",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "487",
+      "delivery": {
+       "pointId": "c547127e-c716-45bc-b5e5-8cf9740840dc",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "590",
+      "delivery": {
+       "pointId": "b71712ee-c2a6-49e6-8786-2bf53ae65488",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "588",
+      "delivery": {
+       "pointId": "cb20a6b7-ad8a-4ba4-a5ce-24464aaee75c",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "596",
+      "delivery": {
+       "pointId": "8184f783-a9d9-4d99-9bc9-f1bfdfd8d6e6",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "615",
+      "delivery": {
+       "pointId": "7e417eae-8ac8-4a55-9c96-4a4bd302dd79",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "810",
+      "delivery": {
+       "pointId": "40e1962d-75c3-4096-97b0-c402f9ea8750",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "802",
+      "delivery": {
+       "pointId": "7dd25db0-1fd6-4271-8668-6174debcc92b",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "697",
+      "delivery": {
+       "pointId": "2455e3da-761b-4b23-aaa6-44b3df44dd80",
+       "areaId": null
+      }
+     },
+     {
+      "appId": "808",
+      "delivery": {
+       "pointId": "7e786ae8-e460-4113-996a-842d5873b1f5",
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "8",
+      "delivery": {
+       "pointId": null,
+       "areaId": null
+      }
+     }
+    ]
+   },
+   {
+    "retailers": [
+     {
+      "appId": "204",
+      "delivery": {
+       "pointId": "5980",
+       "areaId": "17040911"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "expected_azbuka": {
+  "delivery": {
+   "isExpress": false,
+   "address": {
+    "value": "ул Примерная, д 1, кв 1",
+    "coordinates": {
+     "latitude": 0.0,
+     "longitude": 0.0
+    },
+    "details": {
+     "houseType": "house",
+     "streetWithType": "ул Примерная",
+     "region": "Москва",
+     "house": "1",
+     "country": "Россия",
+     "storey": "1",
+     "doorphone": "0000",
+     "settlement": "",
+     "flat": "1",
+     "name": "",
+     "street": "Примерная",
+     "doorway": "1",
+     "city": "Москва",
+     "postalCode": "000000"
+    }
+   },
+   "comment": "",
+   "pointId": "2",
+   "deliveryType": "IN_PERSON"
+  },
+  "cartSetMode": "SINGLE_CART",
+  "goods": [
+   {
+    "count": 1,
+    "id": "492313"
+   }
+  ]
+ },
+ "expected_vkusvill": {
+  "goods": [
+   {
+    "id": "1087",
+    "count": 1
+   }
+  ],
+  "delivery": {
+   "areaId": "17040911",
+   "comment": "",
+   "deliveryType": "IN_PERSON",
+   "isExpress": false,
+   "pointId": "5980",
+   "address": {
+    "value": "ул Примерная, д 1, кв 1",
+    "coordinates": {
+     "latitude": 0.0,
+     "longitude": 0.0
+    },
+    "details": {
+     "doorway": "1",
+     "houseType": "house",
+     "flat": "1",
+     "house": "1",
+     "doorphone": "0000",
+     "region": "Москва",
+     "streetWithType": "ул Примерная",
+     "street": "Примерная",
+     "name": "",
+     "city": "Москва",
+     "country": "Россия",
+     "storey": "1",
+     "postalCode": "000000",
+     "settlement": ""
+    }
+   }
+  },
+  "cartSetMode": "SINGLE_CART"
+ },
+ "error_envelope": {
+  "payload": {
+   "message": "Сервис временно недоступен. Попробуйте позже.",
+   "code": "HTTP-404",
+   "blame": "backend"
+  },
+  "trackingId": "df2a07bd-724e-467d-8f30-522d4ed9169e",
+  "responseTime": 26,
+  "time": "2026-07-22T01:24:51+03:00",
+  "status": "Error"
+ }
+}

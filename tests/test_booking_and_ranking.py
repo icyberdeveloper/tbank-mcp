@@ -70,9 +70,17 @@ class ReplaySession(MobileSession):
         return {}
 
 
-def check_create(items, label, capture_item, kind, seats):
+FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "fixtures", "booking.json")
+
+
+def fixture():
+    with open(FIXTURE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def check_create(real, label, kind, seats):
     s = ReplaySession()
-    real = request_json(items, capture_item)
     s.create_ticket_order(real["eventId"], real["slotId"], real["objectId"],
                           seats, kind=kind)
     got = s.sent_body
@@ -86,8 +94,7 @@ def check_create(items, label, capture_item, kind, seats):
     print(f"  {label}: {json.dumps(got, ensure_ascii=False)[:110]}")
 
 
-def check_pay(items):
-    real = request_json(items, PAY)
+def check_pay(real):
     s = ReplaySession()
     s.pay_marketplace_order(real["flow"]["orderId"], real["amount"]["amount"],
                             real["paymentMethod"]["agreement"],
@@ -134,19 +141,53 @@ def check_seat_grouping():
     print("  seats: occupied excluded, sorted, price/row filters applied")
 
 
+def check_fixture_still_matches_capture(fx):
+    """Only where the real capture lives: the fixture must not drift from what the
+    app sends. Scrubbed values (the payer account, the order id) are exempt; every
+    structural and catalogue value is not."""
+    items = _items()
+    for key, idx, scrubbed in (("create_movie", CREATE_MOVIE, ()),
+                               ("create_concert", CREATE_CONCERT, ()),
+                               ("pay", PAY, ("agreement", "orderId"))):
+        real, mine = request_json(items, idx), fx[key]
+
+        def cmp(a, b, path=""):
+            if isinstance(b, dict):
+                if sorted(a or {}) != sorted(b):
+                    check(False, f"fixture {key}{path}: keys drifted "
+                                 f"— fixture={sorted(a or {})} capture={sorted(b)}")
+                    return
+                for k in b:
+                    if k in scrubbed:
+                        continue
+                    cmp((a or {}).get(k), b[k], f"{path}.{k}")
+            elif isinstance(b, list):
+                check(len(a or []) == len(b),
+                      f"fixture {key}{path}: list length drifted")
+                for i, item in enumerate(b):
+                    cmp((a or [None] * len(b))[i], item, f"{path}[{i}]")
+            else:
+                check(a == b, f"fixture {key}{path}: value drifted "
+                              f"— fixture={a!r} capture={b!r}")
+        cmp(mine, real)
+    print("  fixture vs capture: bodies still match the real app")
+
+
 def main():
     print("booking bodies + ranking:")
     check_ranking()
     check_seat_grouping()
-    if not os.path.exists(CAPTURE):
-        print(f"SKIP body checks: capture not found at {CAPTURE}")
+    fx = fixture()
+    check_create(fx["create_movie"], "order/create/movie", "movie",
+                 [{"id": "7:10", "type": "basic"}])
+    check_create(fx["create_concert"], "order/create/concert", "concert",
+                 [{"id": "Фанзона|5000§~§54093386|default"}])
+    check_pay(fx["pay"])
+    if os.path.exists(CAPTURE):
+        check_fixture_still_matches_capture(fx)
     else:
-        items = _items()
-        check_create(items, "order/create/movie", CREATE_MOVIE, "movie",
-                     [{"id": "7:10", "type": "basic"}])
-        check_create(items, "order/create/concert", CREATE_CONCERT, "concert",
-                     [{"id": "Фанзона|5000§~§54093386|default"}])
-        check_pay(items)
+        print(f"  (capture absent at {CAPTURE} — drift check skipped; the bodies "
+              f"above were still verified against the fixture)")
     if failures:
         print("\nFAILED:")
         for f in failures:
