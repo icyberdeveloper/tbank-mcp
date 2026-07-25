@@ -6,8 +6,9 @@
 
 - **57 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
-- **7 skills**: grocery order, tickets, bill pay, transfer, budget analysis,
-  invest advisor, login
+- **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
+  transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
+  login
 - **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which
   no OS ships and 13 of the 18 bank hosts need. Shipped in `ca/roots/`, pinned by
   SHA-256. Leaf/intermediate rotation needs no action; a root rotation is a PEM drop
@@ -126,10 +127,13 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 
 | Skill | What it does |
 |---|---|
+| `tbank` | **Entry point** — what the bank can do and which skill handles it |
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
 | `tbank-bill-pay` | Topping up a phone (a P2P transfer). Service bills — ЖКХ, taxes, fines — are **not** implemented; the skill says so and points at the app |
 | `tbank-transfer-money` | P2P, СБП, account transfers |
+| `tbank-cards-documents` | Cards, limits, requisites, passport and other documents |
+| `tbank-messenger` | Bank chats and support |
 | `tbank-budget-analyzer` | Spending analysis, subscription audit, savings tips |
 | `tbank-invest-advisor` | Portfolio, P&L, rebalancing, tax optimization |
 | `tbank-login` | Multi-step login, session management |

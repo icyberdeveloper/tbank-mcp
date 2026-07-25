@@ -7,21 +7,31 @@
   "license": "MIT",
   "requirements": {
     "python": ">=3.11",
-    "packages": ["mcp>=1.2", "requests>=2.32", "playwright>=1.40"]
+    "packages": [
+      "mcp>=1.2",
+      "requests>=2.32",
+      "playwright>=1.40"
+    ]
   },
   "mcpServers": {
     "tbank": {
       "command": "${REPO_DIR}/.venv/bin/python",
-      "args": ["-m", "src.server"],
+      "args": [
+        "-m",
+        "src.server"
+      ],
       "cwd": "${REPO_DIR}"
     }
   },
   "skills": [
+    "skills/tbank",
     "skills/tbank-login",
     "skills/tbank-grocery-order",
     "skills/tbank-tickets",
     "skills/tbank-transfer-money",
     "skills/tbank-bill-pay",
+    "skills/tbank-cards-documents",
+    "skills/tbank-messenger",
     "skills/tbank-budget-analyzer",
     "skills/tbank-invest-advisor"
   ],

@@ -100,6 +100,54 @@ def test_every_tool_is_documented():
     print(f"  {len(tools) - len(missing)}/{len(tools)} tools appear in a doc or skill")
 
 
+def test_every_tool_is_reachable_from_a_skill():
+    """Docs are read only if the agent goes looking. A SKILL loads on its own, so a
+    tool named in no skill is one the agent will not think to call — which is how
+    cards, documents and the whole messenger went unreachable until the `tbank`
+    router and the two new skills were added."""
+    import glob
+    tools = tool_names()
+    skill_text = "\n".join(
+        open(p, encoding="utf-8").read()
+        for p in glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md")))
+    missing = sorted(t for t in tools if f"`{t}(" not in skill_text
+                     and f"`{t}`" not in skill_text)
+    check(not missing,
+          f"tools no skill mentions (an agent will never reach them): {', '.join(missing)}")
+
+    # The router must actually route: every OTHER skill has to be named in it.
+    router = os.path.join(ROOT, "skills", "tbank", "SKILL.md")
+    check(os.path.exists(router), "the tbank router skill is missing")
+    if os.path.exists(router):
+        text = open(router, encoding="utf-8").read()
+        others = [os.path.basename(os.path.dirname(p))
+                  for p in glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md"))
+                  if os.path.basename(os.path.dirname(p)) != "tbank"]
+        unrouted = sorted(s for s in others if s not in text)
+        check(not unrouted, f"the router does not mention: {', '.join(unrouted)}")
+    print(f"  {len(tools) - len(missing)}/{len(tools)} tools reachable from a skill; "
+          f"router names every other skill")
+
+
+def test_plugin_ships_every_skill():
+    """A skill on disk but absent from plugin.json ships to nobody — that is how the
+    tickets skill was invisible to plugin installs."""
+    import glob
+    import json as _json
+    manifest = os.path.join(ROOT, "plugin.json")
+    check(os.path.exists(manifest), "plugin.json is missing")
+    if not os.path.exists(manifest):
+        return
+    listed = set(_json.load(open(manifest, encoding="utf-8")).get("skills") or [])
+    on_disk = {"skills/" + os.path.basename(os.path.dirname(p))
+               for p in glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md"))}
+    check(on_disk - listed == set(),
+          f"skills on disk but not shipped: {sorted(on_disk - listed)}")
+    check(listed - on_disk == set(),
+          f"plugin.json lists skills that do not exist: {sorted(listed - on_disk)}")
+    print(f"  plugin.json ships all {len(on_disk)} skills")
+
+
 def test_flows_serves_every_section():
     """flows() must reach the WHOLE file. It used to return the first 6000 chars,
     which silently cut everything from section 5 onward."""
@@ -166,6 +214,8 @@ def main():
     print("docs vs code:")
     test_documented_tools_exist()
     test_every_tool_is_documented()
+    test_every_tool_is_reachable_from_a_skill()
+    test_plugin_ships_every_skill()
     test_flows_serves_every_section()
     test_flows_unknown_topic_is_actionable()
     test_money_tools_warn_in_the_description_the_agent_receives()

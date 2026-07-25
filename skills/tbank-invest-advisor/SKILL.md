@@ -13,7 +13,7 @@ description: |
 
 | Тул | Что показывает |
 |---|---|
-| `get_data("invest_accounts")` | Инвест-счета (брокерские + InvestBox) |
+| `invest_accounts()` | Инвест-счета (брокерские + InvestBox). Отсюда `brokerAccountId` для остальных тулов |
 | `invest_portfolio(broker_account_id, days)` | Статистика портфеля (сумма, P&L, доходность) |
 | `invest_operations(broker_account_id, operation_type, limit)` | Операции (покупки/продажи/вводы) |
 | `invest_securities(broker_account_id)` | Ценные бумаги в портфеле (акции/облигации/ETF) |
@@ -26,7 +26,9 @@ description: |
 
 ### Шаг 1: Найти инвест-счета
 
-1. `get_data("invest_accounts")` — получить список брокерских счетов.
+1. `invest_accounts()` — получить список брокерских счетов. Тот же эндпоинт, что
+   `get_data("invest_accounts")`, но с разобранным выводом вместо сырого JSON —
+   бери тул.
 2. Если счетов несколько — показать пользователю:
 ```
 Брокерские счета:
