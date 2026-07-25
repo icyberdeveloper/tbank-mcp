@@ -194,14 +194,19 @@ present the tests additionally check the fixtures have not drifted from it.
   `TBANK_DEVICE_TIMEZONE` so your payments do not describe someone else's phone.
 - Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) require confirmation of a
   specific amount — "buy it" is not a confirmation.
-- **Tool annotations.** Every tool declares what it does to the world, so the host
-  can tell them apart: 44 of 58 are `readOnlyHint: true` and may run without a
-  prompt; the other 14 never can. Those are the three that move money, the ones that
-  commit or cancel an order or rewrite a cart, `messenger_send` (it reaches another
-  person), the login steps (they send an SMS), `refresh_session` (it rotates a
-  credential another process may hold) and `payment_receipt` (it writes over a local
-  file). The classification lives in one table, `TOOL_KINDS` in `src/server.py`, and
-  a tool missing from it raises at import rather than defaulting to anything.
+- **Tool annotations.** Every tool declares what it does, in one table —
+  `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
+  rather than defaulting to anything. Three kinds: 44 are `readOnlyHint: true` and
+  may run without a prompt; 11 write something that costs nothing (a cart, a
+  booking, a message, an OTP, a token, a local file) and are marked
+  `destructiveHint: false`; 3 debit an account — `transfer`, `grocery_checkout`,
+  `ticket_pay` — and are the only ones carrying `destructiveHint`, which is what
+  forces a confirmation dialog. The line is drawn at money on purpose: a booking
+  expires by itself and a cart line is a rewrite away, so confirming those is
+  friction that teaches people to click through the one dialog that matters.
+  The 11 writers are not marked read-only, because they do modify things and that
+  flag states the opposite — if your client still prompts on them, allow them once
+  in the client rather than changing what the server claims.
 
 ## Disclaimer
 

@@ -41,29 +41,34 @@ _untraced_tool = mcp.tool
 # list_accounts looked exactly like confirming transfer — which is how a person
 # learns to click "allow" without reading, on the one call that moves money.
 #
-# Three kinds, and the boundary is "what happens if this runs when it should not":
+# Three kinds. The line for CONFIRM is drawn at MONEY, by the repo owner's rule:
+# a booking that expires by itself, a cart line, a chat message and an SMS are all
+# recoverable; a payment is not. Only the three tools that actually move money get
+# destructiveHint, which is the flag that forces a confirmation dialog.
 #
 #   READ   nothing changes at the bank or on disk. Safe to auto-approve, safe to
 #          retry. (Refreshing our own session token does not count — every tool
 #          here does that implicitly on the way in.)
-#   ACT    changes something outside this process that we cannot take back: money
-#          moves, an order is created or cancelled, a cart is overwritten, a
-#          message reaches another person. Always confirm.
-#   ASK    no bank-side change, but not free either — sends an SMS, rotates a
-#          credential another process may be holding, writes over a local file.
-#          Neither hint is set, so the host assumes the worst and prompts.
+#   WRITE  changes something, but nothing that costs money: a cart, a booking, a
+#          chat message, an OTP, a token, a local file. NOT marked destructive —
+#          but not marked read-only either, because they do modify things and
+#          `readOnlyHint: true` states the opposite. A host that still prompts on
+#          these is applying its own worst-case default; the fix for that belongs
+#          in the client ("always allow"), not in a false claim here.
+#   MONEY  the three tools that debit an account. destructiveHint + never
+#          idempotent: the loudest signal the protocol has.
 #
 # A tool missing from this table raises at import. That is deliberate: the
-# alternative is a new tool defaulting to "prompts for everything", which looks
-# harmless and quietly trains the same reflex.
-READ, ACT, ASK = "read", "act", "ask"
+# alternative is a new tool defaulting to whatever the host assumes, which looks
+# harmless right up until the tool it happened to be was a payment.
+READ, WRITE, MONEY = "read", "write", "money"
 TOOL_KINDS: dict[str, tuple[str, str]] = {
     # session
-    "login": ("Вход по телефону", ASK),
-    "confirm_otp": ("Подтверждение кода из SMS", ASK),
-    "confirm_password": ("Подтверждение пароля", ASK),
-    "confirm_pin": ("Подтверждение PIN", ASK),
-    "refresh_session": ("Обновление сессии", ASK),
+    "login": ("Вход по телефону", WRITE),
+    "confirm_otp": ("Подтверждение кода из SMS", WRITE),
+    "confirm_password": ("Подтверждение пароля", WRITE),
+    "confirm_pin": ("Подтверждение PIN", WRITE),
+    "refresh_session": ("Обновление сессии", WRITE),
     "session_status": ("Статус сессии", READ),
     "keepalive": ("Продление сессии", READ),
     # accounts and operations
@@ -81,7 +86,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "documents": ("Документы клиента", READ),
     "bank_documents": ("Справки банка", READ),
     "insurance_policies": ("Страховые полисы", READ),
-    "payment_receipt": ("Скачивание чека в файл", ASK),
+    "payment_receipt": ("Скачивание чека в файл", WRITE),
     # orders
     "orders": ("Заказы", READ),
     "order_details": ("Детали заказа", READ),
@@ -95,29 +100,29 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "grocery_cart": ("Содержимое корзины", READ),
     "grocery_attempts": ("Попытки оформления", READ),
     "grocery_order_status": ("Статус заказа", READ),
-    "grocery_add_to_cart": ("Добавление в корзину", ACT),
-    "grocery_set_cart": ("Перезапись корзины", ACT),
-    "grocery_checkout": ("Оформление и оплата заказа", ACT),
+    "grocery_add_to_cart": ("Добавление в корзину", WRITE),
+    "grocery_set_cart": ("Перезапись корзины", WRITE),
+    "grocery_checkout": ("Оформление и оплата заказа", MONEY),
     # tickets
     "cinema_search": ("Поиск фильма", READ),
     "cinema_schedule": ("Расписание сеансов", READ),
     "cinema_seats": ("Свободные места", READ),
     "concert_schedule": ("Показы концерта", READ),
     "concert_hall": ("Секторы концертной площадки", READ),
-    "cinema_book": ("Бронирование мест", ACT),
-    "ticket_pay": ("Оплата брони", ACT),
-    "ticket_cancel": ("Отмена заказа", ACT),
+    "cinema_book": ("Бронирование мест", WRITE),
+    "ticket_pay": ("Оплата брони", MONEY),
+    "ticket_cancel": ("Отмена заказа", WRITE),
     # search
     "search_app": ("Поиск по приложению", READ),
     # messenger
     "messenger_conversations": ("Чаты", READ),
     "messenger_messages": ("История чата", READ),
     "messenger_unread": ("Непрочитанные", READ),
-    "messenger_send": ("Отправка сообщения", ACT),
+    "messenger_send": ("Отправка сообщения", WRITE),
     # money
     "transfer_sbp_resolve": ("Получатель СБП по телефону", READ),
     "payment_commission": ("Предпросмотр комиссии", READ),
-    "transfer": ("Перевод денег", ACT),
+    "transfer": ("Перевод денег", MONEY),
     # invest
     "invest_accounts": ("Инвест-счета", READ),
     "invest_portfolio": ("Статистика портфеля", READ),
@@ -134,14 +139,19 @@ def _annotations_for(name: str) -> ToolAnnotations:
     if name not in TOOL_KINDS:
         raise RuntimeError(
             f"tool {name!r} has no entry in TOOL_KINDS. Classify it as READ "
-            f"(nothing changes), ACT (irreversible outside this process) or ASK "
-            f"(no bank-side change, but not free) — see the note above the table.")
+            f"(nothing changes), WRITE (changes something, costs nothing) or "
+            f"MONEY (debits an account) — see the note above the table.")
     title, kind = TOOL_KINDS[name]
     # openWorldHint everywhere: every one of these talks to the bank.
     ann = {"title": title, "openWorldHint": True}
     if kind == READ:
         ann.update(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
-    elif kind == ACT:
+    elif kind == WRITE:
+        # Modifies something, destroys nothing. destructiveHint defaults to TRUE
+        # when readOnlyHint is false, so saying false here is what actually takes
+        # the confirmation dialog off these.
+        ann.update(readOnlyHint=False, destructiveHint=False)
+    else:
         ann.update(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
     return ToolAnnotations(**ann)
 

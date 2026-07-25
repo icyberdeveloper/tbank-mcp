@@ -144,17 +144,23 @@ def test_every_tool_declares_what_it_does_to_the_world():
     equals itself."""
     tools = registered_tools()
 
-    # The tools that must never auto-approve, named here rather than derived from
-    # the table: this list is the SPEC, and the table is the implementation. If
-    # they are generated from the same place the test proves nothing.
-    MUST_CONFIRM = {
-        "transfer", "grocery_checkout", "ticket_pay",        # real money
-        "cinema_book", "ticket_cancel",                      # commits/cancels an order
-        "grocery_add_to_cart", "grocery_set_cart",           # rewrites the cart
-        "messenger_send",                                    # reaches another person
+    # Written out here as the SPEC, not derived from TOOL_KINDS — generated from
+    # the same place, the test would prove nothing.
+    #
+    # MONEY debits an account. Only these three force a confirmation dialog: by the
+    # repo owner's rule a booking that expires by itself, a cart line, a chat
+    # message and an SMS are all recoverable, and a payment is not.
+    MONEY = {"transfer", "grocery_checkout", "ticket_pay"}
+    # WRITE changes something that costs nothing. They must NOT claim to be
+    # read-only — `readOnlyHint: true` states that a tool does not modify its
+    # environment, and every one of these does.
+    WRITES = {
+        "cinema_book", "ticket_cancel",                      # order, expires unpaid
+        "grocery_add_to_cart", "grocery_set_cart",           # cart contents
+        "messenger_send",                                    # a message to a person
         "login", "confirm_otp", "confirm_password",          # sends an SMS / auth state
         "confirm_pin", "refresh_session",                    # rotates a live credential
-        "payment_receipt",                                   # writes over a local file
+        "payment_receipt",                                   # writes a local file
     }
 
     for name, tool in sorted(tools.items()):
@@ -166,17 +172,29 @@ def test_every_tool_declares_what_it_does_to_the_world():
         check(len(name) <= 64, f"{name}: tool names must be 64 characters or fewer")
         check(ann.openWorldHint is True,
               f"{name}: every tool here talks to the bank — openWorldHint must be set")
-        if name in MUST_CONFIRM:
+        if name in MONEY:
             check(ann.readOnlyHint is not True,
-                  f"{name} is marked read-only and may therefore run WITHOUT asking")
+                  f"{name} moves money and is marked read-only — it may run WITHOUT asking")
+        elif name in WRITES:
+            check(ann.readOnlyHint is not True,
+                  f"{name} modifies something, so it must not claim readOnlyHint")
+            check(ann.destructiveHint is False,
+                  f"{name} costs nothing and must not carry the destructive flag — "
+                  f"only payments confirm")
         else:
             check(ann.readOnlyHint is True,
-                  f"{name} does not claim to be read-only, so it prompts like a "
-                  f"payment does — either it belongs in MUST_CONFIRM or its kind "
+                  f"{name} does not claim to be read-only, so a host will prompt for "
+                  f"it — either it writes something (add it to WRITES) or its kind "
                   f"in TOOL_KINDS is wrong")
 
+    # The three that confirm, and nothing else. A fourth would be friction on a
+    # tool that costs nothing; a third missing would be a silent payment.
+    confirming = {n for n, t in tools.items() if t.annotations.destructiveHint}
+    check(confirming == MONEY,
+          f"exactly the money tools must carry destructiveHint, got {sorted(confirming)}")
+
     # Money must be the loudest signal available, not merely "not read-only".
-    for name in ("transfer", "grocery_checkout", "ticket_pay"):
+    for name in sorted(MONEY):
         check(tools[name].annotations.destructiveHint is True,
               f"{name} moves real money and must be marked destructive")
         check(tools[name].annotations.idempotentHint is False,
@@ -188,8 +206,8 @@ def test_every_tool_declares_what_it_does_to_the_world():
     check(not stale, f"TOOL_KINDS names tools that no longer exist: {stale}")
 
     auto = sum(1 for t in tools.values() if t.annotations.readOnlyHint)
-    print(f"  annotations: {auto}/{len(tools)} tools may auto-approve, "
-          f"{len(tools) - auto} always ask")
+    print(f"  annotations: {auto} read-only, {len(tools) - auto - len(MONEY)} write "
+          f"nothing that costs money, {len(MONEY)} confirm")
 
 
 def test_a_new_tool_cannot_ship_unclassified():
@@ -203,7 +221,7 @@ def test_a_new_tool_cannot_ship_unclassified():
     except RuntimeError as e:
         check("TOOL_KINDS" in str(e),
               f"the refusal must name the table to edit: {e}")
-        check("READ" in str(e) and "ACT" in str(e),
+        check("READ" in str(e) and "MONEY" in str(e),
               f"the refusal must say what the choices mean: {e}")
     print("  annotations: an unclassified tool is refused at import, not defaulted")
 
