@@ -195,6 +195,13 @@ class MobileSession:
         # If _minted_at is 0 (loaded from legacy session without timestamp),
         # don't set it to now — that would make an old token look fresh.
         # Leave it 0 — ensure_fresh will refresh before first use.
+        # Per-PROCESS memo for values that are stable for the life of a session and
+        # were being re-fetched on every call: the prefill contact id (documents()
+        # asked for it twice in one invocation) and the per-store areaId (a full
+        # retailers download per add_to_cart, to read one field). A plain attribute,
+        # not a dataclass field — _save_session serializes fields, and this must
+        # never reach session.json.
+        self._memo: dict = {}
         if not self.device_id:
             self.device_id = str(_uuid.uuid4()).upper()
         if not self.old_device_id:
@@ -2021,11 +2028,21 @@ class MobileSession:
         out = {"isExpress": bool(delivery.get("isExpress", False)),
                "comment": comment or "", "pointId": str(point_id),
                "deliveryType": dtype or "IN_PERSON", "address": addr}
-        area_id = ""
-        for st in self.grocery_stores():
-            if str(st.get("appId")) == str(app_id) and str(st.get("pointId")) == str(point_id):
-                area_id = str(st.get("areaId") or "")
-                break
+        # areaId is a property of the retailer + point, not of the cart, so it does
+        # not change between calls. Resolving it meant downloading the whole
+        # retailers catalogue on EVERY add_to_cart just to read one field.
+        memo = getattr(self, "_memo", None)
+        memo_key = f"areaId:{app_id}:{point_id}"
+        if memo is not None and memo_key in memo:
+            area_id = memo[memo_key]
+        else:
+            area_id = ""
+            for st in self.grocery_stores():
+                if str(st.get("appId")) == str(app_id) and str(st.get("pointId")) == str(point_id):
+                    area_id = str(st.get("areaId") or "")
+                    break
+            if memo is not None:
+                memo[memo_key] = area_id
         if area_id:
             out["areaId"] = area_id
         return out
@@ -2269,22 +2286,40 @@ class MobileSession:
 
     def cards(self) -> list[dict]:
         """Every card across every account, annotated with its account.
-        Accounts that carry no cards (deposits, credit, invest) just 400 — skipped."""
+
+        ONE request. accounts_light already embeds the cards under `cards` (and
+        `card` for an ExternalAccount), so the old fan-out — one /v1/account_cards
+        per account, 12 extra round-trips on this user, most of them 400s for
+        deposits and invest accounts — bought nothing. It bought less, in fact:
+        the per-account response carries only id/ucid/position/flags, while the
+        embedded one also has name, status, paymentSystem, the masked number and
+        the expiry, which is what list_cards actually prints.
+
+        account_cards() stays for the fields only it has (availableBalance,
+        canBeRemoved); it is just no longer on this path."""
         out: list[dict] = []
         for acc in self.list_accounts():
             aid = str(acc.get("id") or "")
             if not aid:
                 continue
-            try:
-                found = self.account_cards(aid)
-            except TbankApiError:
-                continue
-            for c in found:
+            embedded = acc.get("cards")
+            if not isinstance(embedded, list):
+                one = acc.get("card")
+                embedded = [one] if isinstance(one, dict) else []
+            money = acc.get("moneyAmount") if isinstance(acc.get("moneyAmount"), dict) else {}
+            for c in embedded:
                 if not isinstance(c, dict):
                     continue
                 c = dict(c)
                 c["account"] = aid
                 c["accountName"] = acc.get("name") or ""
+                c["accountType"] = acc.get("accountType") or ""
+                # The per-account endpoint had availableBalance; the embedded card
+                # does not. The account's balance is the right number anyway — cards
+                # in a multicard cluster all spend from it.
+                c.setdefault("availableBalance", money.get("value"))
+                c["currency"] = ((money.get("currency") or {}).get("name")
+                                 if isinstance(money.get("currency"), dict) else "")
                 out.append(c)
         return out
 
@@ -2324,11 +2359,21 @@ class MobileSession:
     # ---- identity documents ----------------------------------------------
 
     def prefill_contact_id(self) -> str:
+        """The contact id every prefill/profile path is built from.
+
+        Memoised: documents() needs it for BOTH the document list and the holder's
+        brief, so one tool call issued the identical request twice."""
+        memo = getattr(self, "_memo", None)
+        if memo is not None and memo.get("prefill_contact_id"):
+            return memo["prefill_contact_id"]
         data = self._call_read("prefill_contact")
         contacts = (data or {}).get("contacts") or []
         if not contacts:
             raise TbankApiError("NO_CONTACT", "prefill profile returned no contact")
-        return str(contacts[0].get("id") or "")
+        cid = str(contacts[0].get("id") or "")
+        if memo is not None:
+            memo["prefill_contact_id"] = cid
+        return cid
 
     def identity_documents(self) -> dict:
         """Every document the bank holds, grouped by kind (RusNationalID,
@@ -2445,8 +2490,9 @@ class MobileSession:
         nutrition the retailer does not publish keeps None — "not published" is a
         different fact from zero and must not be flattened into one."""
         found = self.grocery_search(query, app_id=app_id, point_id=point_id)
+        picked = found[:max(1, limit)]
         rows = []
-        for item in found[:max(1, limit)]:
+        for item in picked:
             row = dict(item)
             # search returns weight as a display string ("160.0 GRM"); keep that
             # for output and add a numeric grams field to sort on. _grams reports
@@ -2454,17 +2500,31 @@ class MobileSession:
             # sorts as unknown rather than as the lightest item.
             row["weight_label"] = item.get("weight") or ""
             row["weight"] = self._grams(item) or None
-            if with_nutrition:
+            rows.append(row)
+
+        if with_nutrition and rows:
+            # One /api/grocery/good per candidate, and they do not depend on each
+            # other — issued in sequence this was the whole latency of a ranked
+            # search (8 round-trips before the first line of output). requests'
+            # Session is thread-safe for concurrent requests on separate
+            # connections, and the pool is capped, so a small fan-out is safe here.
+            from concurrent.futures import ThreadPoolExecutor
+
+            blank = {k: None for k in ("kcal", "kcal_pack", "protein", "fat",
+                                       "carb", "grams")}
+
+            def fetch(item):
                 try:
                     good = self.grocery_good(item["id"], app_id=app_id, point_id=point_id)
-                    n = self.nutrition(good)
-                except TbankApiError:
-                    n = {k: None for k in ("kcal", "kcal_pack", "protein", "fat",
-                                           "carb", "grams")}
-                row.update({k: n.get(k) for k in self.NUTRITION_KEYS})
-                if n.get("grams"):
-                    row["weight"] = n["grams"]
-            rows.append(row)
+                    return self.nutrition(good)
+                except (TbankApiError, KeyError, ValueError):
+                    return dict(blank)
+
+            with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+                for row, n in zip(rows, pool.map(fetch, picked)):
+                    row.update({k: n.get(k) for k in self.NUTRITION_KEYS})
+                    if n.get("grams"):
+                        row["weight"] = n["grams"]
         return rows
 
     # ---- cinema ----------------------------------------------------------
@@ -2493,6 +2553,11 @@ class MobileSession:
         ("Segodnya-v_kino_Moskva"); it is only a way to reach an eventId, which
         is itself city-independent and is what the schedule endpoint wants."""
         code = "Segodnya-v_kino_" + self._translit(city)
+        q = query.lower().replace("ё", "е") if query else ""
+
+        def matches(e):
+            return not q or q in str(e.get("name", "")).lower().replace("ё", "е")
+
         out: list[dict] = []
         total = 0
         for page in range(1, max(1, max_pages) + 1):
@@ -2505,11 +2570,12 @@ class MobileSession:
             out.extend(e for e in events if isinstance(e, dict))
             if not events or len(out) >= total:
                 break
-        if query:
-            q = query.lower().replace("ё", "е")
-            out = [e for e in out
-                   if q in str(e.get("name", "")).lower().replace("ё", "е")]
-        return out
+            # A named search does not need the rest of the listing. Stop as soon as
+            # this page has produced a match — "найди Майкла" used to walk all four
+            # pages of today's releases regardless.
+            if q and any(matches(e) for e in out):
+                break
+        return [e for e in out if matches(e)]
 
     def cinema_schedule(self, event_id: str, date: str, city: str = "Москва",
                         latitude: float = 55.7558,

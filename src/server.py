@@ -1066,17 +1066,23 @@ def _money(m) -> str:
 @mcp.tool()
 def list_cards() -> str:
     """Все карты по всем счетам: id, ucid, баланс, тип.
-    id — для card_operations, ucid — для card_limits/card_requisites."""
+    id — для card_operations, ucid — для card_limits/card_requisites.
+    Карты, привязанные из ДРУГИХ банков, помечены «внешняя»: у них нет ucid, и
+    card_limits/card_requisites по ним не работают."""
     try:
         s = _require(); s.ensure_fresh()
         cards = s.cards()
         if not cards:
             return "Карт нет."
-        return "\n".join(
-            f"- id={c.get('id','?')} ucid={c.get('ucid','?')} | счёт {c.get('account','?')} "
-            f"| {'виртуальная' if c.get('isVirtual') else 'пластик'} "
-            f"| {_money(c.get('availableBalance'))} | {c.get('accountName','')[:24]}"
-            for c in cards)
+        def row(c):
+            external = c.get("accountType") == "ExternalAccount" or not c.get("ucid")
+            kind = ("внешняя" if external
+                    else "виртуальная" if c.get("isVirtual") else "пластик")
+            bal = _money(c.get("availableBalance")) if c.get("availableBalance") is not None else "—"
+            return (f"- id={c.get('id','?')} ucid={c.get('ucid') or '—'} "
+                    f"| счёт {c.get('account','?')} | {kind} | {bal} "
+                    f"| {(c.get('name') or c.get('accountName') or '')[:26]}")
+        return "\n".join(row(c) for c in cards)
     except Exception as e:
         return _err(e)
 
