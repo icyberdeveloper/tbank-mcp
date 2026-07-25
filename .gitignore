@@ -36,3 +36,8 @@ build/
 # CA certs regenerated/derivable at runtime
 ca/*.pem
 ca/*.cer
+
+# ca/roots/ is the OPPOSITE: public root certificates, committed on purpose and
+# pinned by SHA-256 in src/tls.py. Do not add it to the ignores above — without it
+# 13 of the 18 bank hosts fail to verify.
+!ca/roots/

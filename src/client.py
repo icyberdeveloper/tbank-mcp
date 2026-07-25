@@ -9,8 +9,9 @@ session valid for BOTH reads and the messenger tmsg.
 Reads use builtin endpoint shapes (endpoints.py — static API params, no
 device/session/account secrets) + the live session. `pay`/`group_pay` are
 HMAC-SHA256 `x-api-signature` (key = sessionid). api/id/*.t-bank-app.ru serve a
-cert by the Russian Trusted Root CA; ca/bundle.pem is rebuilt by tls.py and
-self-heals on rotation.
+cert by the Russian Trusted Root CA, which no OS trust store ships; tls.py builds
+ca/bundle.pem from the system store plus that root, shipped in ca/roots/ and pinned
+by SHA-256. Certificates are never taken from the network.
 """
 from __future__ import annotations
 
@@ -209,9 +210,12 @@ class MobileSession:
         })
         if self.proxy:
             self._http.proxies = {"http": self.proxy, "https": self.proxy}
-        # self-healing TLS: rebuild the CA bundle on startup (handles cert rotation
-        # since the last run) + mount an adapter that retries on SSL failure by
-        # refreshing the host's chain into the bundle.
+        # Build the CA bundle on startup = system store + the pinned roots in
+        # ca/roots/. Cheap and offline (no openssl, no network), so it is safe to
+        # do every time and it keeps a fresh clone working: ca/bundle.pem is
+        # generated and gitignored, so it does not exist until this runs.
+        # The adapter retries once on an SSL failure by rebuilding from the SAME
+        # trusted material — it never learns a certificate from the peer.
         _bundle_path = _CA_BUNDLE  # latched at import; may be None on a fresh machine
         try:
             from . import tls as _tls

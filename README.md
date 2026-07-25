@@ -8,7 +8,11 @@
   concert tickets, orders, transfers, messenger, investments
 - **7 skills**: grocery order, tickets, bill pay, transfer, budget analysis,
   invest advisor, login
-- **Self-healing TLS**: handles Russian Trusted Root CA + HARICA cert rotation
+- **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which
+  no OS ships and 13 of the 18 bank hosts need. Shipped in `ca/roots/`, pinned by
+  SHA-256. Leaf/intermediate rotation needs no action; a root rotation is a PEM drop
+  into `ca/roots/` (or `TBANK_EXTRA_CA`). Certificates are never learned from the
+  network — see the header of `src/tls.py`.
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
 - **Secure login**: password/PIN stay OUT of the LLM context (local CLI or env var)
 
