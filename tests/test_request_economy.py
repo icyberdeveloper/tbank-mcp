@@ -318,6 +318,72 @@ def test_distance_sort_is_not_anchored_to_moscow_by_accident():
     print("  cinema_schedule: anchor follows the city, explicit point wins, unknown city unsorted")
 
 
+def test_weight_priced_goods_survive_a_cart_write():
+    """captures2.xml #1005 posts {"id":"606","count":0.57} beside 0.63 and 1.35 —
+    goods sold by weight carry a FRACTIONAL count. Coercing with int() turned every
+    such line into 0, and 0 is how this API removes a good: rebuilding the cart to
+    add one item silently deleted every vegetable, fruit and meat line in it, while
+    cart/set answered 200."""
+    cart = {"cart": {"goods": [{"id": "606", "count": 0.57},
+                               {"id": "605", "count": 0.63},
+                               {"id": "64336", "count": 1.35},
+                               {"id": "700", "count": 2}], "sum": 100}}
+
+    class CartSession(CountingSession):
+        def grocery_stores(self):
+            return [{"appId": "204", "pointId": "5980", "areaId": "1"}]
+
+    def make():
+        s = CartSession({
+            "grocery_client_info": {"deliveryInfo": {"address": {
+                "value": "ул Примерная", "details": {"street": "Примерная"}}}},
+            "grocery_cart_get": cart,
+            "grocery_cart_set": {"goodsSum": 1.0},
+        })
+        s.bodies = []
+        original = s._call_read
+
+        def spy(key, *, overrides=None, body=None, path_override=None):
+            if key == "grocery_cart_set":
+                s.bodies.append(body)
+            return original(key, overrides=overrides, body=body, path_override=path_override)
+        s._call_read = spy
+        return s
+
+    # Adding an unrelated good must not disturb the weight lines.
+    s = make()
+    s.grocery_add_to_cart([{"id": "999", "count": 1}], app_id="204", point_id="5980")
+    sent = {g["id"]: g["count"] for g in s.bodies[-1]["goods"]}
+    check(sent.get("606") == 0.57,
+          f"the 0.57 kg line was destroyed by an unrelated add: {sent.get('606')!r}")
+    check(sent.get("64336") == 1.35, f"1.35 was rounded away: {sent.get('64336')!r}")
+    check(sent.get("700") == 2 and isinstance(sent["700"], int),
+          f"a whole count must stay an int, got {sent.get('700')!r}")
+    check(len(sent) == 5, f"a good disappeared from the cart: {sent}")
+
+    # Same through the absolute-count path.
+    s = make()
+    s.grocery_set_cart([{"id": "700", "count": 1}], app_id="204", point_id="5980")
+    sent = {g["id"]: g["count"] for g in s.bodies[-1]["goods"]}
+    check(sent.get("606") == 0.57 and sent.get("605") == 0.63,
+          f"grocery_set_cart dropped the weight goods: {sent}")
+    check(sent.get("700") == 1, f"the absolute count did not apply: {sent.get('700')!r}")
+
+    # A fractional count the CALLER asks for must survive too (570 g of something).
+    s = make()
+    s.grocery_set_cart([{"id": "605", "count": 0.8}], app_id="204", point_id="5980")
+    sent = {g["id"]: g["count"] for g in s.bodies[-1]["goods"]}
+    check(sent.get("605") == 0.8, f"a fractional target count was lost: {sent.get('605')!r}")
+
+    # And removal must still be exactly 0, not "anything below 1".
+    s = make()
+    s.grocery_set_cart([{"id": "606", "count": 0}], app_id="204", point_id="5980")
+    sent = {g["id"]: g["count"] for g in s.bodies[-1]["goods"]}
+    check("606" not in sent, f"count=0 must remove: {sent}")
+    check(sent.get("605") == 0.63, f"removal disturbed a neighbour: {sent}")
+    print("  cart: fractional (weight-priced) counts survive add, set and removal")
+
+
 def main():
     print("request economy:")
     test_cards_costs_one_request_not_one_per_account()
@@ -326,6 +392,7 @@ def main():
     test_nutrition_is_fetched_concurrently()
     test_named_film_search_stops_at_the_first_page_that_matches()
     test_cart_can_shrink_not_only_grow()
+    test_weight_priced_goods_survive_a_cart_write()
     test_distance_sort_is_not_anchored_to_moscow_by_accident()
     if failures:
         print("\nFAILED:")

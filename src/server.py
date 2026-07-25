@@ -927,16 +927,26 @@ def transfer(amount: float, to_account: str, description: str = "",
                     f"Проверь операции в приложении или list_operations('{src}', days=1). "
                     f"Если перевода нет — повтори с force=True.")
 
-        # The client-generated payment id is what makes a retry idempotent: reusing
+        # The client-generated payment id is what makes a RETRY idempotent: reusing
         # the previous one lets the bank recognise the repeat instead of creating a
-        # second payment. A fresh value per attempt would give no protection at all.
+        # second payment.
+        #
+        # It must therefore be reused ONLY when this really is a retry of an
+        # unconfirmed attempt. `prev` is the last journal event for this key whatever
+        # its status, so reusing it unconditionally meant a deliberate second identical
+        # transfer — rent, a repeat top-up — carried the FIRST payment's id and the bank
+        # deduplicated it away: the tool reported success and no money moved. That is
+        # the mirror image of the bug this scheme exists to prevent, and it defeated
+        # the choice one screen above to let a confirmed transfer through unblocked.
         #
         # Stored as an INT, deliberately. The journal redacts by value pattern, and a
         # 13-digit millisecond timestamp matches the card-number rule — as a string it
         # came back as "<card>" and would have been sent to the bank verbatim.
         # Non-string values pass through redaction untouched, and this id is not a
-        # secret: its entire purpose is to be reused.
-        upid = str(int((prev or {}).get("user_payment_ms") or 0) or int(time.time() * 1000))
+        # secret: its entire purpose is to be reused on a retry.
+        retry_of = prev if (prev or {}).get("status") in _TRANSFER_BLOCKING else None
+        upid = str(int((retry_of or {}).get("user_payment_ms") or 0)
+                   or int(time.time() * 1000))
         attempt = journal.new_attempt(provider, to_account, key, amount)
         journal.record(attempt, "pay", "posting", user_payment_ms=int(upid), account=src)
 

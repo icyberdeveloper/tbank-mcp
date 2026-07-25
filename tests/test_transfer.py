@@ -202,6 +202,26 @@ def test_a_lost_transfer_blocks_the_next_identical_one():
         out3 = server.transfer(500, "+79991234567", from_account="0000000000")
         check("ЗАБЛОКИРОВАН" not in out3,
               f"a completed transfer must not block a later identical one: {out3}")
+        # ...and it must be a NEW payment. Reusing the confirmed transfer's id makes
+        # the bank deduplicate the second one away: the tool reports success and no
+        # money moves. This test previously checked only that it was not blocked,
+        # which is exactly how the defect survived.
+        check(third.sent_pay_parameters()["userPaymentId"] != first_upid,
+              f"a deliberate repeat must get a FRESH userPaymentId, reused "
+              f"{first_upid} — the bank would treat it as the first payment again")
+
+        # A retry of a still-unconfirmed attempt must STILL reuse the id.
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        lost = CaptureSession(fail=True)
+        server._require = lambda: lost
+        server.transfer(700, "+79991234567", from_account="0000000000")
+        lost_upid = lost.sent_pay_parameters()["userPaymentId"]
+        retry = CaptureSession()
+        server._require = lambda: retry
+        server.transfer(700, "+79991234567", from_account="0000000000", force=True)
+        check(retry.sent_pay_parameters()["userPaymentId"] == lost_upid,
+              f"a forced retry of an UNCONFIRMED transfer must reuse the id "
+              f"({lost_upid} -> {retry.sent_pay_parameters()['userPaymentId']})")
     finally:
         server._require = saved
     print("  idempotency: unknown outcome blocks + reuses the id, success does not block")

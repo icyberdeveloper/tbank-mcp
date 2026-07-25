@@ -136,6 +136,26 @@ _STRICT_XAPP_HOSTS = {
 }
 
 
+def _count_of(good: dict, default: float = 1.0) -> float:
+    """A cart line's quantity, kept NUMERIC.
+
+    Goods sold by weight carry a fractional count — captures2.xml #1005 posts
+    {"id":"606","count":0.57} alongside 0.63 and 1.35. Coercing with int() turned
+    every such line into 0, and a 0 count is how this API removes a good: rebuilding
+    the cart to add one item silently deleted every vegetable, fruit and meat line
+    in it, while cart/set answered 200."""
+    try:
+        return float(good.get("count", default) if good.get("count") is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _count_out(count: float):
+    """Send an int when the quantity is whole, a float when it is not — matching the
+    app, which posts 2 for two packs and 0.57 for 570 g."""
+    return int(count) if float(count) == int(count) else round(float(count), 3)
+
+
 def _normalize_phone(phone: str) -> str:
     """Normalize a RU mobile number to the SBP `pointer` format ``+7XXXXXXXXXX``
     (the form the real app sends). Accepts +7 / 8 / 7 / bare-9… forms."""
@@ -2063,7 +2083,7 @@ class MobileSession:
         # cart/set REPLACES the whole cart — every captured body resends the full
         # goods list (item [369] posts 6 goods, [375] posts 5 after a removal). Posting
         # only the new items would silently drop everything added earlier, so merge.
-        merged: dict[str, int] = {}
+        merged: dict[str, float] = {}
         order: list[str] = []
         for g in self._goods_of(cart):
             gid = str(g.get("id", ""))
@@ -2071,15 +2091,15 @@ class MobileSession:
                 continue
             if gid not in merged:
                 order.append(gid)
-            merged[gid] = merged.get(gid, 0) + int(float(g.get("count", 1) or 1))
+            merged[gid] = merged.get(gid, 0) + _count_of(g)
         for it in items:
             gid = str(it.get("id", ""))
             if not gid:
                 continue
             if gid not in merged:
                 order.append(gid)
-            merged[gid] = merged.get(gid, 0) + int(float(it.get("count", 1) or 1))
-        goods = [{"id": gid, "count": merged[gid]} for gid in order]
+            merged[gid] = merged.get(gid, 0) + _count_of(it)
+        goods = [{"id": gid, "count": _count_out(merged[gid])} for gid in order]
         return self._grocery_cart_write(goods, app_id, delivery)
 
     def _grocery_cart_write(self, goods: list[dict], app_id: str, delivery: dict) -> dict:
@@ -2106,7 +2126,7 @@ class MobileSession:
         if clear:
             return self._grocery_cart_write([], app_id, delivery)
 
-        wanted = {str(it.get("id", "")): int(float(it.get("count", 0) or 0))
+        wanted = {str(it.get("id", "")): _count_of(it, default=0.0)
                   for it in items if str(it.get("id", ""))}
         goods, seen = [], set()
         for g in self._goods_of(cart):
@@ -2114,13 +2134,13 @@ class MobileSession:
             if not gid or gid in seen:
                 continue
             seen.add(gid)
-            count = wanted.get(gid, int(float(g.get("count", 1) or 1)))
+            count = wanted.get(gid, _count_of(g))
             if count > 0:
-                goods.append({"id": gid, "count": count})
+                goods.append({"id": gid, "count": _count_out(count)})
         # Ids the caller named that are not in the cart yet are additions.
         for gid, count in wanted.items():
             if gid not in seen and count > 0:
-                goods.append({"id": gid, "count": count})
+                goods.append({"id": gid, "count": _count_out(count)})
         return self._grocery_cart_write(goods, app_id, delivery)
 
     @staticmethod
