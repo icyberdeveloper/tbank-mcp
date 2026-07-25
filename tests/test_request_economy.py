@@ -217,6 +217,107 @@ def test_named_film_search_stops_at_the_first_page_that_matches():
     print("  cinema_search: stops once the name is found, still pages when it must")
 
 
+def test_cart_can_shrink_not_only_grow():
+    """The cart was append-only: re-adding a good to "correct" it added again, and
+    nothing could remove one. The bank has no delete endpoint — removal is a full
+    rewrite without the good (capture: [369] posts 6 goods, [375] posts 5 after a
+    removal) — so the tool must read the cart and resend the whole list."""
+    cart = {"cart": {"goods": [{"id": "1", "count": 2}, {"id": "2", "count": 1},
+                               {"id": "3", "count": 5}], "sum": 100}}
+
+    class CartSession(CountingSession):
+        def grocery_stores(self):
+            return [{"appId": "204", "pointId": "5980", "areaId": "1"}]
+
+    def sent(session):
+        for call in reversed(session._http_bodies):
+            return call
+        return None
+
+    def make():
+        s = CartSession({
+            "grocery_client_info": {"deliveryInfo": {"address": {
+                "value": "ул Примерная", "details": {"street": "Примерная"}}}},
+            "grocery_cart_get": cart,
+            "grocery_cart_set": {"goodsSum": 1.0},
+        })
+        s._http_bodies = []
+        original = s._call_read
+
+        def spy(key, *, overrides=None, body=None, path_override=None):
+            if key == "grocery_cart_set":
+                s._http_bodies.append(body)
+            return original(key, overrides=overrides, body=body, path_override=path_override)
+        s._call_read = spy
+        return s
+
+    # count=0 removes exactly one good and leaves the rest untouched.
+    s = make()
+    s.grocery_set_cart([{"id": "2", "count": 0}], app_id="204", point_id="5980")
+    goods = {g["id"]: g["count"] for g in sent(s)["goods"]}
+    check(goods == {"1": 2, "3": 5}, f"removal must drop only that good, got {goods}")
+
+    # An absolute count REPLACES, it does not add.
+    s = make()
+    s.grocery_set_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+    goods = {g["id"]: g["count"] for g in sent(s)["goods"]}
+    check(goods == {"1": 1, "2": 1, "3": 5},
+          f"count must be absolute (2 -> 1), got {goods}")
+
+    # A good not in the cart yet is simply added.
+    s = make()
+    s.grocery_set_cart([{"id": "9", "count": 3}], app_id="204", point_id="5980")
+    goods = {g["id"]: g["count"] for g in sent(s)["goods"]}
+    check(goods.get("9") == 3, f"a new good must be added, got {goods}")
+    check(len(goods) == 4, f"the existing goods must survive, got {goods}")
+
+    # clear empties it, and still sends the delivery block (cart/set needs it).
+    s = make()
+    s.grocery_set_cart([], app_id="204", point_id="5980", clear=True)
+    body = sent(s)
+    check(body["goods"] == [], f"clear must post an empty goods list, got {body['goods']}")
+    check("delivery" in body and body["delivery"].get("pointId") == "5980",
+          "cart/set needs the delivery block even when clearing")
+    check(body.get("cartSetMode") == "SINGLE_CART", "cartSetMode must survive")
+
+    # add_to_cart must stay RELATIVE — the two tools mean different things.
+    s = make()
+    s.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+    goods = {g["id"]: g["count"] for g in sent(s)["goods"]}
+    check(goods["1"] == 3, f"add_to_cart must still add (2+1), got {goods['1']}")
+    print("  cart: remove, set-absolute, add-new and clear all rewrite the full list")
+
+
+def test_distance_sort_is_not_anchored_to_moscow_by_accident():
+    class SchedSession(CountingSession):
+        def __init__(self):
+            super().__init__({"schedule_movie": {"list": []}})
+            self.body = None
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            self.body = body
+            return super()._call_read(key, overrides=overrides, body=body,
+                                      path_override=path_override)
+
+    s = SchedSession()
+    s.cinema_schedule("1", "2026-07-26", city="Санкт-Петербург")
+    loc = (s.body or {}).get("location") or {}
+    check(abs(loc.get("latitude", 0) - 59.9386) < 0.01,
+          f"a Petersburg listing must not be sorted from Moscow: {loc}")
+
+    s2 = SchedSession()
+    s2.cinema_schedule("1", "2026-07-26", city="Урюпинск")
+    check("location" not in (s2.body or {}),
+          f"an unknown city must drop the distance sort, not invent a point: {s2.body}")
+    check("sort" not in (s2.body or {}), "sorting by distance with no point is meaningless")
+
+    s3 = SchedSession()
+    s3.cinema_schedule("1", "2026-07-26", city="Москва", latitude=55.0, longitude=37.0)
+    check((s3.body or {}).get("location") == {"latitude": 55.0, "longitude": 37.0},
+          f"an explicit point must win: {s3.body}")
+    print("  cinema_schedule: anchor follows the city, explicit point wins, unknown city unsorted")
+
+
 def main():
     print("request economy:")
     test_cards_costs_one_request_not_one_per_account()
@@ -224,6 +325,8 @@ def main():
     test_documents_resolves_the_contact_id_once()
     test_nutrition_is_fetched_concurrently()
     test_named_film_search_stops_at_the_first_page_that_matches()
+    test_cart_can_shrink_not_only_grow()
+    test_distance_sort_is_not_anchored_to_moscow_by_accident()
     if failures:
         print("\nFAILED:")
         for f in failures:

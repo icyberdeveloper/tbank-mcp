@@ -1366,6 +1366,12 @@ BUILTIN_ENDPOINTS.update({
     # bank-issued certificates (справки) — returns a BARE list, no envelope
     "bank_documents": {"method": "GET", "host": "https://cx-evolution-api.t-bank-app.ru",
                        "path": "/v3/cx-evolution-api/documents/get-document-list",
+                       # X-Api-Version: v2 selects the record shape. Without it the
+                       # endpoint answers in the v1 form, whose ids are negative ints
+                       # in `tecmId` rather than the uuid in `tecmUuid` — which is why
+                       # the tool used to print negative ids nothing else accepts.
+                       # Capture-verified: captures2.xml #44.
+                       "headers": {"X-Api-Version": "v2"},
                        "params": {}},
     "insurance_policies": {"method": "GET", "host": "https://api.tinsurance.ru",
                            "path": "/api/v2/policy/active_with_claims", "params": {},

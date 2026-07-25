@@ -4,7 +4,7 @@
 
 ## Features
 
-- **56 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **57 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
 - **7 skills**: grocery order, tickets, bill pay, transfer, budget analysis,
   invest advisor, login
@@ -108,7 +108,7 @@ Each tool's docstring is the reference — this table is only a map of the surfa
 | **Reads** | `list_accounts`, `list_operations`, `spending_categories`, `operations_histogram`, `get_data` |
 | **Cards & accounts** | `list_cards`, `card_limits`, `card_requisites`, `card_operations`, `account_requisites` |
 | **Documents** | `documents`, `bank_documents`, `insurance_policies`, `payment_receipt` |
-| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status` |
+| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status` |
 | **Nutrition** | `grocery_good_info`, `grocery_rank` |
 | **Orders** | `orders`, `order_details`, `travel_order_details` |
 | **Tickets** | `cinema_search`, `cinema_schedule`, `cinema_seats`, `concert_schedule`, `concert_hall`, `cinema_book`, `ticket_pay`, `ticket_cancel` |
@@ -120,9 +120,9 @@ Each tool's docstring is the reference — this table is only a map of the surfa
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
 
-Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_cart`, `grocery_checkout`) require `app_id` + `point_id` taken from `grocery_stores()` — there's no silent default store, so add/cart/checkout always operate on the same cart (no more "Корзина пуста" after adding).
+Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`) require `app_id` + `point_id` taken from `grocery_stores()` — there's no silent default store, so add/cart/checkout always operate on the same cart (no more "Корзина пуста" after adding).
 
-## Skills (6)
+## Skills
 
 | Skill | What it does |
 |---|---|

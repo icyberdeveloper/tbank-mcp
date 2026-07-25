@@ -242,6 +242,20 @@ def test_templates_stay_structurally_sane():
     print(f"  templates: {len(BUILTIN_ENDPOINTS)} shapes structurally valid, no baked secrets")
 
 
+def test_bank_documents_asks_for_the_v2_record_shape():
+    """Without X-Api-Version: v2 the endpoint answers in the v1 form, whose ids are
+    negative ints in tecmId instead of the uuid in tecmUuid — which is why the tool
+    used to print ids nothing else accepts (captures2.xml #44)."""
+    s = session({"documents": []})
+    s.bank_documents()
+    h = last(s)["headers"]
+    check(h.get("X-Api-Version") == "v2",
+          f"the v2 record shape must be requested explicitly: {sorted(h)}")
+    check("X-App-Name" in h,
+          f"the app sends X-App-* to cx-evolution-api too: {sorted(h)}")
+    print("  bank_documents: X-Api-Version v2 + X-App-* as the app sends them")
+
+
 def main():
     print("transport:")
     test_operations_never_asks_for_suspicious_only()
@@ -251,6 +265,7 @@ def main():
     test_form_endpoints_post_a_form_not_json()
     test_raw_endpoints_return_bytes_not_parsed_json()
     test_messenger_uses_its_own_cookie_and_vendor_accept()
+    test_bank_documents_asks_for_the_v2_record_shape()
     test_templates_stay_structurally_sane()
     if failures:
         print("\nFAILED:")

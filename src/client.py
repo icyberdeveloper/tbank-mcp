@@ -130,6 +130,9 @@ _IOS_VERSION = "17.5.1"
 _STRICT_XAPP_HOSTS = {
     "social-api.t-bank-app.ru", "api-invest-gw.t-bank-app.ru",
     "myauto.t-bank-app.ru", "polls.tbank.ru",
+    # The app sends X-App-Name/Version here too (captures2.xml #44). It was the one
+    # host in either capture that does and was missing from this list.
+    "cx-evolution-api.t-bank-app.ru",
 }
 
 
@@ -2077,9 +2080,48 @@ class MobileSession:
                 order.append(gid)
             merged[gid] = merged.get(gid, 0) + int(float(it.get("count", 1) or 1))
         goods = [{"id": gid, "count": merged[gid]} for gid in order]
+        return self._grocery_cart_write(goods, app_id, delivery)
+
+    def _grocery_cart_write(self, goods: list[dict], app_id: str, delivery: dict) -> dict:
+        """POST the FULL goods list. cart/set replaces the cart wholesale — that is
+        also how the app removes an item: capture item [369] posts 6 goods, [375]
+        posts 5 after a removal. There is no delete endpoint."""
         body = {"goods": goods, "cartSetMode": "SINGLE_CART", "delivery": delivery}
         return self._call_read("grocery_cart_set", body=body,
                                overrides={"appId": app_id})
+
+    def grocery_set_cart(self, items: list[dict], app_id: str = "", point_id: str = "",
+                         clear: bool = False) -> dict:
+        """Set ABSOLUTE counts. `count: 0` removes a good; goods not mentioned keep
+        their current count. `clear=True` empties the cart and ignores `items`.
+
+        The counterpart of grocery_add_to_cart, which is relative (+N). Without this
+        the cart could only ever grow: re-adding a good to "correct" it added again."""
+        _need_store(app_id, point_id)
+        try:
+            cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
+        except TbankApiError:
+            cart = {}
+        delivery = self._grocery_delivery(app_id, point_id, cart=cart)
+        if clear:
+            return self._grocery_cart_write([], app_id, delivery)
+
+        wanted = {str(it.get("id", "")): int(float(it.get("count", 0) or 0))
+                  for it in items if str(it.get("id", ""))}
+        goods, seen = [], set()
+        for g in self._goods_of(cart):
+            gid = str(g.get("id", ""))
+            if not gid or gid in seen:
+                continue
+            seen.add(gid)
+            count = wanted.get(gid, int(float(g.get("count", 1) or 1)))
+            if count > 0:
+                goods.append({"id": gid, "count": count})
+        # Ids the caller named that are not in the cart yet are additions.
+        for gid, count in wanted.items():
+            if gid not in seen and count > 0:
+                goods.append({"id": gid, "count": count})
+        return self._grocery_cart_write(goods, app_id, delivery)
 
     @staticmethod
     def _goods_of(cart: Any) -> list[dict]:
@@ -2577,14 +2619,32 @@ class MobileSession:
                 break
         return [e for e in out if matches(e)]
 
+    # Sorting anchor when the caller gives no coordinates. It is the centre of the
+    # default city, NOT the user's location — the app sends the device's GPS. Named
+    # and paired with `city` so the two cannot silently disagree: a Petersburg
+    # listing sorted by distance from Moscow would look plausible and be nonsense.
+    CITY_CENTRES = {
+        "Москва": (55.7558, 37.6173),
+        "Санкт-Петербург": (59.9386, 30.3141),
+        "Екатеринбург": (56.8389, 60.6057),
+        "Новосибирск": (55.0084, 82.9357),
+        "Казань": (55.7963, 49.1088),
+    }
+
     def cinema_schedule(self, event_id: str, date: str, city: str = "Москва",
-                        latitude: float = 55.7558,
-                        longitude: float = 37.6173) -> list[dict]:
+                        latitude: float = 0.0, longitude: float = 0.0) -> list[dict]:
         """Showtimes for one movie on one date (YYYY-MM-DD), one entry per cinema.
-        The location only sorts by distance — the whole city is returned either way."""
-        body = {"date": date, "eventId": str(event_id), "city": city,
-                "sort": {"by": "distance"},
-                "location": {"latitude": latitude, "longitude": longitude}}
+
+        The location only sorts by distance — the whole city is returned either way.
+        Pass latitude/longitude to sort around a real point; omitted, the centre of
+        `city` is used, and for a city not in CITY_CENTRES the distance sort is
+        dropped rather than anchored somewhere arbitrary."""
+        body = {"date": date, "eventId": str(event_id), "city": city}
+        if not (latitude or longitude):
+            latitude, longitude = self.CITY_CENTRES.get(city, (0.0, 0.0))
+        if latitude or longitude:
+            body["sort"] = {"by": "distance"}
+            body["location"] = {"latitude": latitude, "longitude": longitude}
         data = self._call_read("schedule_movie", body=body)
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []

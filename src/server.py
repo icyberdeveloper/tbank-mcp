@@ -493,6 +493,44 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
         return _err(e)
 
 @mcp.tool()
+def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
+                     clear: bool = False) -> str:
+    """Изменить или убрать товары в корзине. Считает количества АБСОЛЮТНО, в отличие
+    от grocery_add_to_cart, который прибавляет.
+
+    items = JSON [{"id": "123", "count": 2}, ...]:
+      count > 0 — сделать ровно столько (не прибавить);
+      count = 0 — убрать товар из корзины;
+      товары, которых нет в списке, остаются как были.
+    clear=True — очистить корзину целиком, items тогда не нужен.
+
+    Отдельного эндпоинта удаления у банка нет: корзина всегда перезаписывается
+    целиком, поэтому тул сам дочитывает текущий состав и шлёт полный список.
+    Возвращает содержимое корзины ПОСЛЕ изменения — сверь его с ожидаемым."""
+    try:
+        s = _require(); s.ensure_fresh()
+        app_id, point_id = _store(app_id, point_id)
+        parsed = json.loads(items) if items else []
+        if not clear and not parsed:
+            return ("Нечего менять: передай items вида "
+                    "[{\"id\": \"123\", \"count\": 0}] или clear=True.")
+        r = s.grocery_set_cart(parsed, app_id=app_id, point_id=point_id, clear=clear)
+        pl = r if isinstance(r, dict) else {}
+        if "goodsSum" not in pl:
+            return (f"[store appId={app_id} pointId={point_id}] ОШИБКА: бэкенд не принял "
+                    f"корзину (в ответе нет goodsSum). Ничего НЕ изменено. "
+                    f"Ответ: {str(pl)[:300]}")
+        goods = s.grocery_cart_goods(app_id=app_id, point_id=point_id)
+        head = (f"[store appId={app_id} pointId={point_id}] "
+                f"{'корзина очищена' if clear else 'корзина обновлена'}: "
+                f"{len(goods)} позиций, goodsSum={pl['goodsSum']}")
+        rows = [f"- {g.get('name','?')[:40]} ×{g.get('count','?')} | id={g.get('id','?')}"
+                for g in goods]
+        return "\n".join([head] + rows)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
 def grocery_cart(app_id: str = "", point_id: str = "") -> str:
     """Содержимое корзины. app_id/point_id — из grocery_stores() (обязательны) и
     должны совпадать с теми, что использовались в grocery_add_to_cart."""

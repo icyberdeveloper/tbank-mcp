@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **56 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **57 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -48,14 +48,17 @@ You normally just call a read tool; the above runs under the hood. Call
 ## 3. Grocery cart assembly → order → pay  (Город) — PROVEN end-to-end
 
 > **Store context is mandatory.** Get `app_id`/`point_id` from `grocery_stores()` and pass
-> them to `grocery_search` / `grocery_plan_order` / `grocery_add_to_cart` / `grocery_cart` /
+> them to `grocery_search` / `grocery_plan_order` / `grocery_add_to_cart` /
+> `grocery_set_cart` / `grocery_cart` /
 > `grocery_checkout`. There is NO silent default store — without explicit context the tools
 > return `NO_STORE_CONTEXT`, and mixing contexts makes the cart look empty. Keep app_id/pointId
 > identical across the whole add → cart → checkout flow.
 
 1. `grocery_goods(category_id, app_id, point_id, page)` → search catalog.
    Requires: `sortBy=DEFAULT` (not `sort`), `onlyDirectGoods=false`, `categoryId`.
-2. `grocery_cart_set(body)` → set cart on mobile API. The `delivery` block it builds
+2. `grocery_add_to_cart` (adds) / `grocery_set_cart` (absolute counts, `count: 0` removes, `clear=True` empties) → both go through cart/set on the
+   mobile API, which REPLACES the whole cart — there is no delete endpoint, so
+   removing an item means resending the list without it. The `delivery` block it builds
    has three non-obvious requirements, all capture-verified — get any of them wrong
    and cart/set answers HTTP 200 while storing nothing, so the next GET reads empty:
    - **`address.details`** (flat, houseType, doorphone, …) must be complete, and

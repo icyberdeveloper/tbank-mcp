@@ -28,7 +28,8 @@ MCP обращается к реальным магазинам Т-Банка �
 | `grocery_rank(query, app_id, point_id, sort_by, order, limit, with_nutrition)` | Кандидаты с атрибутами (цена, вес, КБЖУ), опционально отсортированные. Стратегию задаёшь ты — см. Шаг 4. Без `sort_by` — порядок магазина. |
 | `grocery_good_info(good_id, app_id, point_id)` | Карточка товара: состав, КБЖУ на 100 г и на упаковку, срок хранения, производитель. |
 | `grocery_plan_order(ingredients, app_id, point_id)` | Умный планировщик: ищет каждый ингредиент (сначала custom_ordered, потом глобально) → план. **app_id/point_id обязательны.** |
-| `grocery_add_to_cart(items, app_id, point_id)` | Добавить товары в корзину (автоматически берёт адрес доставки с details). **app_id/point_id обязательны.** |
+| `grocery_add_to_cart(items, app_id, point_id)` | **Прибавить** товары к корзине (адрес доставки берётся сам). **app_id/point_id обязательны.** |
+| `grocery_set_cart(items, app_id, point_id, clear)` | **Задать** количество точно: `count=0` убирает товар, `clear=True` очищает корзину. Возвращает состав ПОСЛЕ изменения |
 | `grocery_cart(app_id, point_id)` | Получить содержимое корзины (проверить перед оплатой). **Те же app_id/point_id что в add_to_cart.** |
 | `grocery_checkout(app_id, point_id)` | Полный чекаут: web-корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. **Те же app_id/pointId.** Счёт — авто. |
 | `grocery_attempts()` | Read-only: недавние попытки checkout (status, order_id, attempt_id) — для reconciliation после UNKNOWN. |
@@ -179,6 +180,14 @@ grocery_search("свёкла", app_id, point_id)
    [{"id": "248429", "count": 1}, {"id": "368285", "count": 1}, ...]
    ```
 2. Вызови `grocery_cart(app_id, point_id)` — с **теми же** app_id/point_id — чтобы проверить содержимое корзины.
+3. Что-то не то — правь через `grocery_set_cart`, а **не** повторным `add_to_cart`:
+   он прибавляет, поэтому «добавлю ещё раз, чтобы стало правильно» удваивает позицию.
+   ```
+   grocery_set_cart('[{"id": "248429", "count": 0}]', app_id, point_id)   # убрать
+   grocery_set_cart('[{"id": "368285", "count": 2}]', app_id, point_id)   # ровно 2
+   grocery_set_cart('[]', app_id, point_id, clear=True)                   # очистить
+   ```
+   Тул возвращает состав корзины после изменения — сверь его, прежде чем идти дальше.
 
 ### Шаг 7: Показать корзину пользователю — ОБЯЗАТЕЛЬНО перед оплатой
 
