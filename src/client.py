@@ -856,30 +856,22 @@ class MobileSession:
     # ---- grocery (Город) shopping + checkout + payment (cookie/Bearer, no sig) ----
 
     def grocery_cart_get(self, app_id: str = "", point_id: str = "") -> dict:
-        """Read the cart for a specific store. app_id/point_id scope which
-        store's cart is read — without them the backend returns the default
-        (often empty) cart, which is the 'Корзина пуста' mismatch."""
-        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
-        return self._call_read("grocery_cart_get", overrides=ov or None)
+        """Read the cart for a specific store. Only appId scopes the cart — the
+        real app never sends pointId on this endpoint (pointId lives in the
+        cart/set body under delivery). point_id is accepted for call-site symmetry."""
+        ov = {"appId": app_id} if app_id else None
+        return self._call_read("grocery_cart_get", overrides=ov)
 
     def grocery_cart_set(self, body: dict | None = None,
                          app_id: str = "", point_id: str = "") -> dict:
-        """Build/set the grocery cart (POST). If body is None, gets the full
-        delivery address (with details) from GET cart + uses it — the backend
-        requires address.details (flat, houseType, etc.) or it crashes."""
-        ov = {k: v for k, v in (("appId", app_id), ("pointId", point_id)) if v}
+        """Set the grocery cart (POST). With body=None this CLEARS the store's cart
+        (goods: []). The delivery block — address with full details, plus areaId for
+        retailers that require it — is resolved by _grocery_delivery."""
         if body is None:
-            # get the full address (with details) from the current cart
-            cart = self._call_read("grocery_cart_get", overrides=ov or None)
-            if isinstance(cart, dict):
-                delivery = cart.get("delivery", {}) or cart.get("cart", {}).get("delivery", {})
-                addr = delivery.get("address", {})
-                pid = delivery.get("pointId", point_id)
-                body = {
-                    "goods": [], "cartSetMode": "SINGLE_CART",
-                    "delivery": {"isExpress": False, "comment": "", "pointId": pid,
-                                 "deliveryType": "IN_PERSON", "address": addr}}
-        return self._call_read("grocery_cart_set", body=body, overrides=ov or None)
+            body = {"goods": [], "cartSetMode": "SINGLE_CART",
+                    "delivery": self._grocery_delivery(app_id, point_id)}
+        return self._call_read("grocery_cart_set", body=body,
+                               overrides={"appId": app_id} if app_id else None)
 
     def grocery_cart_check(self) -> dict:
         return self._call_read("grocery_cart_check")
@@ -1265,8 +1257,13 @@ class MobileSession:
                     min_sum = (ret.get("delivery", {}) or {}).get("minOrderSum", 0)
                     nearest = (ret.get("delivery", {}) or {}).get("nearestTime", {})
                     cashback = (ret.get("info", {}) or {}).get("cashback", {})
+                    # areaId identifies the retailer's delivery zone for this address.
+                    # Retailers that have one (ВкусВилл, Лента) REQUIRE it in the
+                    # cart/set body — omitting it makes the backend reject the cart.
+                    # This is the only endpoint that ever returns it.
+                    area_id = str((ret.get("delivery", {}) or {}).get("areaId", "") or "")
                     if app_id and name:
-                        stores.append({"appId": app_id, "name": name,
+                        stores.append({"appId": app_id, "name": name, "areaId": area_id,
                                        "pointId": point_id, "minOrderSum": min_sum,
                                        "deliveryTime": f"{nearest.get('from','')}-{nearest.get('to','')} min" if nearest.get("to") else "",
                                        "deliveryPrice": nearest.get("price", 0),
@@ -1505,6 +1502,21 @@ class MobileSession:
                 if lc in _SESSION_EXPIRED or "session" in lc.lower() or "authoriz" in lc.lower() or lc == "invalid_grant":
                     raise SessionExpired(lc, str(msg))
                 raise TbankApiError(lc, str(msg))
+            # The lifestyle/Город envelope signals failure with HTTP 200 +
+            # {"status":"Error","payload":{"message":..,"code":..,"blame":..}} — it uses
+            # neither resultCode nor error, so the check above misses it and the ERROR
+            # payload gets returned as a success value. That is how a rejected
+            # grocery cart/set surfaced as `OK: goodsSum=?`: the caller read goodsSum
+            # off an error body. "Ok"/"ok"/"OK" and "Error" are the only status values
+            # across all 447 enveloped responses in the capture.
+            st = data.get("status")
+            if isinstance(st, str) and st.lower() == "error":
+                err = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+                ec = str(err.get("code") or "Error")
+                em = str(err.get("message") or err.get("plainMessage") or "")
+                if ec in _SESSION_EXPIRED or "session" in ec.lower() or "authoriz" in ec.lower():
+                    raise SessionExpired(ec, em)
+                raise TbankApiError(ec, em)
             # unwrap envelope: payload (mobile API) or result (messenger)
             if "payload" in data:
                 return data["payload"]
@@ -1619,21 +1631,120 @@ class MobileSession:
         results.sort(key=lambda r: (not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
         return results
 
+    def grocery_client_info(self) -> dict:
+        """GET /api/grocery/client/info — the account's grocery profile. Carries
+        payload.deliveryInfo.{address,deliveryType,comment}: the saved delivery block
+        the app uses to seed a cart in a store the user has never ordered from."""
+        info = self._call_read("grocery_client_info")
+        return info if isinstance(info, dict) else {}
+
+    def _grocery_delivery(self, app_id: str, point_id: str, cart: dict | None = None) -> dict:
+        """Build the ``delivery`` block that cart/set requires for this store.
+
+        Two things bit us here, both capture-verified:
+
+        * The address cannot come from the store's own cart alone. For a store the
+          user has never used there IS no cart, so the address resolves to ``{}`` and
+          the cart/set is rejected — which means no cart is ever created, so the next
+          attempt finds no cart either. A permanent deadlock, not a transient miss.
+          The app seeds from client/info instead; we prefer the store's own cart (it
+          may carry a store-specific address) and fall back to client/info.
+        * ``areaId`` is per-retailer and REQUIRED by the retailers that publish one
+          (ВкусВилл appId=204, Лента appId=246); Азбука Вкуса (578) has none and its
+          real cart/set bodies omit the key entirely. Only the retailers list returns
+          it, so resolve it from there and omit the key when the store has none.
+        """
+        delivery: dict = {}
+        try:
+            if cart is None:
+                cart = self._call_read("grocery_cart_get", overrides={"appId": app_id})
+            if isinstance(cart, dict):
+                inner = cart.get("cart") if isinstance(cart.get("cart"), dict) else cart
+                delivery = inner.get("delivery") or {}
+        except TbankApiError:
+            delivery = {}
+        addr = delivery.get("address") or {}
+        comment = delivery.get("comment", "")
+        # the cart GET spells it deliveryToDoor; cart/set expects deliveryType
+        dtype = delivery.get("deliveryType") or delivery.get("deliveryToDoor") or ""
+        if not addr:
+            di = self.grocery_client_info().get("deliveryInfo") or {}
+            addr = di.get("address") or {}
+            dtype = dtype or di.get("deliveryType") or ""
+            comment = comment or di.get("comment", "")
+        if not addr:
+            raise TbankApiError("NO_DELIVERY_ADDRESS",
+                "У аккаунта нет сохранённого адреса доставки. Добавь адрес в приложении "
+                "Т-Банка (Город), затем повтори.")
+        # All 14 captured cart/set bodies carry address.details.streetWithType, but no
+        # GET we read returns it — the app fills it in client-side. In every captured
+        # address the street name already carries its type (both "<name> проезд" and
+        # "улица <name>" forms occur), so street is the value to copy.
+        details = addr.get("details")
+        if isinstance(details, dict) and details.get("street") and not details.get("streetWithType"):
+            addr = dict(addr)
+            addr["details"] = {**details, "streetWithType": details["street"]}
+        out = {"isExpress": bool(delivery.get("isExpress", False)),
+               "comment": comment or "", "pointId": str(point_id),
+               "deliveryType": dtype or "IN_PERSON", "address": addr}
+        area_id = ""
+        for st in self.grocery_stores():
+            if str(st.get("appId")) == str(app_id) and str(st.get("pointId")) == str(point_id):
+                area_id = str(st.get("areaId") or "")
+                break
+        if area_id:
+            out["areaId"] = area_id
+        return out
+
     def grocery_add_to_cart(self, items: list[dict], app_id: str = "", point_id: str = "") -> dict:
         """Add items to cart. items = [{"id": "123", "count": 1}, ...].
-        Encapsulates: address.details fetch + cart/set body format."""
+        Resolves the delivery block (address + areaId) and merges with what is
+        already in the cart."""
         _need_store(app_id, point_id)
-        # get full address (with details) from current cart
-        cart = self._call_read("grocery_cart_get", overrides={"appId": app_id, "pointId": point_id})
-        addr = {}
-        if isinstance(cart, dict):
-            delivery = cart.get("delivery", {}) or cart.get("cart", {}).get("delivery", {})
-            addr = delivery.get("address", {})
-        body = {
-            "goods": items, "cartSetMode": "SINGLE_CART",
-            "delivery": {"isExpress": False, "comment": "", "pointId": point_id,
-                         "deliveryType": "IN_PERSON", "address": addr}}
-        return self._call_read("grocery_cart_set", body=body, overrides={"appId": app_id, "pointId": point_id})
+        try:
+            cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
+        except TbankApiError:
+            cart = {}
+        delivery = self._grocery_delivery(app_id, point_id, cart=cart)
+        # cart/set REPLACES the whole cart — every captured body resends the full
+        # goods list (item [369] posts 6 goods, [375] posts 5 after a removal). Posting
+        # only the new items would silently drop everything added earlier, so merge.
+        merged: dict[str, int] = {}
+        order: list[str] = []
+        for g in self._goods_of(cart):
+            gid = str(g.get("id", ""))
+            if not gid:
+                continue
+            if gid not in merged:
+                order.append(gid)
+            merged[gid] = merged.get(gid, 0) + int(float(g.get("count", 1) or 1))
+        for it in items:
+            gid = str(it.get("id", ""))
+            if not gid:
+                continue
+            if gid not in merged:
+                order.append(gid)
+            merged[gid] = merged.get(gid, 0) + int(float(it.get("count", 1) or 1))
+        goods = [{"id": gid, "count": merged[gid]} for gid in order]
+        body = {"goods": goods, "cartSetMode": "SINGLE_CART", "delivery": delivery}
+        return self._call_read("grocery_cart_set", body=body,
+                               overrides={"appId": app_id})
+
+    @staticmethod
+    def _goods_of(cart: Any) -> list[dict]:
+        """Goods out of a cart GET payload (payload.cart.goods), [] if none."""
+        if not isinstance(cart, dict):
+            return []
+        inner = cart.get("cart") if isinstance(cart.get("cart"), dict) else cart
+        goods = inner.get("goods") if isinstance(inner, dict) else None
+        return goods if isinstance(goods, list) else []
+
+    def grocery_cart_goods(self, app_id: str = "", point_id: str = "") -> list[dict]:
+        """Goods currently in the store's cart, [] if the cart is empty or errors."""
+        try:
+            return self._goods_of(self.grocery_cart_get(app_id=app_id, point_id=point_id))
+        except TbankApiError:
+            return []
 
     def grocery_checkout(self, app_id: str = "", point_id: str = "",
                          client_email: str = "", account: str = "",

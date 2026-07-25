@@ -328,7 +328,14 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
         app_id, point_id = _store(app_id, point_id)
         r = s.grocery_add_to_cart(json.loads(items), app_id=app_id, point_id=point_id)
         pl = r if isinstance(r, dict) else {}
-        return f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl.get('goodsSum','?')}"
+        # Every successful cart/set in the capture returns payload.goodsSum. Its
+        # absence means the backend did not accept the cart, so do NOT report OK —
+        # that is what previously produced "OK: goodsSum=?" on a rejected write.
+        if "goodsSum" not in pl:
+            return (f"[store appId={app_id} pointId={point_id}] ОШИБКА: бэкенд не принял "
+                    f"корзину (в ответе нет goodsSum). Товары НЕ добавлены. Ответ: {str(pl)[:300]}")
+        return (f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl['goodsSum']}"
+                f" (в корзине {len(json.loads(items))} новых позиций)")
     except Exception as e:
         return _err(e)
 
@@ -340,11 +347,13 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
         r = s.grocery_cart_get(app_id=app_id, point_id=point_id)
-        cart = r.get("cart", r) if isinstance(r, dict) else {}
+        env = r if isinstance(r, dict) else {}
+        cart = env.get("cart", env) if isinstance(env.get("cart"), dict) else env
         goods = cart.get("goods", []) if isinstance(cart, dict) else []
         # defensive context check: if the response echoes a DIFFERENT store than
-        # requested, flag it instead of silently showing an empty cart.
-        resp_app = str(cart.get("applicationId") or cart.get("appId") or "")
+        # requested, flag it instead of silently showing an empty cart. The store id
+        # lives at payload.application.id — the cart object itself carries no appId.
+        resp_app = str((env.get("application") or {}).get("id") or "")
         resp_point = str((cart.get("delivery", {}) or {}).get("pointId")
                          or cart.get("pointId") or "")
         mismatch = ""

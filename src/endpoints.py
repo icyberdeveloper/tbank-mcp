@@ -932,6 +932,21 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios"
   }
  },
+ "grocery_client_info": {
+  "method": "GET",
+  "host": "https://lifestyle.t-bank-app.ru",
+  "path": "/api/grocery/client/info",
+  "params": {
+   "inache": "drivetransitt",
+   "platform": "ios",
+   "appVersion": "7.31.6",
+   "cpswc": "true",
+   "origin": "mobile,ib5,loyalty,platform",
+   "ccc": "true",
+   "connectionType": "WiFi",
+   "appName": "mobile"
+  }
+ },
  "grocery_cart_get": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",

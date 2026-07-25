@@ -52,9 +52,22 @@ You normally just call a read tool; the above runs under the hood. Call
 
 1. `grocery_goods(category_id, app_id, point_id, page)` → search catalog.
    Requires: `sortBy=DEFAULT` (not `sort`), `onlyDirectGoods=false`, `categoryId`.
-2. `grocery_cart_set(body)` → set cart on mobile API. Auto-fetches full address
-   (with `details` — flat, houseType, doorphone) from GET cart; without `details`
-   the backend crashes (code=100).
+2. `grocery_cart_set(body)` → set cart on mobile API. The `delivery` block it builds
+   has three non-obvious requirements, all capture-verified — get any of them wrong
+   and cart/set answers HTTP 200 while storing nothing, so the next GET reads empty:
+   - **`address.details`** (flat, houseType, doorphone, …) must be complete, and
+     `details.streetWithType` is client-side — no GET returns it, copy it from `street`.
+   - **`address` cannot come from the store's own cart.** A store the user has never
+     ordered from HAS no cart, so there is no address to copy and the write is
+     rejected — which means no cart is ever created and the next attempt fails the
+     same way. Seed from `GET /api/grocery/client/info` → `payload.deliveryInfo.address`.
+   - **`areaId`** is per-retailer and REQUIRED by the retailers that publish one
+     (ВкусВилл appId=204, Лента appId=246). Azbuka (578) has none and its real bodies
+     omit the key. The ONLY source is `GET /api/grocery/retailers` →
+     `payload.categories[].retailers[].delivery.areaId`.
+   `pointId` goes in the BODY under `delivery`, never in the query — only `appId`
+   scopes the cart. And cart/set REPLACES the whole cart, so an "add" must resend the
+   existing goods merged with the new ones.
 3. **Web cart sync** (checkout.py): set `portalSID` + `sessionID` + `deviceId` as
    cookies on .tbank.ru → links mobile cart → web checkout.
 4. GET web cart → **actual sum** (weight-based items like potatoes may differ).
