@@ -90,18 +90,38 @@ def _log(msg: str) -> None:
     print(f"[tbank-tls] {msg}", file=sys.stderr, flush=True)
 
 
-def fingerprint(pem_text: str) -> str:
-    """SHA-256 over the DER, i.e. the same value `openssl x509 -fingerprint -sha256`
-    prints. Pure Python — no openssl process, so this works on a machine that has
-    none, which the old code could not."""
-    m = _PEM_RE.search(pem_text)
-    if not m:
+def fingerprints(pem_text: str) -> list[str]:
+    """SHA-256 over the DER of EVERY certificate in the text, in file order — i.e.
+    the values `openssl x509 -fingerprint -sha256` prints. Pure Python — no openssl
+    process, so this works on a machine that has none, which the old code could not."""
+    blocks = _PEM_RE.findall(pem_text)
+    if not blocks:
         raise UntrustedRoot("not a PEM certificate")
-    try:
-        der = base64.b64decode("".join(m.group(1).split()))
-    except (binascii.Error, ValueError) as e:
-        raise UntrustedRoot(f"malformed base64 in PEM: {e}") from e
-    return hashlib.sha256(der).hexdigest()
+    out = []
+    for body in blocks:
+        try:
+            der = base64.b64decode("".join(body.split()))
+        except (binascii.Error, ValueError) as e:
+            raise UntrustedRoot(f"malformed base64 in PEM: {e}") from e
+        out.append(hashlib.sha256(der).hexdigest())
+    return out
+
+
+def fingerprint(pem_text: str) -> str:
+    """The fingerprint of a file that holds exactly ONE certificate.
+
+    More than one is refused rather than partially verified. A PEM file is a
+    concatenation, and a pin is a single hash: a check that looks only at the first
+    block trusts every later block unexamined. Appending a root of your choosing
+    after a genuine one would then produce a file that "matches its pin" and installs
+    an attacker-chosen anchor — the same inversion this module was rewritten to
+    remove, just moved from the network to the filesystem."""
+    got = fingerprints(pem_text)
+    if len(got) != 1:
+        raise UntrustedRoot(
+            f"expected one certificate, found {len(got)} — a pin covers one "
+            f"certificate and the rest would be trusted unverified")
+    return got[0]
 
 
 def system_ca_path() -> str | None:
@@ -114,8 +134,10 @@ def system_ca_path() -> str | None:
 def load_roots(roots_dir: str | None = None) -> list[str]:
     """PEM text of every trusted extra root.
 
-    A file listed in PINNED_ROOTS must match its pin or it is refused — a tampered
-    or swapped root is exactly the thing this module exists to prevent. Files not in
+    A file listed in PINNED_ROOTS must hold exactly one certificate and it must match
+    the pin, or the whole file is refused — a tampered or swapped root is exactly the
+    thing this module exists to prevent, and so is one smuggled in behind a genuine
+    one (see fingerprint() for why one-block-only is not enough). Files not in
     PINNED_ROOTS are the user's own escape hatch for a future root rotation; they are
     accepted and announced, because refusing them would mean a root change bricks the
     MCP until someone ships a release."""
@@ -131,29 +153,46 @@ def load_roots(roots_dir: str | None = None) -> list[str]:
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
-            got = fingerprint(text)
+            got = fingerprints(text)
         except (OSError, UntrustedRoot) as e:
             _log(f"REFUSED {name}: unreadable or not a certificate ({e})")
             continue
         expected = PINNED_ROOTS.get(name)
-        if expected and got != expected:
-            _log(f"REFUSED {name}: SHA-256 {got} does not match the pin {expected}. "
-                 f"This file is NOT trusted. If the bank genuinely rotated its root, "
-                 f"update PINNED_ROOTS in src/tls.py deliberately.")
-            continue
-        if not expected:
-            _log(f"trusting unpinned root {name} ({got[:16]}…) — added locally, "
-                 f"not shipped with this repo")
+        if expected:
+            # The whole file is trusted or none of it is: everything after the first
+            # block would otherwise ride in on the first block's pin.
+            if len(got) != 1:
+                _log(f"REFUSED {name}: it holds {len(got)} certificates but a pin "
+                     f"covers one. The extras would be trusted without ever being "
+                     f"checked. Split them into separate files and pin each.")
+                continue
+            if got[0] != expected:
+                _log(f"REFUSED {name}: SHA-256 {got[0]} does not match the pin "
+                     f"{expected}. This file is NOT trusted. If the bank genuinely "
+                     f"rotated its root, update PINNED_ROOTS in src/tls.py "
+                     f"deliberately.")
+                continue
+        else:
+            _log(f"trusting {len(got)} unpinned certificate(s) in {name} "
+                 f"({', '.join(f'{f[:16]}…' for f in got)}) — added locally, not "
+                 f"shipped with this repo")
         out.append(text)
 
     extra = os.environ.get("TBANK_EXTRA_CA", "")
     for path in [p for p in extra.split(os.pathsep) if p]:
         try:
             with open(path, encoding="utf-8") as fh:
-                out.append(fh.read())
-            _log(f"trusting TBANK_EXTRA_CA root {path}")
-        except OSError as e:
+                text = fh.read()
+            # Named explicitly by the operator, so it is trusted without a pin — but
+            # every certificate in it is announced, because "I pointed at one root"
+            # and "the file contained one root" are different statements.
+            got = fingerprints(text)
+        except (OSError, UntrustedRoot) as e:
             _log(f"TBANK_EXTRA_CA {path}: {e}")
+            continue
+        _log(f"trusting {len(got)} certificate(s) from TBANK_EXTRA_CA {path} "
+             f"({', '.join(f'{f[:16]}…' for f in got)})")
+        out.append(text)
     return out
 
 

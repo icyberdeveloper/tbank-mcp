@@ -1,5 +1,5 @@
 {
- "_note": "Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). Key sets and protocol constants are real; account, recipient and device/session ids are synthetic.",
+ "_note": "Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). Key sets and protocol constants are real; account, recipient, userPaymentId and device/session ids are synthetic.",
  "query_keys": [
   "appName",
   "appVersion",
@@ -63,7 +63,7 @@
  "pay_parameters": {
   "isTransferStatus": "false",
   "isUrgentTransfer": "false",
-  "userPaymentId": "1784672875703",
+  "userPaymentId": "1700000000000",
   "frontCamera": "true",
   "provider": "p2p-anybank",
   "currency": "RUB",

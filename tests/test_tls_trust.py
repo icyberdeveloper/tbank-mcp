@@ -151,6 +151,48 @@ def test_a_tampered_shipped_root_is_refused():
     print("  pinning: the shipped root loads, a byte-flipped or junk one is refused")
 
 
+def test_a_pinned_file_cannot_smuggle_a_second_certificate():
+    """A pin is one hash; a PEM file is a concatenation.
+
+    Verifying only the first block means everything after it is trusted unexamined —
+    append your own root behind the genuine one and the file still "matches its pin",
+    which installs an attacker-chosen anchor. Same inversion as the old self-healing,
+    moved from the network to the filesystem."""
+    tmp = tempfile.mkdtemp()
+    try:
+        roots = os.path.join(tmp, "roots")
+        os.makedirs(roots)
+        name = "russian-trusted-root-ca.pem"
+        good = open(os.path.join(tls.ROOTS_DIR, name), encoding="utf-8").read()
+        _, crt = make_self_signed(tmp, cn="Attacker Root CA")
+        hostile = open(crt, encoding="utf-8").read()
+
+        path = os.path.join(roots, name)
+        open(path, "w", encoding="utf-8").write(good.rstrip() + "\n" + hostile)
+        blocks = tls.fingerprints(open(path, encoding="utf-8").read())
+        # Without this the test would prove nothing: the genuine root must really be
+        # first, so that a first-block-only check would have accepted the file.
+        check(len(blocks) == 2 and blocks[0] == tls.PINNED_ROOTS[name],
+              f"the genuine root must be the FIRST of two blocks, got {len(blocks)}")
+        check(tls.load_roots(roots) == [],
+              "a pinned file with a second certificate appended was trusted — the "
+              "appended certificate rides in on the genuine root's pin")
+
+        # And it must not reach the bundle by any other path.
+        out = os.path.join(tmp, "bundle.pem")
+        saved = tls.ROOTS_DIR
+        tls.ROOTS_DIR = roots
+        try:
+            tls.rebuild_bundle(out=out)
+        finally:
+            tls.ROOTS_DIR = saved
+        check(hostile.strip() not in open(out, encoding="utf-8").read(),
+              "the smuggled certificate reached the CA bundle anyway")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  pinning: a certificate appended behind the pinned root is refused")
+
+
 def test_an_operator_can_add_a_root_without_a_release():
     """Root rotation must never brick the MCP: a locally added root is honoured, so
     the fix is 'drop the PEM in' rather than 'wait for a release'."""
@@ -206,6 +248,7 @@ def test_bundle_contains_only_trusted_material():
 def main():
     print("TLS trust:")
     test_a_tampered_shipped_root_is_refused()
+    test_a_pinned_file_cannot_smuggle_a_second_certificate()
     test_an_operator_can_add_a_root_without_a_release()
     test_bundle_contains_only_trusted_material()
     test_a_hostile_certificate_is_not_learned()

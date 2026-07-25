@@ -57,6 +57,28 @@ def scrub(o):
     return o
 
 
+def renumber_address_ids(client_info):
+    """Address-record UUIDs are the user's, not the protocol's.
+
+    scrub() cannot catch them by key name: `id` also carries goods ids and `pointId`
+    carries public store ids, both of which are the contract and must survive. So
+    they are replaced positionally, here, where the shape of the document is known.
+    The replacements keep UUID form (something downstream may parse it) and are
+    obviously synthetic."""
+    addrs = ((client_info.get("deliveryInfo") or {}).get("addresses") or [])
+    for i, a in enumerate(addrs, 1):
+        if isinstance(a, dict) and "id" in a:
+            a["id"] = f"00000000-0000-4000-8000-{i:012d}"
+    return client_info
+
+
+def scrub_envelope(env):
+    """trackingId is the bank's handle on one real request by this user."""
+    if isinstance(env, dict) and "trackingId" in env:
+        env["trackingId"] = "00000000-0000-4000-8000-000000000000"
+    return env
+
+
 def slim_retailers(payload):
     """Only the appId → pointId/areaId mapping the cart body needs."""
     cats = []
@@ -75,12 +97,13 @@ def build(items):
     return {
         "_note": ("Scrubbed from a Burp capture: structure and protocol values are real, "
                   "personal values are synthetic. Regenerate with tests/fixtures/regen.py."),
-        "client_info": scrub(T.response_json(items, T.CLIENT_INFO)["payload"]),
+        "client_info": renumber_address_ids(
+            scrub(T.response_json(items, T.CLIENT_INFO)["payload"])),
         "cart_get": {"cart": scrub(T.response_json(items, T.CART_GET)["payload"]["cart"])},
         "retailers": slim_retailers(T.response_json(items, T.RETAILERS)["payload"]),
         "expected_azbuka": scrub(T.request_json(items, T.AZBUKA_CART_SET)),
         "expected_vkusvill": scrub(T.request_json(items, T.VKUSVILL_CART_SET)),
-        "error_envelope": T.response_json(items, T.ERROR_ENVELOPE),
+        "error_envelope": scrub_envelope(T.response_json(items, T.ERROR_ENVELOPE)),
     }
 
 
@@ -127,6 +150,10 @@ def build_transfer():
     pp = json.loads(form["payParameters"][0])
 
     pp["account"] = "0000000000"
+    # A millisecond timestamp is a handle on one real payment — when it happened, and
+    # what the bank deduplicates against. Only its SHAPE is the contract (13 digits),
+    # and that is what the test asserts, so the value goes.
+    pp["userPaymentId"] = "1700000000000"
     pf = pp.get("providerFields", {})
     for k, v in (("pointer", "+79991234567"), ("maskedFIO", "И. И."),
                  ("bankMemberId", "100000000000"), ("pointerLinkId", "10000000000")):
@@ -135,8 +162,8 @@ def build_transfer():
     secret = {"sessionid", "deviceId", "oldDeviceId"}
     return {
         "_note": ("Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). "
-                  "Key sets and protocol constants are real; account, recipient and "
-                  "device/session ids are synthetic."),
+                  "Key sets and protocol constants are real; account, recipient, "
+                  "userPaymentId and device/session ids are synthetic."),
         "query_keys": sorted(query),
         "query_static": {k: v[0] for k, v in sorted(query.items()) if k not in secret},
         "form_keys": sorted(form),
