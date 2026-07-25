@@ -2060,11 +2060,18 @@ class MobileSession:
             area_id = memo[memo_key]
         else:
             area_id = ""
+            found = False
             for st in self.grocery_stores():
                 if str(st.get("appId")) == str(app_id) and str(st.get("pointId")) == str(point_id):
                     area_id = str(st.get("areaId") or "")
+                    found = True
                     break
-            if memo is not None:
+            # Only a real answer is memoised. A miss means the catalogue did not list
+            # this store on this call — a transient read, a store not yet chosen —
+            # and caching "" would drop areaId from every later cart write for the
+            # whole process. ВкусВилл needs it: without areaId cart/set answers 200
+            # and saves nothing, so the failure would be silent and permanent.
+            if memo is not None and found:
                 memo[memo_key] = area_id
         if area_id:
             out["areaId"] = area_id
@@ -2631,35 +2638,47 @@ class MobileSession:
         return re.sub(r"(^|[_\-])([a-z])",
                       lambda m: m.group(1) + m.group(2).upper(), out)
 
+    PAGE = 30                      # what the collection endpoint returns per page
+
     def cinema_movies(self, city: str = "Москва", query: str = "",
-                      max_pages: int = 4) -> list[dict]:
-        """Movies playing today in `city`. The collection code is city-derived
-        ("Segodnya-v_kino_Moskva"); it is only a way to reach an eventId, which
-        is itself city-independent and is what the schedule endpoint wants."""
+                      max_pages: int = 8) -> tuple[list[dict], int, int]:
+        """Movies playing today in `city`, as (matches, scanned, listing_total).
+
+        The collection code is city-derived ("Segodnya-v_kino_Moskva"); it is only a
+        way to reach an eventId, which is itself city-independent and is what the
+        schedule endpoint wants.
+
+        The listing has no server-side search, so matching is ours and every page has
+        to be seen. A previous version stopped as soon as ONE page held a match,
+        which made a named search cheap and wrong: matches on later pages vanished,
+        and the caller then reported the survivors as the complete count. Pages after
+        the first are fetched concurrently instead — page 1 states the true total, so
+        the page count is known after one request and the rest cost one round trip.
+
+        `scanned` is returned so the caller can tell "these are all of them" from
+        "these are all of them among the first N" when max_pages binds."""
         code = "Segodnya-v_kino_" + self._translit(city)
         q = query.lower().replace("ё", "е") if query else ""
 
         def matches(e):
             return not q or q in str(e.get("name", "")).lower().replace("ё", "е")
 
-        out: list[dict] = []
-        total = 0
-        for page in range(1, max(1, max_pages) + 1):
+        def fetch(page: int) -> tuple[list, int]:
             data = self._call_read("events_collection", body={"genres": []},
                                    overrides={"collectionCode": code,
-                                              "page": str(page), "count": "30"})
+                                              "page": str(page), "count": str(self.PAGE)})
             coll = (data or {}).get("collection") or {}
-            events = coll.get("events") or []
-            total = int(coll.get("amount") or 0)
-            out.extend(e for e in events if isinstance(e, dict))
-            if not events or len(out) >= total:
-                break
-            # A named search does not need the rest of the listing. Stop as soon as
-            # this page has produced a match — "найди Майкла" used to walk all four
-            # pages of today's releases regardless.
-            if q and any(matches(e) for e in out):
-                break
-        return [e for e in out if matches(e)]
+            return [e for e in (coll.get("events") or []) if isinstance(e, dict)], \
+                   int(coll.get("amount") or 0)
+
+        out, total = fetch(1)
+        pages = min(max(1, max_pages), -(-total // self.PAGE) if total else 1)
+        if pages > 1 and len(out) < total:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, pages - 1)) as pool:
+                for events, _ in pool.map(fetch, range(2, pages + 1)):
+                    out.extend(events)
+        return [e for e in out if matches(e)], len(out), total
 
     # Sorting anchor when the caller gives no coordinates. It is the centre of the
     # default city, NOT the user's location — the app sends the device's GPS. Named

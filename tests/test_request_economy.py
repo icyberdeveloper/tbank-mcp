@@ -11,7 +11,10 @@ they did not need:
     read one areaId, which is a property of the store and never changes.
   * documents() asked for the prefill contact id twice in a single invocation.
   * grocery_rank fetched nutrition for up to 8 candidates strictly in sequence.
-  * cinema_search always walked 4 pages of today's listing even for a named film.
+  * cinema_search walked today's listing one page at a time. Making that cheap by
+    stopping at the first page holding a match traded requests for correctness —
+    matches on later pages disappeared and the count was reported as complete — so
+    the pages are now fetched concurrently instead: same answer, one round trip.
 
 Each test counts the calls the real code makes against a session that records them.
 
@@ -41,15 +44,20 @@ class CountingSession(MobileSession):
         self.responses = responses
         self.delay = delay
         self.calls = []
+        self.writes = []          # (key, body) of every call, for asserting shape
         self._memo = {}
         self._lock = threading.Lock()
 
     def ensure_fresh(self, *a, **kw):
         return None
 
+    def sent(self, key):
+        return [b for k, b in self.writes if k == key]
+
     def _call_read(self, key, *, overrides=None, body=None, path_override=None):
         with self._lock:
             self.calls.append(key)
+            self.writes.append((key, body))
         if self.delay:
             time.sleep(self.delay)
         value = self.responses.get(key)
@@ -132,6 +140,51 @@ def test_area_id_is_looked_up_once_per_store():
     print(f"  add_to_cart ×3: retailers fetched {n}× (was once per call)")
 
 
+def test_a_missed_area_id_lookup_is_not_cached_as_the_answer():
+    """The memo may only remember an ANSWER, never a miss.
+
+    A store absent from the catalogue on one call — a transient read, a store the
+    client has not opened yet — used to be memoised as areaId="" and the empty value
+    served for the rest of the process. ВкусВилл's cart/set answers 200 and saves
+    nothing without areaId, so every later cart write would silently do nothing, and
+    no retry could ever recover: the miss was cached, not the lookup."""
+    class FlakyStores(CountingSession):
+        catalogue: list = []
+
+        def grocery_stores(self):
+            with self._lock:
+                self.calls.append("grocery_stores")
+            return self.catalogue
+
+    stubs = {
+        "grocery_client_info": {"deliveryInfo": {"address": {
+            "value": "ул Примерная", "details": {"street": "Примерная"}}}},
+        "grocery_cart_get": {"cart": {"goods": [], "sum": 0}},
+        "grocery_cart_set": {"goodsSum": 1.0},
+    }
+    s = FlakyStores(stubs)
+    s.catalogue = []                                   # the catalogue comes back empty
+    s.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+    first = s.sent("grocery_cart_set")[-1]["delivery"]
+    check("areaId" not in first, f"an unknown areaId must be omitted, not faked: {first}")
+
+    s.catalogue = [{"appId": "204", "pointId": "5980", "areaId": "17040911"}]
+    s.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+    second = s.sent("grocery_cart_set")[-1]["delivery"]
+    check(second.get("areaId") == "17040911",
+          f"the retry still sends no areaId — the MISS was memoised: {second}")
+
+    # A store that genuinely has no areaId (Азбука Вкуса) IS an answer, and is cached.
+    s2 = FlakyStores(stubs)
+    s2.catalogue = [{"appId": "578", "pointId": "2", "areaId": None}]
+    for _ in range(3):
+        s2.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="578", point_id="2")
+    check(s2.count("grocery_stores") == 1,
+          f"a store with no areaId must still be memoised, looked up "
+          f"{s2.count('grocery_stores')} times")
+    print("  areaId: a miss is retried, a genuine empty answer is cached")
+
+
 def test_documents_resolves_the_contact_id_once():
     s = CountingSession({
         "prefill_contact": {"contacts": [{"id": "c-1"}]},
@@ -181,40 +234,62 @@ def test_nutrition_is_fetched_concurrently():
           f"(sequential would be ~{sequential:.2f}s)")
 
 
-def test_named_film_search_stops_at_the_first_page_that_matches():
+def listing(named: dict, amount: int = 120, per_page: int = 30):
+    """A four-page afisha where `named` maps (page, index) → film name."""
     def page(overrides):
         n = int((overrides or {}).get("page", 1))
-        return {"collection": {"amount": 120, "events": [
-            {"name": "Майкл" if (n == 1 and i == 0) else f"Фильм {n}-{i}",
-             "eventId": f"{n}{i}"} for i in range(30)]}}
+        return {"collection": {"amount": amount, "events": [
+            {"name": named.get((n, i), f"Фильм {n}-{i}"), "eventId": f"{n}{i}"}
+            for i in range(per_page)]}}
+    return page
 
-    s = CountingSession({"events_collection": page})
-    hits = s.cinema_movies(query="майкл")
-    check(len(hits) == 1, f"expected the one match, got {len(hits)}")
-    check(s.count("events_collection") == 1,
-          f"a named search walked {s.count('events_collection')} pages after matching")
 
-    # No query → still paginate, because the caller asked for the whole listing.
-    s2 = CountingSession({"events_collection": page})
-    everything = s2.cinema_movies()
-    check(s2.count("events_collection") == 4,
-          f"an unfiltered listing must still page: {s2.count('events_collection')}")
+def test_a_named_film_search_sees_every_page():
+    """The listing has no server-side search, so a name is matched by us — which
+    means every page has to be looked at.
+
+    Stopping at the first page that matched made a named search one request instead
+    of four and made it wrong: a film showing only later in the afisha came back as
+    "ничего не найдено", and when a match did land on page 1 the tool reported its
+    own partial count as the total. Speed comes from fetching the pages at once."""
+    # Two prints of the same film, pages 1 and 4. Early exit returned exactly one.
+    s = CountingSession({"events_collection": listing({(1, 0): "Майкл",
+                                                       (4, 7): "Майкл. Финал"})})
+    hits, scanned, total = s.cinema_movies(query="майкл")
+    check(len(hits) == 2,
+          f"a match on a later page was dropped: got {len(hits)} of 2 "
+          f"({[h['name'] for h in hits]})")
+    check((scanned, total) == (120, 120),
+          f"the whole afisha must be reported as scanned, got {scanned} of {total}")
+    check(s.count("events_collection") == 4,
+          f"four pages of 30 in a listing of 120: {s.count('events_collection')}")
+
+    # A film only on the LAST page — the case the early exit could never reach.
+    s2 = CountingSession({"events_collection": listing({(4, 5): "Поздний"})})
+    late, _, _ = s2.cinema_movies(query="поздний")
+    check(len(late) == 1, f"a match on the last page was not found: {len(late)}")
+
+    # No query → the whole listing, unchanged.
+    s3 = CountingSession({"events_collection": listing({})})
+    everything, scanned3, total3 = s3.cinema_movies()
     check(len(everything) == 120, f"expected the full listing, got {len(everything)}")
+    check(scanned3 == total3 == 120, f"scanned {scanned3} of {total3}")
 
-    # A film that is only on page 3 must still be found.
-    def late(overrides):
-        n = int((overrides or {}).get("page", 1))
-        return {"collection": {"amount": 120, "events": [
-            {"name": "Поздний" if (n == 3 and i == 5) else f"Фильм {n}-{i}",
-             "eventId": f"{n}{i}"} for i in range(30)]}}
+    # Pages are read concurrently, so four of them cost about one round trip.
+    slow = CountingSession({"events_collection": listing({})}, delay=0.05)
+    started = time.monotonic()
+    slow.cinema_movies()
+    elapsed = time.monotonic() - started
+    check(elapsed < 0.05 * 3,
+          f"pages 2..4 still look sequential: {elapsed:.2f}s for 4 × 0.05s")
 
-    s3 = CountingSession({"events_collection": late})
-    late_hit = s3.cinema_movies(query="поздний")
-    check(len(late_hit) == 1,
-          f"early exit must not hide a match on a later page: {len(late_hit)}")
-    check(s3.count("events_collection") == 3,
-          f"expected to stop at page 3, walked {s3.count('events_collection')}")
-    print("  cinema_search: stops once the name is found, still pages when it must")
+    # And when the page cap binds, the caller is told the afisha was NOT fully seen —
+    # otherwise "нет такого фильма" and "не смотрели" become the same answer.
+    capped = CountingSession({"events_collection": listing({}, amount=300)})
+    _, scanned4, total4 = capped.cinema_movies(max_pages=2)
+    check(scanned4 == 60 and total4 == 300,
+          f"a capped scan must report what it actually saw: {scanned4} of {total4}")
+    print("  cinema_search: every page is seen, concurrently, and a capped scan says so")
 
 
 def test_cart_can_shrink_not_only_grow():
@@ -388,9 +463,10 @@ def main():
     print("request economy:")
     test_cards_costs_one_request_not_one_per_account()
     test_area_id_is_looked_up_once_per_store()
+    test_a_missed_area_id_lookup_is_not_cached_as_the_answer()
     test_documents_resolves_the_contact_id_once()
     test_nutrition_is_fetched_concurrently()
-    test_named_film_search_stops_at_the_first_page_that_matches()
+    test_a_named_film_search_sees_every_page()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()
     test_distance_sort_is_not_anchored_to_moscow_by_accident()

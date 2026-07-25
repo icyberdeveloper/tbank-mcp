@@ -71,6 +71,52 @@ def test_untrimmable_payload_is_flagged_loudly():
     check("5" in out.split("\n")[0], "the header should carry the real size")
 
 
+def trimmed_body(out):
+    """The parsed payload of a «ПОКАЗАНО …» answer, or None if _json_out fell back
+    to the character cut. Returning None rather than raising is what lets the test
+    report «it fell through» instead of dying inside json.loads."""
+    if not out.startswith("# ПОКАЗАНО"):
+        return None
+    try:
+        return json.loads(out.split("\n", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def test_trimming_handles_shapes_the_single_pass_gave_up_on():
+    """Two ordinary payloads used to fall through to the character cut even though
+    dropping whole records would have fitted — the worst of both: nothing parses AND
+    records are lost."""
+    # (a) Sibling lists of comparable size. Shrinking only the biggest one never gets
+    # under the limit, and a single pass had nothing else to try.
+    wide = {f"группа{g}": [{"id": f"{g}-{i}", "name": "Запись " + "я" * 40}
+                           for i in range(20)] for g in range(4)}
+    out = server._json_out(wide, limit=1500)
+    parsed = trimmed_body(out)
+    check(parsed is not None,
+          f"a payload of several lists fell through to the char cut: {out[:110]}")
+    if parsed is not None:
+        check(sum(len(v) for v in parsed.values()) < 80, "nothing was actually dropped")
+        for name, lst in parsed.items():
+            for rec in lst:
+                check(set(rec) == {"id", "name"}, f"{name}: record cut apart: {rec}")
+        check("из 20" in out,
+              f"the header must state the real per-list totals: {out[:200]}")
+
+    # (b) The payload IS the list. Its path is (), which _set_in cannot address, so a
+    # bare list — what several get_data sections return — was always character-cut.
+    rows = [{"id": i, "name": "Операция " + "я" * 40} for i in range(60)]
+    out2 = server._json_out(rows, limit=1200)
+    kept = trimmed_body(out2)
+    check(kept is not None,
+          f"a top-level list fell through to the char cut: {out2[:110]}")
+    if kept is not None:
+        check(isinstance(kept, list) and 0 < len(kept) < 60,
+              f"expected a partial list of records, got {type(kept).__name__}")
+        check("из 60" in out2, f"the header must say how many of how many: {out2[:200]}")
+        check(all(set(r) == {"id", "name"} for r in kept), "a kept record was cut apart")
+
+
 def test_list_tools_report_the_total_they_are_hiding():
     rows = [{"n": i} for i in range(229)]
     out = server._rows_out(rows, lambda r: f"- {r['n']}", limit=50, total=len(rows),
@@ -129,6 +175,60 @@ def test_list_operations_end_to_end():
         server._require = saved
 
 
+class RowsSession(MobileSession):
+    """A card's operations and the client's orders, in the shapes the tools parse."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def ensure_fresh(self, *a, **kw):
+        return None
+
+    def list_operations(self, account_id, start, end):
+        return [{"operationTime": {"milliseconds": 1784658904000 - i * 3600_000},
+                 "type": "Debit", "card": "291395142",
+                 "amount": {"value": 100 + i, "currency": {"name": "RUB"}},
+                 "description": f"Покупка {i}"} for i in range(self.n)]
+
+    def orders(self):
+        return [{"orderId": f"o-{i}", "objectType": "grocery", "status": "DONE",
+                 "created": f"2026-07-{(i % 28) + 1:02d}", "amount": 100 + i,
+                 "fields": {"applicationName": "ВкусВилл"}} for i in range(self.n)]
+
+
+def test_limit_zero_means_everything_in_every_list_tool():
+    """`limit=0` is «покажи всё» in list_operations, and the docstrings say so — but
+    card_operations and orders sliced with a bare rows[:limit], where 0 means the
+    opposite. An agent asking for the complete answer got an empty one, under a
+    header that still announced the full count."""
+    saved = server._require
+    server._require = lambda: RowsSession(120)
+    try:
+        for name, call in (("card_operations",
+                            lambda lim: server.card_operations("291395142", 30, lim)),
+                           ("orders", lambda lim: server.orders("", lim))):
+            every = call(0)
+            rows = [ln for ln in every.splitlines() if ln.startswith("- ")]
+            check(len(rows) == 120,
+                  f"{name}(limit=0) returned {len(rows)} rows, expected all 120 "
+                  f"— 0 read as «ничего»?")
+            head_all = (every.splitlines() or [""])[0]
+            check("limit=" not in head_all,
+                  f"{name} must not nag about limit when it showed everything: "
+                  f"{head_all!r}")
+
+            few = call(5)
+            head = (few.splitlines() or [""])[0]
+            shown = [ln for ln in few.splitlines() if ln.startswith("- ")]
+            check(len(shown) == 5, f"{name}(limit=5) returned {len(shown)} rows")
+            check("120 всего" in head and "показано 5" in head,
+                  f"{name} must say what it is hiding: {head!r}")
+            check("limit=120" in head, f"{name} must say how to get the rest: {head!r}")
+    finally:
+        server._require = saved
+    print("  limit=0 means «all» in card_operations and orders, as in list_operations")
+
+
 def test_real_capture_payload_survives():
     """The concrete case from the audit: 8 subscriptions must not become 6."""
     cap = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
@@ -171,8 +271,10 @@ def main():
     print("truncation honesty:")
     test_json_payload_keeps_whole_records()
     test_untrimmable_payload_is_flagged_loudly()
+    test_trimming_handles_shapes_the_single_pass_gave_up_on()
     test_list_tools_report_the_total_they_are_hiding()
     test_list_operations_end_to_end()
+    test_limit_zero_means_everything_in_every_list_tool()
     test_real_capture_payload_survives()
     if failures:
         print("\nFAILED:")

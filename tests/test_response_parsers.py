@@ -16,6 +16,7 @@ answer, which is why these need tests rather than eyeballing.
     python3 tests/test_response_parsers.py
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -115,6 +116,35 @@ def test_conversation_ids_survive_intact():
     print("  messenger_conversations: full ids, bot names, unread counts, honest empty")
 
 
+def test_the_cart_prints_the_ids_it_must_be_edited_by():
+    """grocery_set_cart addresses goods BY ID and replaces the whole cart, and
+    grocery_cart is the only tool that says what is in it. Printing names alone left
+    the agent able to read the cart and unable to change one line of it — the id had
+    to be guessed, and a wrong guess drops the real item."""
+    goods = [
+        {"id": "382032", "name": "Сыр Бри с белой плесенью выдержанный 60% Франция",
+         "price": {"value": 538.0}, "count": 1.0},
+        {"id": "606", "name": "Помидоры розовые", "price": {"value": 214.0},
+         "count": 0.57},
+    ]
+    out = run(server.grocery_cart, Stub(grocery_cart_get={"cart": {"goods": goods}}),
+              "578", "2")
+
+    printed = set(re.findall(r"id=(\S+)", out))
+    check(printed == {"382032", "606"},
+          f"the cart must print exactly the ids it holds, printed {printed}")
+    # The name is truncated for width; the id must not be caught up in that.
+    check("Сыр Бри" in out, f"the name must still be shown: {out}")
+    # A weight-priced good keeps its fractional count — rounding it to 1 (or to 0,
+    # which means removal) is what a re-send built from this listing would carry.
+    check("0.57" in out, f"a fractional count must survive the listing: {out}")
+
+    empty = run(server.grocery_cart, Stub(grocery_cart_get={"cart": {"goods": []}}),
+                "578", "2")
+    check("Корзина пуста" in empty, f"an empty cart must say so: {empty!r}")
+    print("  grocery_cart: every good is printed with the id grocery_set_cart needs")
+
+
 def test_money_formatting_is_unambiguous():
     """A bare float used to fall through to str(), so every caller holding a plain
     number printed «1000.0» — no separator, no currency, easy to misread."""
@@ -144,6 +174,7 @@ def main():
     print("response parsers:")
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
+    test_the_cart_prints_the_ids_it_must_be_edited_by()
     test_money_formatting_is_unambiguous()
     if failures:
         print("\nFAILED:")

@@ -153,31 +153,49 @@ def _json_out(data, limit: int = 5000) -> str:
     string still looked like data, so the budget skill happily under-reported the
     user's monthly spend with no signal that anything was missing.
 
-    Now: trim the biggest list to whole elements and SAY how many were dropped. If
-    the payload has no list to trim, cut the text but prefix a marker loud enough
-    that the result cannot be mistaken for the whole answer."""
+    Now: trim lists to whole elements and SAY how many were dropped. If nothing is
+    left to trim, cut the text but prefix a marker loud enough that the result cannot
+    be mistaken for the whole answer.
+
+    Trimming repeats rather than picking one list once. Two payload shapes made the
+    single pass give up and fall through to the character cut, which is the very
+    outcome it exists to avoid: several sibling lists of comparable size (shrinking
+    the biggest alone never fits), and a payload that IS a list at the top level —
+    its path is (), which `_set_in` cannot address. Both are ordinary here: the root
+    is trimmed through a holder, and each pass re-picks whatever is biggest now."""
     full = json.dumps(data, ensure_ascii=False, default=str)
     if len(full) <= limit:
         return full
 
-    count, lst, path = _biggest_list(data)
-    if lst and count > 1 and path:
-        import copy
-        trimmed = copy.deepcopy(data)
-        keep = count
-        while keep > 0:
-            _set_in(trimmed, path, lst[:keep])
-            body = json.dumps(trimmed, ensure_ascii=False, default=str)
-            if len(body) <= limit:
-                where = ".".join(str(p) for p in path)
-                return (f"# ПОКАЗАНО {keep} из {count} записей в «{where}» "
-                        f"(ответ не помещается целиком). Остальные НЕ включены — "
-                        f"не считай по этому фрагменту итогов и сумм.\n{body}")
-            keep = keep * 3 // 4 if keep > 4 else keep - 1
+    import copy
+    holder = {"_": copy.deepcopy(data)}
+    trims: dict[str, list] = {}          # path → [kept, original count]
+    body = full
+    for _ in range(500):                 # each pass strictly shrinks; a backstop only
+        if len(body) <= limit:
+            break
+        count, lst, path = _biggest_list(holder["_"])
+        if not lst or count <= 1:
+            break
+        keep = count * 3 // 4 if count > 4 else count - 1
+        _set_in(holder, ("_",) + path, lst[:keep])
+        where = ".".join(str(p) for p in path) or "(корень)"
+        trims.setdefault(where, [keep, count])[0] = keep
+        body = json.dumps(holder["_"], ensure_ascii=False, default=str)
 
-    return (f"# ОТВЕТ ОБРЕЗАН: {limit} из {len(full)} символов, и это НЕ валидный "
-            f"JSON. Данные неполные — не делай по ним выводов о суммах и количестве."
-            f"\n{full[:limit]}")
+    if trims and len(body) <= limit:
+        what = ", ".join(f"«{w}» {kept} из {total}" for w, (kept, total) in trims.items())
+        return (f"# ПОКАЗАНО {what} записей (ответ не помещается целиком). "
+                f"Остальные НЕ включены — не считай по этому фрагменту итогов "
+                f"и сумм.\n{body}")
+
+    # Nothing addressable left to drop: whole records could not save it.
+    text = body if trims else full
+    dropped = (" Часть записей уже отброшена целиком, и этого не хватило."
+               if trims else "")
+    return (f"# ОТВЕТ ОБРЕЗАН: {limit} из {len(text)} символов, и это НЕ валидный "
+            f"JSON. Данные неполные — не делай по ним выводов о суммах и "
+            f"количестве.{dropped}\n{text[:limit]}")
 
 
 def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: str = "") -> str:
@@ -185,7 +203,12 @@ def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: s
 
     list_operations used to print `for o in ops[:50]` with no count and no limit
     argument: a 30-day request returning 229 operations showed the newest 50 — four
-    days — presented as a month, with operations 51+ unreachable by any argument."""
+    days — presented as a month, with operations 51+ unreachable by any argument.
+
+    `limit <= 0` means EVERYTHING, and every list tool must agree on that: a bare
+    `rows[:limit]` reads the same argument as "nothing" and returns an empty answer
+    to an agent that asked for the complete one. Going through here is what keeps
+    the meaning identical across tools."""
     shown = rows[:limit] if limit > 0 else rows
     head = f"{header}: {total} всего, показано {len(shown)}"
     if len(shown) < total:
@@ -552,8 +575,13 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ appId={resp_app} ≠ запрошенный {app_id}\n"
         elif resp_point and resp_point != str(point_id):
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ pointId={resp_point} ≠ запрошенный {point_id}\n"
-        body = "\n".join(f"- {g.get('name','')[:35]} | x{g.get('count',1)} | "
-            f"{(g.get('price') or {}).get('value','?')}₽ | {g.get('weight','') or g.get('quant','') or '-'}"
+        # id first: grocery_set_cart addresses goods BY ID, and this is the only tool
+        # that lists what is in the cart. Without it the agent could read the cart and
+        # still have no way to change one line of it.
+        body = "\n".join(
+            f"- id={g.get('id','?')} | {(g.get('name') or '')[:35]} "
+            f"| x{g.get('count', 1)} | {(g.get('price') or {}).get('value', '?')}₽ "
+            f"| {g.get('weight', '') or g.get('quant', '') or '-'}"
             for g in goods) or "Корзина пуста"
         return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{body}"
     except Exception as e:
@@ -1223,7 +1251,8 @@ def card_requisites(ucid: str, reveal: bool = False) -> str:
 def card_operations(card_id: str, days: int = 30, limit: int = 50) -> str:
     """Операции по КОНКРЕТНОЙ карте. card_id — поле id из list_cards().
     Серверного фильтра по карте нет (API умеет только excludeCardIds), поэтому
-    берутся операции за период и фильтруются по полю card."""
+    берутся операции за период и фильтруются по полю card.
+    limit=0 — показать все за период."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -1235,15 +1264,19 @@ def card_operations(card_id: str, days: int = 30, limit: int = 50) -> str:
             t = o.get("operationTime") or o.get("debitingTime") or {}
             ms = t.get("milliseconds") if isinstance(t, dict) else t
             return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M") if ms else "?"
-        total = sum(float((o.get("amount") or {}).get("value") or 0)
+        spent = sum(float((o.get("amount") or {}).get("value") or 0)
                     for o in ops if o.get("type") == "Debit")
-        head = (f"[card {card_id}] {len(ops)} операций за {days} дн., "
-                f"списано {total:,.0f} ₽".replace(",", " "))
-        body = "\n".join(
-            f"- [{when(o)}] {'-' if o.get('type') == 'Debit' else '+'}"
-            f"{(o.get('amount') or {}).get('value','?')} | {(o.get('description') or '')[:40]}"
-            for o in ops[:limit])
-        return head + "\n" + body
+        # The «списано» figure is over ALL operations, not over the rows printed —
+        # said here because the header below also states how many are shown. The
+        # digit grouping is applied to the NUMBER, not to the sentence: replacing
+        # every comma in the whole string also ate the one after «дн.».
+        head = (f"[card {card_id}] за {days} дн., "
+                f"списано {f'{spent:,.0f}'.replace(',', ' ')} ₽ (по всем операциям)")
+        def render(o):
+            return (f"- [{when(o)}] {'-' if o.get('type') == 'Debit' else '+'}"
+                    f"{(o.get('amount') or {}).get('value','?')} "
+                    f"| {(o.get('description') or '')[:40]}")
+        return _rows_out(ops, render, limit=limit, total=len(ops), header=head)
     except Exception as e:
         return _err(e)
 
@@ -1355,7 +1388,7 @@ _ORDER_KINDS = {
 def orders(kind: str = "", limit: int = 10) -> str:
     """Все заказы клиента: продукты, кино, концерты, авиабилеты, ж/д, отели.
     kind — "афиша" | "кино" | "путешествия" | "продукты" | код objectType; пусто = все.
-    Отсортировано по дате создания, новые сверху."""
+    Отсортировано по дате создания, новые сверху. limit=0 — показать все."""
     try:
         s = _require(); s.ensure_fresh()
         all_orders = s.orders()
@@ -1367,17 +1400,15 @@ def orders(kind: str = "", limit: int = 10) -> str:
         if not picked:
             kinds = sorted({str(o.get("objectType")) for o in all_orders})
             return f"Заказов вида {kind!r} нет. Доступные objectType: {', '.join(kinds)}"
-        head = f"{len(picked)} заказов" + (f" ({kind})" if kind else " всего")
-        lines = []
-        for o in picked[:limit]:
+        def render(o):
             f = o.get("fields") or {}
             what = (f.get("eventName") or f.get("hotelName") or f.get("objectName")
                     or f.get("applicationName") or f.get("partnerName") or "")
-            lines.append(
-                f"- {str(o.get('created',''))[:10]} | {o.get('objectType','?'):13} "
-                f"| {o.get('status','?'):15} | {o.get('amount','?'):>10} ₽ | {what[:34]} "
-                f"| id={o.get('orderId','?')}")
-        return head + "\n" + "\n".join(lines)
+            return (f"- {str(o.get('created',''))[:10]} | {o.get('objectType','?'):13} "
+                    f"| {o.get('status','?'):15} | {o.get('amount','?'):>10} ₽ "
+                    f"| {what[:34]} | id={o.get('orderId','?')}")
+        return _rows_out(picked, render, limit=limit, total=len(picked),
+                         header="Заказы" + (f" ({kind})" if kind else ""))
     except Exception as e:
         return _err(e)
 
@@ -1659,15 +1690,23 @@ def cinema_search(query: str = "", city: str = "Москва", limit: int = 20) 
     целиком только при limit=0 — по умолчанию показаны первые 20)."""
     try:
         s = _require(); s.ensure_fresh()
-        movies = s.cinema_movies(city=city, query=query)
+        movies, scanned, listing = s.cinema_movies(city=city, query=query)
         if not movies:
-            return f"В прокате ({city}) ничего не найдено по запросу {query!r}."
+            return (f"В прокате ({city}) ничего не найдено по запросу {query!r} "
+                    f"(просмотрено {scanned} из {listing} фильмов афиши).")
         def render(m):
             return (f"- {m.get('name','?')} [{m.get('ageRestriction','')}] "
                     f"| {', '.join(m.get('genres') or [])} | {m.get('country','')} "
                     f"| eventId={m.get('eventId','?')}")
+        # Two different truncations, and they must not be confused: `limit` hides
+        # matches we HAVE, `scanned < listing` means part of the afisha was never
+        # looked at, so there may be matches we have not seen at all.
+        header = f"В прокате ({city})" + (f" по запросу {query!r}" if query else "")
+        if scanned < listing:
+            header += (f" — просмотрено {scanned} из {listing} фильмов афиши, "
+                       f"остальные НЕ проверены")
         return _rows_out(movies, render, limit=limit, total=len(movies),
-                         header=f"В прокате ({city})",
+                         header=header,
                          more_hint="Уточни query или передай limit=0.")
     except Exception as e:
         return _err(e)
