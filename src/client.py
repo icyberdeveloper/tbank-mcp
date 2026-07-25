@@ -2120,8 +2120,14 @@ class MobileSession:
         _need_store(app_id, point_id)
         try:
             cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
-        except TbankApiError:
-            cart = {}
+        except TbankApiError as e:
+            # cart/set REPLACES the cart, so proceeding on a failed read would post
+            # only what the caller named and delete everything else. An empty cart and
+            # an unreadable one look identical from here, so refuse rather than guess.
+            raise TbankApiError("CART_READ_FAILED",
+                f"Не удалось прочитать корзину ({e}), а запись заменяет её целиком — "
+                f"продолжать нельзя, иначе остальные товары будут удалены. "
+                f"Повтори позже или проверь grocery_cart(app_id, point_id).") from e
         delivery = self._grocery_delivery(app_id, point_id, cart=cart)
         if clear:
             return self._grocery_cart_write([], app_id, delivery)
@@ -2292,7 +2298,14 @@ class MobileSession:
                 "transfer-legal needs explicit providerFields (bankBik/bankAcnt/inn/kpp/...) "
                 "— use the low-level pay(body) tool with a hand-built payParameters.")
         else:  # p2p-anybank (phone / SBP)
-            if not (bank_member_id and masked_fio and pointer_link_id):
+            # The caller's CHOICE is the two ids. maskedFIO is a display name the
+            # bank echoes back, not part of the routing — and requiring it here meant
+            # an agent that followed the docs (which promise "bank_member_id +
+            # pointer_link_id") left it empty, the gate opened, and auto-resolution
+            # silently replaced the bank the user had picked and confirmed. Same
+            # person, different account, and invisible: the result line prints the
+            # recipient only when masked_fio is set.
+            if not (bank_member_id and pointer_link_id):
                 # Auto-resolve the recipient via get_requisites (read-only). Pick the
                 # default bank if any, else the single match; if several with NO
                 # default, refuse + surface the list — money safety: never silently
@@ -2315,6 +2328,15 @@ class MobileSession:
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]
+            elif not masked_fio:
+                # The ids came from the caller, so the routing is already decided.
+                # Look up the display name only — never let this overwrite the choice.
+                try:
+                    match = next((x for x in self.resolve_sbp_recipient(to_account)
+                                  if str(x.get("bank_member_id")) == str(bank_member_id)), None)
+                    masked_fio = (match or {}).get("masked_fio", "")
+                except TbankApiError:
+                    masked_fio = ""
             pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
                   "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
                   "pointerLinkId": pointer_link_id}

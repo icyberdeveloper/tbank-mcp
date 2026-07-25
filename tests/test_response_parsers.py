@@ -116,13 +116,28 @@ def test_conversation_ids_survive_intact():
 
 
 def test_money_formatting_is_unambiguous():
-    check(server._money(1600.2) == "1600.20" or "1600" in server._money(1600.2),
-          f"money must render readably: {server._money(1600.2)!r}")
-    check(server._money(None) in ("", "—", "None") or True, "None must not crash")
-    for value in (0, 0.0, "", None, {"value": 10}):
+    """A bare float used to fall through to str(), so every caller holding a plain
+    number printed «1000.0» — no separator, no currency, easy to misread."""
+    check(server._money(1600.2, "RUB") == "1 600.20 RUB",
+          f"a bare number + currency must render fully: {server._money(1600.2, 'RUB')!r}")
+    check(server._money({"value": 1600.2, "currency": {"name": "RUB"}}) == "1 600.20 RUB",
+          f"the bank's dict shape must render the same: "
+          f"{server._money({'value': 1600.2, 'currency': {'name': 'RUB'}})!r}")
+    check(server._money(1234567.5, "RUB").startswith("1 234 567"),
+          f"thousands must be grouped: {server._money(1234567.5, 'RUB')!r}")
+
+    # Absent is not zero — an empty balance must not read as «0.00».
+    for empty in (None, ""):
+        check(server._money(empty) == "—",
+              f"_money({empty!r}) must say 'unknown', got {server._money(empty)!r}")
+    check(server._money(0, "RUB") == "0.00 RUB",
+          f"a real zero must still print as zero: {server._money(0, 'RUB')!r}")
+
+    # Nothing may raise, whatever it is handed.
+    for value in (0, 0.0, "", None, "abc", {"value": 10}, {"value": None}, []):
         got = server._money(value)
         check(isinstance(got, str), f"_money({value!r}) returned {type(got).__name__}")
-    print("  _money: renders every shape without raising")
+    print("  _money: bare numbers, bank dicts, grouping, and 'absent' vs zero")
 
 
 def main():

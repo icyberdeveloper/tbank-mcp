@@ -189,6 +189,13 @@ class RobustTLSAdapter(HTTPAdapter):
     truncated (it is a generated file, gitignored, and a fresh clone has none; see
     6f7274d) — and then re-raises with an explanation instead of retrying forever."""
 
+    # Methods that are safe to send twice. A TLS error usually means the handshake
+    # failed and nothing was transmitted — but `requests` also raises SSLError on a
+    # mid-stream read, after the body has gone out. Replaying a POST there would
+    # repeat /v1/pay or a ticket payment, so those are rebuilt-and-re-raised instead:
+    # the caller decides, and the next call finds a healthy bundle either way.
+    _REPLAYABLE = {"GET", "HEAD", "OPTIONS"}
+
     def send(self, request, **kwargs):
         try:
             return super().send(request, **kwargs)
@@ -197,6 +204,10 @@ class RobustTLSAdapter(HTTPAdapter):
                 rebuild_bundle()
             except Exception as e:                          # noqa: BLE001
                 _log(f"bundle rebuild failed: {e}")
+                raise
+            if (request.method or "").upper() not in self._REPLAYABLE:
+                _log(f"CA bundle rebuilt, but not retrying a {request.method} — "
+                     f"it may already have reached the server")
                 raise
             try:
                 return super().send(request, **kwargs)

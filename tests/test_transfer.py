@@ -238,7 +238,10 @@ def test_the_result_carries_what_the_agent_needs_next():
         check("125301542205" in out, f"paymentId must be returned: {out}")
         check("payment_receipt" in out, f"the tool that uses it must be named: {out}")
         check("0000000000" in out, f"the debited account must be stated: {out}")
-        check("1936" in out.replace(" ", " "), f"the amount must be stated: {out}")
+        # The amount must be readable AND carry its currency — a bare «1936.0» is
+        # one misread away from a factor of ten.
+        check("1\u00a0936.00 RUB" in out or "1 936.00 RUB" in out,
+              f"the amount must be stated with its currency: {out!r}")
 
         # No paymentId back → say so plainly instead of implying success.
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
@@ -315,6 +318,96 @@ def test_payment_commission_rejects_a_body_it_cannot_use():
     print("  payment_commission: a body it cannot use is explained, not thrown")
 
 
+def test_a_refusal_is_not_reported_as_a_possible_charge():
+    """Saying "the outcome is unknown" costs the user: it claims money may have moved
+    AND blocks the next attempt. A client-side refusal (unresolved recipient, several
+    SBP banks, bad phone) and a bank rejection are neither."""
+    from src.client import TbankApiError
+    open(os.environ["TBANK_ATTEMPTS"], "w").close()
+    saved = server._require
+
+    class Refusing(CaptureSession):
+        def __init__(self, exc):
+            super().__init__()
+            self.exc = exc
+
+        def transfer(self, *a, **kw):
+            raise self.exc
+
+    try:
+        for exc, label in ((TbankApiError("RECIPIENT_MULTIPLE_BANKS", "две штуки"), "refusal"),
+                           (TbankApiError("INSUFFICIENT_FUNDS", "нет денег"), "bank rejection")):
+            open(os.environ["TBANK_ATTEMPTS"], "w").close()
+            server._require = lambda e=exc: Refusing(e)
+            out = server.transfer(100, "+79991234567", from_account="0000000000")
+            check("НЕИЗВЕСТЕН" not in out,
+                  f"a {label} must not claim the money may have moved: {out}")
+            check("деньги на месте" in out.lower(),
+                  f"a {label} must say the money is safe: {out}")
+
+            # ...and it must NOT block the next attempt.
+            server._require = lambda: CaptureSession()
+            again = server.transfer(100, "+79991234567", from_account="0000000000")
+            check("ЗАБЛОКИРОВАН" not in again,
+                  f"a {label} must not block the retry: {again}")
+
+        # A transport failure REMAINS unknown and blocking.
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        server._require = lambda: Refusing(ConnectionError("reset"))
+        lost = server.transfer(100, "+79991234567", from_account="0000000000")
+        check("НЕИЗВЕСТЕН" in lost, f"a dropped connection is still unknown: {lost}")
+        server._require = lambda: CaptureSession()
+        blocked = server.transfer(100, "+79991234567", from_account="0000000000")
+        check("ЗАБЛОКИРОВАН" in blocked, f"an unknown outcome must still block: {blocked}")
+    finally:
+        server._require = saved
+    print("  outcomes: refusals and rejections say the money is safe; only transport is unknown")
+
+
+def test_the_recipient_bank_the_user_picked_is_the_one_used():
+    """The gate required three fields while every agent-facing string promises two, so
+    an agent that followed the docs had its chosen SBP bank silently replaced."""
+    class Resolver(CaptureSession):
+        def __init__(self):
+            super().__init__()
+            self.resolved = 0
+
+        def resolve_sbp_recipient(self, phone):
+            self.resolved += 1
+            return [
+                {"bank_member_id": "111", "masked_fio": "Дефолтный Б.",
+                 "pointer_link_id": "aaa", "bank_name": "Дефолт", "is_default_bank": True},
+                {"bank_member_id": "222", "masked_fio": "Выбранный Б.",
+                 "pointer_link_id": "bbb", "bank_name": "Выбор", "is_default_bank": False},
+            ]
+
+    # The two ids the docs promise, no masked_fio — the documented call.
+    s = Resolver()
+    s.transfer(100, "+79991234567", bank_member_id="222", pointer_link_id="bbb",
+               account="0000000000")
+    pf = s.sent_pay_parameters()["providerFields"]
+    check(pf["bankMemberId"] == "222",
+          f"the chosen bank was replaced by the default: {pf['bankMemberId']!r}")
+    check(pf["pointerLinkId"] == "bbb", f"the chosen link id was replaced: {pf}")
+    check(pf.get("maskedFIO") == "Выбранный Б.",
+          f"the display name must be filled in for the CHOSEN bank: {pf.get('maskedFIO')!r}")
+
+    # Passing all three still works and costs no lookup.
+    s2 = Resolver()
+    s2.transfer(100, "+79991234567", bank_member_id="222", masked_fio="Выбранный Б.",
+                pointer_link_id="bbb", account="0000000000")
+    check(s2.resolved == 0, "a fully specified recipient must not trigger a lookup")
+    check(s2.sent_pay_parameters()["providerFields"]["bankMemberId"] == "222",
+          "a fully specified recipient must be used verbatim")
+
+    # Nothing passed → auto-resolve to the default, as documented.
+    s3 = Resolver()
+    s3.transfer(100, "+79991234567", account="0000000000")
+    check(s3.sent_pay_parameters()["providerFields"]["bankMemberId"] == "111",
+          "with no choice given, the default bank is the documented behaviour")
+    print("  recipient: the caller's chosen SBP bank survives; auto-resolve only without one")
+
+
 def main():
     print("transfer money path:")
     test_body_matches_the_real_pay_request()
@@ -324,6 +417,8 @@ def main():
     test_the_result_carries_what_the_agent_needs_next()
     test_filter_sections_refuse_to_pretend()
     test_payment_commission_rejects_a_body_it_cannot_use()
+    test_a_refusal_is_not_reported_as_a_possible_charge()
+    test_the_recipient_bank_the_user_picked_is_the_one_used()
     if failures:
         print("\nFAILED:")
         for f in failures:

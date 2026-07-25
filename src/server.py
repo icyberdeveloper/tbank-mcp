@@ -947,7 +947,15 @@ def transfer(amount: float, to_account: str, description: str = "",
         retry_of = prev if (prev or {}).get("status") in _TRANSFER_BLOCKING else None
         upid = str(int((retry_of or {}).get("user_payment_ms") or 0)
                    or int(time.time() * 1000))
-        attempt = journal.new_attempt(provider, to_account, key, amount)
+        # The recipient is masked before it reaches the journal. new_attempt's second
+        # slot is a plain field and the redactor works by key NAME and by value
+        # pattern — neither catches a bare 11-digit phone — so passing to_account
+        # verbatim wrote it in cleartext, against journal.py's own promise never to
+        # store phones or account numbers. `key` is already a hash of the full
+        # identity, so nothing is lost for the duplicate check.
+        masked_to = (to_account[:2] + "•" * max(0, len(to_account) - 6) + to_account[-4:]
+                     if len(to_account) > 6 else "•" * len(to_account))
+        attempt = journal.new_attempt(provider, masked_to, key, amount)
         journal.record(attempt, "pay", "posting", user_payment_ms=int(upid), account=src)
 
         try:
@@ -956,8 +964,23 @@ def transfer(amount: float, to_account: str, description: str = "",
                              pointer_link_id=pointer_link_id, account=src,
                              user_payment_id=upid) or {}
         except Exception as e:
-            # The POST left the process. Whether the money moved is unknown, so the
-            # next identical transfer is blocked until the user reconciles.
+            # Not every failure is an unknown outcome, and saying so has a cost: it
+            # tells the user their money may have moved and it BLOCKS the next
+            # attempt. Two cases are definitely not that:
+            #   * the client refused before sending — an unresolved recipient, several
+            #     SBP banks with no default, a malformed phone. Nothing left here.
+            #   * the bank answered with an error envelope. The request completed and
+            #     was rejected, so no money moved.
+            # Only a transport failure — timeout, reset, DNS — leaves the result
+            # genuinely unknown, because the POST may have arrived.
+            import requests as _rq
+            answered_or_refused = isinstance(e, (TbankApiError, SessionExpired))
+            if answered_or_refused and not isinstance(e, _rq.exceptions.RequestException):
+                journal.record(attempt, "pay", "failed", user_payment_ms=int(upid),
+                               error=str(e)[:160])
+                return (f"Перевод НЕ выполнен: {_err(e)}\n"
+                        f"Запрос не прошёл, деньги на месте. Исправь причину и повтори "
+                        f"обычным вызовом — force не нужен.")
             journal.record(attempt, "pay", "unknown", user_payment_ms=int(upid),
                            error=str(e)[:160])
             return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — деньги могли списаться. "
@@ -977,11 +1000,11 @@ def transfer(amount: float, to_account: str, description: str = "",
                 commission = f", комиссия {c}"
         who = f" ({masked_fio})" if masked_fio else ""
         if not pid:
-            return (f"Отправлено {_money(amount)} → {to_account}{who} со счёта {src}, "
+            return (f"Отправлено {_money(amount, 'RUB')} → {to_account}{who} со счёта {src}, "
                     f"но банк не вернул paymentId. Проверь list_operations('{src}', days=1) — "
                     f"чек по этому переводу получить не удастся.\n"
                     f"Ответ: {_json_out(payload, 400)}")
-        return (f"Отправлено {_money(amount)} → {to_account}{who} "
+        return (f"Отправлено {_money(amount, 'RUB')} → {to_account}{who} "
                 f"со счёта {src}{commission}. paymentId={pid} "
                 f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
@@ -1100,16 +1123,23 @@ def _err_session(e) -> str:
         return msg + _ANON_HINT
     return msg
 
-def _money(m) -> str:
-    """{'value': 1.0, 'currency': {'name': 'RUB'}} → '1.00 RUB'."""
-    if not isinstance(m, dict):
-        return str(m)
-    cur = (m.get("currency") or {})
-    name = cur.get("name", "") if isinstance(cur, dict) else str(cur)
+def _money(m, currency: str = "") -> str:
+    """Render an amount readably: '1 000.00 RUB'.
+
+    Accepts the bank's {'value': …, 'currency': {'name': …}} shape AND a bare number
+    with the currency passed separately. It used to fall back to str(m) for anything
+    that was not a dict, so every caller holding a plain float printed «1000.0» — no
+    thousands separator, no currency, and easy to misread by a factor of ten."""
+    if isinstance(m, dict):
+        cur = m.get("currency") or {}
+        currency = (cur.get("name", "") if isinstance(cur, dict) else str(cur)) or currency
+        m = m.get("value")
+    if m is None or m == "":
+        return "—"
     try:
-        return f"{float(m.get('value', 0)):,.2f} {name}".replace(",", " ")
+        return f"{float(m):,.2f} {currency}".replace(",", " ").strip()
     except (TypeError, ValueError):
-        return f"{m.get('value', '?')} {name}"
+        return f"{m} {currency}".strip()
 
 @mcp.tool()
 def list_cards() -> str:
@@ -1126,7 +1156,7 @@ def list_cards() -> str:
             external = c.get("accountType") == "ExternalAccount" or not c.get("ucid")
             kind = ("внешняя" if external
                     else "виртуальная" if c.get("isVirtual") else "пластик")
-            bal = _money(c.get("availableBalance")) if c.get("availableBalance") is not None else "—"
+            bal = _money(c.get("availableBalance"), c.get("currency") or "")
             return (f"- id={c.get('id','?')} ucid={c.get('ucid') or '—'} "
                     f"| счёт {c.get('account','?')} | {kind} | {bal} "
                     f"| {(c.get('name') or c.get('accountName') or '')[:26]}")
