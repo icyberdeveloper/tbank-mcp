@@ -523,6 +523,28 @@ class MobileSession:
                           msg.encode("utf-8"), hashlib.sha256).digest()
         return base64.b64encode(digest).decode("ascii")
 
+    # The device / anti-fraud / 3-D Secure profile the app sends with EVERY /v1/pay,
+    # in BOTH the query string and the form body — the same 11 keys in both, verified
+    # against captures.xml #1477 (p2p-anybank) and captures2.xml #595
+    # (transfer-inner-third-party). It feeds the fraud decision and the 3DS callback
+    # URL, so a payment without it is not the request the bank expects to see for
+    # this device. Values match the captured device profile deliberately: the
+    # deviceId being replayed is that device's, and a screen size that disagreed with
+    # it would be the inconsistency the anti-fraud system looks for.
+    PAY_DEVICE_PROFILE = {
+        "colorDepth": "24",
+        "debug": "0",
+        "device_screen_height": "2736",
+        "device_screen_width": "1260",
+        "emulator": "0",
+        "jailbreak": "false",
+        "javaEnabled": "false",
+        "javaScriptEnabled": "true",
+        "language": "ru-CY",
+        "notificationUrl": "https://api.t-bank-app.ru/v1/3ds",
+        "timezone": "180",
+    }
+
     def _call_signed(self, template_key: str, body_str: str,
                      extra_query: dict | None = None) -> Any:
         """POST a signed request (private; only pay_execute/human use)."""
@@ -542,7 +564,12 @@ class MobileSession:
             raise TbankApiError("NO_TEMPLATE", f"no endpoint shape for '{template_key}'")
         params = {k: v for k, v in tpl.get("params", {}).items() if k not in _LIVE_QUERY}
         params["sessionid"] = self.mobile_sessionid
-        params["wuid"] = self.device_id
+        # The real /v1/pay carries deviceId + oldDeviceId and NO wuid (wuid is the
+        # web/portal identifier; it appears on www.tbank.ru calls, not on this one).
+        # The signature covers the query string, so what goes here is what gets signed.
+        params["deviceId"] = self.device_id
+        params["oldDeviceId"] = self.old_device_id or self.device_id
+        params.update(self.PAY_DEVICE_PROFILE)
         if extra_query:
             params.update(extra_query)
         query = urllib.parse.urlencode(params, safe="%/,")
@@ -562,11 +589,17 @@ class MobileSession:
     def pay(self, body: str | None = None) -> Any:
         """POST v1/pay — REAL signed payment (moves money). body = raw form-encoded
         payParameters=...; None = replay the default pay body. Signed with
-        x-api-signature (HMAC-SHA256, key=sessionid)."""
+        x-api-signature (HMAC-SHA256, key=sessionid).
+
+        The device/anti-fraud fields are prepended here rather than by every caller,
+        so no payment can go out without them."""
         tpl = self._tpl("v1_pay")
         if not tpl:
             raise TbankApiError("NO_TEMPLATE", "no v1/pay in capture")
         body_str = body if body is not None else (tpl.get("body") or "")
+        if "payParameters=" in body_str and "notificationUrl=" not in body_str:
+            prefix = urllib.parse.urlencode(self.PAY_DEVICE_PROFILE)
+            body_str = prefix + "&" + body_str
         return self._call_signed("v1_pay", body_str)
 
     def _tmsg_expired(self) -> bool:
@@ -2136,7 +2169,8 @@ class MobileSession:
     def transfer(self, amount: float, to_account: str, description: str = "",
                  provider: str = "p2p-anybank", pointer_type: str = SBP_PHONE_POINTER_TYPE,
                  bank_member_id: str = "", masked_fio: str = "",
-                 pointer_link_id: str = "") -> Any:
+                 pointer_link_id: str = "", account: str = "",
+                 user_payment_id: str = "") -> Any:
         """Transfer via signed /v1/pay (REAL money). Body shape is capture-verified
         (the old body invented pointerType='ACCOUNT' and was rejected). The signing
         mechanism (_signed_parts) is unchanged — it was proven byte-exact.
@@ -2149,15 +2183,29 @@ class MobileSession:
           never silently pick). For a NEW recipient, call transfer_sbp_resolve(phone)
           first to show the user the candidate banks, then pass the chosen fields.
           pay body is capture-verified (providerFields.pointerType='8276', pointer
-          '+7XXXXXXXXXX', paymentType='Transfer').
+          '+7XXXXXXXXXX'). paymentType='Transfer' belongs to payment_commission,
+          NOT to pay — no real pay body carries it.
         between own accounts (provider='transfer-inner'): to_account = target account;
           providerFields = {'bankContract': to_account}.
         by details (provider='transfer-legal'): use the low-level pay() tool with
           explicit providerFields (bankBik/bankAcnt/inn/kpp/...) — not built here.
 
-        Source account = first Current RUB (list_accounts). For commission preview,
-        call payment_commission() separately before this. ALWAYS confirm with the user."""
-        src = self._source_account()
+        `account` = the payer account id (from list_accounts). Empty falls back to the
+        first Current RUB with a positive balance — which is a GUESS, and was
+        previously the only behaviour: the user could be asked which account to debit,
+        answer, and be debited from a different one anyway.
+
+        `user_payment_id` is the client-generated id the app sends on every payment
+        (a millisecond timestamp). Pass the SAME value to retry a transfer whose
+        outcome you did not see — that is what stops a timeout from becoming two
+        payments. A fresh value per call provides no idempotency at all.
+
+        `description` becomes providerFields.message (capture: captures2.xml #595) —
+        it used to be accepted, documented and then silently dropped.
+
+        For commission preview, call payment_commission() separately before this.
+        ALWAYS confirm with the user. Returns the bank's payload (paymentId, …)."""
+        src = account or self._source_account()
         if provider == "transfer-inner":
             pf = {"bankContract": to_account}
         elif provider == "transfer-legal":
@@ -2191,11 +2239,20 @@ class MobileSession:
             pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
                   "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
                   "pointerLinkId": pointer_link_id}
+        if description:
+            # The app carries the note here, not as a top-level field
+            # (captures2.xml #595: providerFields.message = "Hi").
+            pf["message"] = description
         pay_params = {"provider": provider, "currency": "RUB", "account": src,
                       "moneyAmount": amount, "providerFields": pf,
-                      "isTransferStatus": "false", "isUrgentTransfer": "false"}
-        if provider == "p2p-anybank":
-            pay_params["paymentType"] = "Transfer"   # capture-verified for SBP transfers
+                      "isTransferStatus": "false", "isUrgentTransfer": "false",
+                      # Present in every real pay body; absent from ours until now.
+                      "cellularService": "WiFi", "frontCamera": "true",
+                      "userPaymentId": user_payment_id or str(int(time.time() * 1000))}
+        # NOTE: no paymentType here. `paymentType: "Transfer"` was added from a
+        # capture — but of /v1/payment_commission, where it IS required. No real
+        # /v1/pay body in either capture carries it (checked all three: captures.xml
+        # #1423 and #1477, captures2.xml #595). Sending it is an invention.
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
         return self.pay(body)
 

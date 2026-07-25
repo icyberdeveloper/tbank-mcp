@@ -795,22 +795,112 @@ def transfer_sbp_resolve(phone: str) -> str:
     except Exception as e:
         return _err(e)
 
+def _transfer_key(amount, to_account, provider, from_account) -> str:
+    """Identity of a LOGICAL transfer, for the duplicate guard."""
+    import hashlib
+    raw = f"{provider}|{to_account}|{amount}|{from_account}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# Only an UNCONFIRMED outcome blocks a repeat. journal._BLOCKING also contains
+# "paid", which is right for a grocery cart — the same cart paid twice is a
+# duplicate order — but wrong here: sending the same person the same amount twice
+# is an ordinary thing to do, and refusing it would be the tool inventing a rule
+# the user never asked for.
+_TRANSFER_BLOCKING = {"posting", "unknown"}
+
+
+def _transfer_blocked(key: str):
+    from . import journal
+    last = journal.latest_for_cart(key)
+    if last and last.get("status") in _TRANSFER_BLOCKING:
+        return True, last
+    return False, last
+
+
 @mcp.tool()
 def transfer(amount: float, to_account: str, description: str = "",
              provider: str = "p2p-anybank", bank_member_id: str = "",
-             masked_fio: str = "", pointer_link_id: str = "") -> str:
-    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем). Контракт сверен с захватом.
+             masked_fio: str = "", pointer_link_id: str = "",
+             from_account: str = "", force: bool = False) -> str:
+    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем конкретную сумму и получателя).
+
+    from_account — счёт списания из list_accounts(). Пусто = первый рублёвый Current
+    с положительным балансом; это ДОГАДКА, поэтому если пользователь выбирал счёт —
+    передай его явно, иначе спишется с другого.
     phone/СБП (по умолчанию): to_account=телефон. Если bank_member_id/masked_fio/
-    pointer_link_id не переданы — получатель резолвится АВТОМАТИЧЕСКИ (transfer_sbp_resolve):
-    выберется дефолтный банк; при нескольких банках без дефолта вернётся RECIPIENT_MULTIPLE_BANKS
-    со списком (тогда передай выбранные поля явно). Между своими счетами: provider='transfer-inner',
-    to_account=счёт-получатель. По реквизитам юр.лица — низкоуровневый pay() с явными providerFields."""
+    pointer_link_id не переданы — получатель резолвится АВТОМАТИЧЕСКИ
+    (transfer_sbp_resolve): выберется дефолтный банк; при нескольких банках без
+    дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
+    Между своими счетами: provider='transfer-inner', to_account=счёт-получатель.
+    description — сообщение получателю.
+    force=True — повторить перевод, который уже помечен как незавершённый. Только
+    после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
+
+    Возвращает paymentId — по нему потом payment_receipt(). Больше его взять негде."""
     try:
+        import time
+        from . import journal
         s = _require(); s.ensure_fresh()
-        s.transfer(amount, to_account, description, provider=provider,
-                   bank_member_id=bank_member_id, masked_fio=masked_fio,
-                   pointer_link_id=pointer_link_id)
-        return f"Sent: {amount}₽ to {to_account} (provider={provider})"
+        src = from_account or s._source_account()
+        key = _transfer_key(amount, to_account, provider, src)
+
+        blocked, prev = _transfer_blocked(key)
+        if blocked and not force:
+            return (f"ПОВТОР ЗАБЛОКИРОВАН: такой же перевод ({amount}₽ → {to_account}) "
+                    f"уже отправлялся и его исход НЕ подтверждён "
+                    f"(шаг «{(prev or {}).get('step','?')}», статус "
+                    f"«{(prev or {}).get('status','?')}»). Деньги могли уйти. "
+                    f"Проверь операции в приложении или list_operations('{src}', days=1). "
+                    f"Если перевода нет — повтори с force=True.")
+
+        # The client-generated payment id is what makes a retry idempotent: reusing
+        # the previous one lets the bank recognise the repeat instead of creating a
+        # second payment. A fresh value per attempt would give no protection at all.
+        #
+        # Stored as an INT, deliberately. The journal redacts by value pattern, and a
+        # 13-digit millisecond timestamp matches the card-number rule — as a string it
+        # came back as "<card>" and would have been sent to the bank verbatim.
+        # Non-string values pass through redaction untouched, and this id is not a
+        # secret: its entire purpose is to be reused.
+        upid = str(int((prev or {}).get("user_payment_ms") or 0) or int(time.time() * 1000))
+        attempt = journal.new_attempt(provider, to_account, key, amount)
+        journal.record(attempt, "pay", "posting", user_payment_ms=int(upid), account=src)
+
+        try:
+            res = s.transfer(amount, to_account, description, provider=provider,
+                             bank_member_id=bank_member_id, masked_fio=masked_fio,
+                             pointer_link_id=pointer_link_id, account=src,
+                             user_payment_id=upid) or {}
+        except Exception as e:
+            # The POST left the process. Whether the money moved is unknown, so the
+            # next identical transfer is blocked until the user reconciles.
+            journal.record(attempt, "pay", "unknown", user_payment_ms=int(upid),
+                           error=str(e)[:160])
+            return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — деньги могли списаться. "
+                    f"НЕ повторяй вслепую: проверь list_operations('{src}', days=1), "
+                    f"и только если перевода нет — transfer(..., force=True).")
+
+        payload = res.get("payload", res) if isinstance(res, dict) else {}
+        pid = str(payload.get("paymentId") or payload.get("id") or "") if isinstance(payload, dict) else ""
+        journal.record(attempt, "pay", "paid" if pid else "unknown",
+                       user_payment_ms=int(upid), payment_id=pid)
+        commission = ""
+        if isinstance(payload, dict):
+            c = payload.get("commissionInfo") or payload.get("commission")
+            if isinstance(c, dict):
+                commission = f", комиссия {c.get('value', c.get('amount','?'))}"
+            elif c is not None:
+                commission = f", комиссия {c}"
+        who = f" ({masked_fio})" if masked_fio else ""
+        if not pid:
+            return (f"Отправлено {_money(amount)} → {to_account}{who} со счёта {src}, "
+                    f"но банк не вернул paymentId. Проверь list_operations('{src}', days=1) — "
+                    f"чек по этому переводу получить не удастся.\n"
+                    f"Ответ: {_json_out(payload, 400)}")
+        return (f"Отправлено {_money(amount)} → {to_account}{who} "
+                f"со счёта {src}{commission}. paymentId={pid} "
+                f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
         return _err(e)
 

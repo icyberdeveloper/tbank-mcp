@@ -108,6 +108,42 @@ def build_booking():
     }
 
 
+def build_transfer():
+    """The real signed /v1/pay, from captures.xml #1477 (p2p-anybank via SBP).
+
+    Kept: the query keys, the form keys, and the payParameters KEY SET plus the
+    protocol constants. Replaced: the payer account, the recipient's phone, name and
+    SBP ids, the device id and the session id."""
+    import urllib.parse
+
+    import test_cart_body_matches_capture as T
+
+    items = T._items()
+    raw = T._raw(items[1477], "request")
+    head, _, body = raw.partition(b"\r\n\r\n")
+    line = head.split(b"\r\n")[0].decode()
+    query = urllib.parse.parse_qs(line.split("?", 1)[1].split(" ")[0])
+    form = urllib.parse.parse_qs(body.decode())
+    pp = json.loads(form["payParameters"][0])
+
+    pp["account"] = "0000000000"
+    pf = pp.get("providerFields", {})
+    for k, v in (("pointer", "+79991234567"), ("maskedFIO", "И. И."),
+                 ("bankMemberId", "100000000000"), ("pointerLinkId", "10000000000")):
+        if k in pf:
+            pf[k] = v
+    secret = {"sessionid", "deviceId", "oldDeviceId"}
+    return {
+        "_note": ("Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). "
+                  "Key sets and protocol constants are real; account, recipient and "
+                  "device/session ids are synthetic."),
+        "query_keys": sorted(query),
+        "query_static": {k: v[0] for k, v in sorted(query.items()) if k not in secret},
+        "form_keys": sorted(form),
+        "pay_parameters": pp,
+    }
+
+
 def write(name, data):
     out = os.path.join(HERE, name)
     with open(out, "w", encoding="utf-8") as fh:
@@ -127,6 +163,7 @@ def main():
         write("booking.json", build_booking())
     except FileNotFoundError as e:
         print(f"booking fixture skipped: {e}")
+    write("transfer.json", build_transfer())
     return 0
 
 
