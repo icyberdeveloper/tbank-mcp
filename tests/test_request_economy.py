@@ -185,6 +185,61 @@ def test_a_missed_area_id_lookup_is_not_cached_as_the_answer():
     print("  areaId: a miss is retried, a genuine empty answer is cached")
 
 
+def test_a_cold_start_add_to_cart_asks_for_the_address_once():
+    """One add_to_cart into a store with no cart resolved the delivery address
+    twice: _grocery_delivery seeds it from client/info, then grocery_stores() —
+    reached while resolving areaId — fetched the same client/info again through its
+    own hand-rolled request. Same URL, same answer, back to back, on the path the
+    user is waiting on."""
+    class Retailers:
+        """The retailers catalogue, which grocery_stores() fetches through _http."""
+
+        @staticmethod
+        def json():
+            return {"payload": {"categories": [{"retailers": [
+                {"appId": "204", "info": {"name": "ВкусВилл"},
+                 "delivery": {"pointId": "5980", "areaId": "17040911"}}]}]}}
+
+    class ColdStore(CountingSession):
+        # grocery_stores() is NOT stubbed out: the whole point is to count what the
+        # real implementation asks for on the way to an areaId.
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.access_token = "tok"
+            self.cookie_str = ""
+            self.mobile_sessionid = "sid"
+            self.device_id = self.old_device_id = "dev"
+            self.app_name, self.app_version, self.platform = "mobile", "7.31.6", "ios"
+            self.origin, self.ccc, self.cpswc = "mobile", "true", "true"
+            self.connection_type, self.inache = "WiFi", "drivetransitt"
+            self._http = type("H", (), {"get": lambda *a, **k: Retailers()})()
+
+    s = ColdStore({
+        # No cart for this store yet: the address must come from client/info.
+        "grocery_cart_get": {"cart": {}},
+        "grocery_client_info": {"deliveryInfo": {
+            "addresses": [{"id": "a-1", "value": "ул Примерная",
+                           "coordinates": {"latitude": 55.75, "longitude": 37.61}}],
+            "address": {"value": "ул Примерная", "details": {"street": "Примерная"}}}},
+        "grocery_cart_set": {"goodsSum": 1.0},
+    })
+    s.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+    n = s.count("grocery_client_info")
+    check(n == 1, f"client/info fetched {n} times for one cold-start add_to_cart")
+
+    # The memo is a BURST cache, not a session cache: the delivery address can be
+    # edited in the app, so it must expire rather than be believed forever.
+    check(s.CLIENT_INFO_TTL <= 300,
+          f"client/info is cached for {s.CLIENT_INFO_TTL}s — too long for an "
+          f"address the user can change in the app")
+    s._memo["client_info"] = (time.time() - s.CLIENT_INFO_TTL - 1,
+                              {"deliveryInfo": {"address": {"value": "старый"}}})
+    fresh = s.grocery_client_info()
+    check(fresh.get("deliveryInfo", {}).get("address", {}).get("value") != "старый",
+          "an expired client/info was served from the memo anyway")
+    print("  add_to_cart cold start: client/info fetched 1× (was twice)")
+
+
 def test_documents_resolves_the_contact_id_once():
     s = CountingSession({
         "prefill_contact": {"contacts": [{"id": "c-1"}]},
@@ -464,6 +519,7 @@ def main():
     test_cards_costs_one_request_not_one_per_account()
     test_area_id_is_looked_up_once_per_store()
     test_a_missed_area_id_lookup_is_not_cached_as_the_answer()
+    test_a_cold_start_add_to_cart_asks_for_the_address_once()
     test_documents_resolves_the_contact_id_once()
     test_nutrition_is_fetched_concurrently()
     test_a_named_film_search_sees_every_page()

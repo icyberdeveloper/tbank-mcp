@@ -97,6 +97,11 @@ class CaptureSession(MobileSession):
         self.device_id = "00000000-1111-2222-3333-444444444444"
         self.old_device_id = "0123456789abcdef"
         self.cookie_str = ""
+        # As server._require builds it. The User-Agent is DERIVED from these, so a
+        # stub without them would exercise a session shape production never has.
+        self.platform = "ios"
+        self.app_name = "mobile"
+        self.app_version = "7.31.6"
         self.fail = fail
         self.payload = payload
         self.url = None
@@ -174,6 +179,77 @@ def test_body_matches_the_real_pay_request():
     check("wuid" not in query,
           "wuid is a web identifier and is not sent on the mobile /v1/pay")
     print("  body: matches the captured /v1/pay — keys, anti-fraud block, no paymentType")
+
+
+def test_the_pay_request_looks_like_the_device_it_claims_to_be():
+    """The query declares platform=ios and a whole iPhone anti-fraud profile. The
+    headers said otherwise: the User-Agent came from the requests.Session default and
+    read `okhttp/4.12.0` — an Android HTTP client posting an iPhone's 3DS block, on
+    the one request the bank scores for fraud. The signature covers method, path,
+    query and body, never the headers, so matching the app costs nothing."""
+    s = CaptureSession()
+    s.transfer(1000, "+79991234567", account="0000000000")
+    h = {k.lower(): v for k, v in s.headers.items()}
+
+    check("okhttp" not in h.get("user-agent", "").lower(),
+          f"/v1/pay still goes out as an Android HTTP client: {h.get('user-agent')!r}")
+    check(h.get("user-agent", "").startswith("iPhone/iOS("),
+          f"the UA must be the app's mobile one: {h.get('user-agent')!r}")
+    # The captured native /v1/pay: html Accept, ru, charset on the content type.
+    check(h.get("accept", "").startswith("text/html"),
+          f"Accept diverges from the captured pay: {h.get('accept')!r}")
+    check(h.get("x-lang") == "ru", f"X-Lang missing: {sorted(h)}")
+    check("charset=utf-8" in h.get("content-type", ""),
+          f"Content-Type diverges from the captured pay: {h.get('content-type')!r}")
+    # And the signature must still be the one over the query, unaffected by headers.
+    check(h.get("x-api-signature"), "the request lost its signature")
+
+    query = s.sent_query()
+    check(query.get("platform", [""])[0] == "ios",
+          "the query no longer declares the platform the UA claims")
+    print("  headers: /v1/pay presents the same device its query describes")
+
+
+def test_the_device_profile_is_configuration_not_a_constant():
+    """The 3DS block mixes protocol constants with facts about ONE phone: a
+    1260×2736 screen, the ru-CY locale (which also says what region its owner was in)
+    and UTC+3. Baked in, every user of this MCP claims to be that device."""
+    fresh = MobileSession("sid", "rt")
+    base = fresh.PAY_DEVICE_PROFILE
+    for key in ("colorDepth", "notificationUrl", "javaScriptEnabled", "emulator",
+                "device_screen_height", "device_screen_width", "language", "timezone"):
+        check(key in base, f"the pay device block lost {key!r}: {sorted(base)}")
+
+    for env, key, value in (
+            ("TBANK_DEVICE_SCREEN_HEIGHT", "device_screen_height", "1920"),
+            ("TBANK_DEVICE_SCREEN_WIDTH", "device_screen_width", "1080"),
+            ("TBANK_DEVICE_LANGUAGE", "language", "ru-RU"),
+            ("TBANK_DEVICE_TIMEZONE", "timezone", "60")):
+        os.environ[env] = value
+        try:
+            got = MobileSession("sid", "rt").PAY_DEVICE_PROFILE
+        finally:
+            os.environ.pop(env, None)
+        check(got.get(key) == value,
+              f"{env} did not reach the pay block: {key}={got.get(key)!r}")
+        check(got["colorDepth"] == "24" and got["notificationUrl"].endswith("/v1/3ds"),
+              "overriding a device fact must not disturb the protocol constants")
+        check(len(got) == len(base),
+              f"the block changed size under an override: {len(got)} vs {len(base)}")
+
+    # A configured device must actually reach the wire — both copies of it.
+    os.environ["TBANK_DEVICE_LANGUAGE"] = "ru-RU"
+    try:
+        s = CaptureSession()
+        s.device_profile = {"language": "ru-RU"}
+        s.transfer(1000, "+79991234567", account="0000000000")
+        check(s.sent_query().get("language", [""])[0] == "ru-RU",
+              f"the query kept the captured locale: {s.sent_query().get('language')}")
+        check(s.sent_form().get("language", [""])[0] == "ru-RU",
+              f"the form kept the captured locale: {s.sent_form().get('language')}")
+    finally:
+        os.environ.pop("TBANK_DEVICE_LANGUAGE", None)
+    print("  device profile: constants fixed, device facts configurable, both copies sent")
 
 
 def test_description_reaches_the_recipient():
@@ -448,6 +524,8 @@ def main():
     print("transfer money path:")
     test_the_fixture_still_matches_the_capture()
     test_body_matches_the_real_pay_request()
+    test_the_pay_request_looks_like_the_device_it_claims_to_be()
+    test_the_device_profile_is_configuration_not_a_constant()
     test_description_reaches_the_recipient()
     test_the_chosen_account_is_the_one_debited()
     test_a_lost_transfer_blocks_the_next_identical_one()

@@ -21,6 +21,7 @@
 """
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -329,6 +330,58 @@ class FakePlaywright:
         return False
 
 
+def test_the_cart_readiness_poll_uses_a_real_clock():
+    """The checkout waits for the page's cart API before doing anything, and the
+    wait is bounded — because it happens BEFORE the order exists, so timing out
+    there is safe and timing out later is not.
+
+    The bound was the sum of the loop's own sleeps, which ignored the probe. Each
+    probe is a real in-page fetch capped at FETCH_TIMEOUT_MS (30 s), so a page that
+    hung twice blew a "20 second" budget past a minute while the caller sat
+    mid-checkout. Executed here with a probe that is genuinely slow."""
+    from src.checkout import _poll_until_ready
+
+    # A probe slower than the whole budget: one call and the deadline is gone.
+    calls = []
+
+    def slow():
+        calls.append(1)
+        time.sleep(0.25)
+        return {"status": 500}
+
+    started = time.monotonic()
+    result, waited = _poll_until_ready(slow, lambda r: r["status"] == 200,
+                                       timeout_ms=200, interval_ms=50)
+    elapsed = time.monotonic() - started
+    check(result is None, "a never-ready probe must time out, not return a value")
+    check(elapsed < 1.0,
+          f"the deadline ignored the probe's own duration: {elapsed:.2f}s for a "
+          f"200 ms budget after {len(calls)} probes")
+    check(waited >= 200, f"the reported wait must be real time, got {waited} ms")
+
+    # And the result of the probe that succeeded is RETURNED, not thrown away: the
+    # caller used to reissue the identical request.
+    seen = []
+
+    def flaky():
+        seen.append(1)
+        return {"status": 200 if len(seen) >= 2 else 503, "n": len(seen)}
+
+    got, _ = _poll_until_ready(flaky, lambda r: r["status"] == 200,
+                               timeout_ms=5000, interval_ms=10)
+    check(got == {"status": 200, "n": 2},
+          f"the successful probe's own result must come back, got {got!r}")
+    check(len(seen) == 2, f"expected 2 probes, made {len(seen)}")
+
+    # A probe that raises is a "not ready", not a crash.
+    def boom():
+        raise RuntimeError("page not up")
+
+    out, _ = _poll_until_ready(boom, lambda r: True, timeout_ms=60, interval_ms=10)
+    check(out is None, "a raising probe must read as not-ready, not propagate")
+    print("  checkout poll: wall-clock deadline, result reused, errors are not-ready")
+
+
 def run_checkout(routes):
     """Drive the REAL checkout() against a fake browser. Returns (result, exc, page, stdout)."""
     import contextlib
@@ -478,6 +531,7 @@ def main():
     test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout()
     test_lost_payment_answer_is_reconciled_not_declared_unknown()
     test_cart_readiness_distinguishes_not_up_from_empty()
+    test_the_cart_readiness_poll_uses_a_real_clock()
     if failures:
         print("\nFAILED:")
         for f in failures:

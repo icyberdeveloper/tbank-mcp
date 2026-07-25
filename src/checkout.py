@@ -52,6 +52,36 @@ GROCERY_WEB_QS = "appName=grocery_evo&appVersion=7.31.6&platform=webview_ios"
 CART_READY_TIMEOUT_MS = 20000
 CART_POLL_INTERVAL_MS = 500
 
+
+def _poll_until_ready(probe, ready, *, timeout_ms: int, interval_ms: int):
+    """Call `probe` until `ready(result)`, then return (result, elapsed_ms).
+
+    Returns (None, elapsed_ms) if the deadline passes first.
+
+    Two things this exists to get right, both of which the inline loop got wrong:
+
+    * The deadline is WALL CLOCK. The old loop added up its own sleeps, ignoring the
+      probe itself — and each probe is a real in-page fetch bounded by
+      FETCH_TIMEOUT_MS (30 s). Two hung fetches and a "20 second" wait had already
+      run more than a minute, with the caller, who is mid-checkout, told nothing.
+    * The successful probe's RESULT comes back. The loop used to discard it and the
+      caller reissued the identical request — an extra browser round trip on the
+      money path, and a window in which the second answer can differ from the one
+      that satisfied the check."""
+    started = time.monotonic()
+    deadline = started + timeout_ms / 1000.0
+    while True:
+        try:
+            result = probe()
+            ok = bool(ready(result))
+        except Exception:                                    # noqa: BLE001
+            result, ok = None, False
+        if ok:
+            return result, int((time.monotonic() - started) * 1000)
+        if time.monotonic() >= deadline:
+            return None, int((time.monotonic() - started) * 1000)
+        time.sleep(interval_ms / 1000.0)
+
 # Per-request ceiling for every in-page fetch. Playwright's page.evaluate has NO
 # timeout of its own (Page.evaluate passes timeout_calculator=None and _inner_send
 # awaits without a deadline), so a fetch that never settles hangs the checkout —
@@ -208,25 +238,21 @@ def checkout(session, app_id: str = "", point_id: str = "",
             # facts: "the page is not ready yet" and "the cart really is empty". A
             # genuinely empty cart therefore burned the whole deadline and then
             # reported a misleading error. Track both so the message can say which.
-            _waited, _answered, _g = 0, False, []
-            while _waited < CART_READY_TIMEOUT_MS:
-                try:
-                    _, _g, _raw = web_cart(app_id)
-                    _answered = _raw.get("status") == 200
-                except Exception:
-                    _answered, _g = False, []
-                if _answered:
-                    break
-                time.sleep(CART_POLL_INTERVAL_MS / 1000.0)
-                _waited += CART_POLL_INTERVAL_MS
-            if not _answered:
+            _probe, _waited = _poll_until_ready(
+                lambda: web_cart(app_id),
+                ready=lambda r: r[2].get("status") == 200,
+                timeout_ms=CART_READY_TIMEOUT_MS, interval_ms=CART_POLL_INTERVAL_MS)
+            if _probe is None:
                 raise CheckoutError(
                     f"checkout page never brought its cart API up within "
-                    f"{CART_READY_TIMEOUT_MS} ms — no order was created, safe to retry")
+                    f"{CART_READY_TIMEOUT_MS} ms (waited {_waited} ms) — no order was "
+                    f"created, safe to retry")
             _log(f"[checkout] cart API up after ~{_waited}ms")
 
-            # 2. GET web cart → pre-delivery sum + goods
-            pre_sum, goods, _ = web_cart(app_id)
+            # 2. The probe that succeeded IS the cart. It used to be thrown away and
+            # the identical request issued again — one extra round trip inside a
+            # browser, on the money path.
+            pre_sum, goods, _ = _probe
             pre_count = len(goods)
             actual_sum = pre_sum or sum_val
             _log(f"[checkout] web cart (pre-delivery): sum={actual_sum} {pre_count} items")

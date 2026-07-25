@@ -1442,6 +1442,13 @@ BUILTIN_ENDPOINTS.update({
     # WEB gate (www.tbank.ru, cookie-auth, used by the grocery Playwright
     # checkout). Marketplace orders from the mobile app pay through the MOBILE
     # gate below on a plain Bearer — no browser involved.
+    # Pg-Api-System names the calling system and the gate sends it on EVERY call.
+    # Both captured flavours carry it and they differ: the grocery web checkout says
+    # "t-grocery-ib", the app's own marketplace payment (tickets) says
+    # "t-entertainment-mb". Same path, same body shape, different caller — so
+    # omitting it leaves the gate to guess which one a payment came from.
     "payment_gate_pay_mobile": {"method": "POST", "host": "https://api.t-bank-app.ru",
-                                "path": "/pg-api/v1/payment-gate/payments", "params": {}},
+                                "path": "/pg-api/v1/payment-gate/payments",
+                                "headers": {"Pg-Api-System": "t-entertainment-mb"},
+                                "params": {}},
 })

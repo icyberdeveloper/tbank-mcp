@@ -248,11 +248,59 @@ def check_ticket_pay_amount_guard():
     print("  ticket_pay: amount cross-check, token guard, non-SUCCESS all enforced")
 
 
+def test_the_ticket_payment_names_its_calling_system():
+    """Pg-Api-System tells the payment gate WHICH system a payment came from, and
+    the app sends it on every call. Both captured flavours carry it and they differ:
+    the grocery web checkout says «t-grocery-ib», the app's own marketplace payment
+    says «t-entertainment-mb». Same path, same body shape — with the header missing
+    the gate is left to guess which caller it is talking to."""
+    seen = {}
+
+    class GateSession(MobileSession):
+        def __init__(self):
+            self.mobile_sessionid = "sid"
+            self.access_token = "tok"
+            self.device_id = "dev"
+            self.old_device_id = "dev"
+            self.cookie_str = ""
+            self.platform, self.app_name, self.app_version = "ios", "mobile", "7.31.6"
+            self._memo = {}
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def _unwrap(self, r):
+            return {"paymentId": "1", "stage": {"status": "SUCCESS"}}
+
+    s = GateSession()
+
+    class FakeHTTP:
+        def post(self, url, **kw):
+            seen.update(url=url, headers=kw.get("headers") or {},
+                        json=kw.get("json"), data=kw.get("data"))
+            return object()
+
+        def get(self, url, **kw):
+            return object()
+
+    s._http = FakeHTTP()
+    s.pay_marketplace_order("10000000000", 1936, "0000000000", "482")
+
+    hdr = {k.lower(): v for k, v in seen.get("headers", {}).items()}
+    check(hdr.get("pg-api-system") == "t-entertainment-mb",
+          f"the ticket payment does not name its system: pg-api-system="
+          f"{hdr.get('pg-api-system')!r}")
+    check("payment-gate/payments" in seen.get("url", ""),
+          f"unexpected endpoint: {seen.get('url')}")
+    print("  ticket payment: Pg-Api-System names the entertainment system")
+
+
 def main():
     print("booking bodies + ranking:")
     check_ranking()
     check_seat_grouping()
     check_ticket_pay_amount_guard()
+    test_the_ticket_payment_names_its_calling_system()
     fx = fixture()
     check_create(fx["create_movie"], "order/create/movie", "movie",
                  [{"id": "7:10", "type": "basic"}])

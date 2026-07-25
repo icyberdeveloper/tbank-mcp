@@ -114,12 +114,20 @@ class SessionExpired(TbankApiError):
 _LIVE_QUERY = {"sessionid", "wuid"}
 _LIVE_HEADERS = {"authorization", "cookie"}
 
-# iOS device OS version used in the mobile User-Agent. Not tracked per-session
-# (the device isn't re-queried); matches the value embedded in the auth
-# fingerprint blob (see FINGERPRINT userAgent) and the real app's UA format
+# iOS device OS version used in the mobile User-Agent, format
 # `iPhone/iOS(<ver>)/TCSMB/<appVersion>(<build>)`. Build is derived from
 # app_version, e.g. 7.31.6 -> 7*1_000_000 + 31*10_000 + 6*1_000 = 7316000.
-_IOS_VERSION = "17.5.1"
+#
+# Read straight off the wire: 812 captured requests to the bank's hosts carry
+# `iPhone/iOS(26.5.2)/TCSMB/7.31.6(7316000)` and none carry any other version, and
+# the same string appears 27 times inside request BODIES. It used to say 17.5.1,
+# copied from FINGERPRINT["systemVersion"] below — so every call announced a device
+# OS the app never announces.
+#
+# FINGERPRINT is deliberately NOT changed to match. It is sent once, at login, the
+# current value demonstrably works, and nothing in any capture shows what the server
+# does with it — so there is evidence for this constant and none for that one.
+_IOS_VERSION = "26.5.2"
 
 # Hosts where the real app sends X-App-Name/X-App-Version/X-Platform (capture-
 # verified per-host header profile). ONLY these — everywhere else (the BFF
@@ -225,6 +233,18 @@ class MobileSession:
         # not a dataclass field — _save_session serializes fields, and this must
         # never reach session.json.
         self._memo: dict = {}
+        # Device facts for the payment anti-fraud block, from the environment.
+        # A plain attribute for the same reason as _memo: it is machine-local
+        # configuration, not session state, and must not be written to session.json
+        # (nor restored from an old one, which would outlive the machine it
+        # described). Unset keys fall back to PAY_DEVICE_DEFAULTS.
+        self.device_profile: dict = {
+            k: v for k, v in (
+                ("device_screen_height", os.environ.get("TBANK_DEVICE_SCREEN_HEIGHT")),
+                ("device_screen_width", os.environ.get("TBANK_DEVICE_SCREEN_WIDTH")),
+                ("language", os.environ.get("TBANK_DEVICE_LANGUAGE")),
+                ("timezone", os.environ.get("TBANK_DEVICE_TIMEZONE")),
+            ) if v}
         if not self.device_id:
             self.device_id = str(_uuid.uuid4()).upper()
         if not self.old_device_id:
@@ -561,19 +581,46 @@ class MobileSession:
     # this device. Values match the captured device profile deliberately: the
     # deviceId being replayed is that device's, and a screen size that disagreed with
     # it would be the inconsistency the anti-fraud system looks for.
-    PAY_DEVICE_PROFILE = {
+    # The 3DS / anti-fraud block, sent in BOTH the query and the form on every
+    # payment. Two kinds of value live here and they must not be confused:
+    #
+    #   protocol constants — colorDepth, debug, emulator, jailbreak, javaEnabled,
+    #     javaScriptEnabled, notificationUrl. The app sends these verbatim.
+    #   device facts — device_screen_height/width, language, timezone. These
+    #     described the ONE phone the traffic was captured from: a 1260×2736 screen,
+    #     the ru-CY locale (a Cyprus-region device, which also says where its owner
+    #     was) and UTC+3.
+    #
+    # Baking the second group in means every user of this MCP claims to be that
+    # phone, in that region, in that timezone — a fingerprint that is both wrong and
+    # someone else's. They are overridable per session (TBANK_DEVICE_* below), and
+    # the captured values remain the default because a plausible coherent device is
+    # better than a blank or a random one, and no capture shows what the gate does
+    # with an unfamiliar profile.
+    PAY_DEVICE_CONSTANTS = {
         "colorDepth": "24",
         "debug": "0",
-        "device_screen_height": "2736",
-        "device_screen_width": "1260",
         "emulator": "0",
         "jailbreak": "false",
         "javaEnabled": "false",
         "javaScriptEnabled": "true",
-        "language": "ru-CY",
         "notificationUrl": "https://api.t-bank-app.ru/v1/3ds",
+    }
+    PAY_DEVICE_DEFAULTS = {
+        "device_screen_height": "2736",
+        "device_screen_width": "1260",
+        "language": "ru-CY",
         "timezone": "180",
     }
+
+    @property
+    def PAY_DEVICE_PROFILE(self) -> dict:
+        """The full block: constants + this session's device facts."""
+        # getattr, not self.device_profile: __post_init__ sets it, and the test
+        # sessions build the object without running it.
+        override = getattr(self, "device_profile", None) or {}
+        return {**self.PAY_DEVICE_CONSTANTS, **self.PAY_DEVICE_DEFAULTS,
+                **{k: str(v) for k, v in override.items() if v}}
 
     def _call_signed(self, template_key: str, body_str: str,
                      extra_query: dict | None = None) -> Any:
@@ -609,11 +656,23 @@ class MobileSession:
         sig = self._sign("POST", path, query, body_str)
         headers = {k: v for k, v in tpl.get("headers", {}).items()
                    if k.lower() not in _LIVE_HEADERS}
+        # The signature covers METHOD + path + query + body, never the headers, so
+        # these are free to match the app — and they must. The query declares
+        # platform=ios and a whole iOS device profile, while the User-Agent came
+        # from the requests.Session default and said `okhttp/4.12.0`: an Android
+        # HTTP client posting an iPhone's anti-fraud block. The captured native
+        # /v1/pay sends the mobile UA together with X-Lang and this Accept.
+        for k, v in self._mobile_headers(host).items():
+            headers.setdefault(k, v)
+        # _mobile_headers defaults Accept to application/json, which is right for the
+        # read endpoints. The captured pay asks for html — overridden, not defaulted.
+        headers["Accept"] = ("text/html,application/xhtml+xml,application/xml;"
+                             "q=0.9,*/*;q=0.8")
         headers["Authorization"] = "Bearer " + self.access_token
         headers["x-api-signature"] = sig
         if self.cookie_str:
             headers["Cookie"] = self.cookie_str
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8;"
         return url, headers, body_str
 
     def pay(self, body: str | None = None) -> Any:
@@ -1046,8 +1105,9 @@ class MobileSession:
     def grocery_unseen_orders(self) -> dict:
         return self._call_read("grocery_unseen_orders")
 
-    def grocery_client_info(self) -> dict:
-        return self._call_read("grocery_client_info")
+    # (grocery_client_info is defined further down, next to _grocery_delivery — an
+    # identical stub used to sit here and was silently shadowed by it, so an edit to
+    # this one changed nothing.)
 
     # ---- shopping cart-building (browse products + fill the cart) ----
 
@@ -1366,18 +1426,14 @@ class MobileSession:
                 "Authorization": "Bearer " + self.access_token}
         if self.cookie_str:
             base["Cookie"] = self.cookie_str
-        # get the delivery address from client/info
-        info = self._http.get("https://lifestyle.t-bank-app.ru/api/grocery/client/info",
-            params={"appName": self.app_name, "appVersion": self.app_version,
-                    "platform": self.platform, "origin": self.origin,
-                    "deviceId": self.device_id, "oldDeviceId": self.old_device_id,
-                    "sessionid": self.mobile_sessionid, "ccc": self.ccc,
-                    "cpswc": self.cpswc, "connectionType": self.connection_type,
-                    "inache": self.inache}, headers=base, timeout=30)
+        # The delivery address, through the shared accessor rather than a second
+        # hand-rolled request to the same URL: a cold-start add_to_cart resolves the
+        # address here AND in _grocery_delivery, which was two identical calls.
         addrs = []
         try:
-            addrs = info.json().get("payload", {}).get("deliveryInfo", {}).get("addresses", [])
-        except Exception:
+            addrs = ((self.grocery_client_info().get("deliveryInfo") or {})
+                     .get("addresses") or [])
+        except TbankApiError:
             pass
         if not addrs:
             raise TbankApiError("NO_DELIVERY_ADDRESS",
@@ -1995,12 +2051,30 @@ class MobileSession:
         results.sort(key=lambda r: (not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
         return results
 
+    # How long one client/info answer is reused. Short on purpose: unlike areaId,
+    # the delivery address CAN change — the user edits it in the app — so this is a
+    # burst cache, not a session cache.
+    CLIENT_INFO_TTL = 60.0
+
     def grocery_client_info(self) -> dict:
         """GET /api/grocery/client/info — the account's grocery profile. Carries
         payload.deliveryInfo.{address,deliveryType,comment}: the saved delivery block
-        the app uses to seed a cart in a store the user has never ordered from."""
+        the app uses to seed a cart in a store the user has never ordered from.
+
+        Memoised for CLIENT_INFO_TTL seconds because a single cold-start
+        grocery_add_to_cart asked for it twice: once through _grocery_delivery to
+        seed the address, then again inside grocery_stores() while resolving areaId.
+        Same request, same answer, back to back."""
+        memo = getattr(self, "_memo", None)
+        if memo is not None:
+            at, cached = memo.get("client_info", (0.0, None))
+            if cached is not None and time.time() - at < self.CLIENT_INFO_TTL:
+                return cached
         info = self._call_read("grocery_client_info")
-        return info if isinstance(info, dict) else {}
+        info = info if isinstance(info, dict) else {}
+        if memo is not None and info:
+            memo["client_info"] = (time.time(), info)
+        return info
 
     def _grocery_delivery(self, app_id: str, point_id: str, cart: dict | None = None) -> dict:
         """Build the ``delivery`` block that cart/set requires for this store.
