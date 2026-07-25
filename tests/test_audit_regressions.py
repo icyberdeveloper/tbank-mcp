@@ -192,11 +192,101 @@ def test_cinema_schedule_emits_objectid():
     print("  cinema_schedule: objectId + slotId both emitted, and documented")
 
 
+def test_nothing_writes_to_stdout():
+    """FastMCP speaks JSON-RPC over stdout. Any bare print() in the server process
+    injects garbage into the protocol stream — checkout.py did it six times, during
+    a payment. Guard the whole package, not just the file that broke."""
+    import ast
+    import glob
+    src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(src_dir, "*.py"))):
+        tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"):
+                continue
+            dest = next((k.value for k in node.keywords if k.arg == "file"), None)
+            # print(..., file=sys.stderr) is fine; anything else lands on stdout.
+            ok = (isinstance(dest, ast.Attribute) and dest.attr == "stderr")
+            if not ok:
+                offenders.append(f"{os.path.basename(path)}:{node.lineno}")
+    check(not offenders,
+          "print() to stdout would corrupt the MCP protocol:\n    " + "\n    ".join(offenders))
+
+    from src import checkout
+    import io
+    import contextlib
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        checkout._log("hello")
+    check(out.getvalue() == "", f"_log wrote to stdout: {out.getvalue()!r}")
+    check("hello" in err.getvalue(), f"_log did not reach stderr: {err.getvalue()!r}")
+    print("  stdout: clean across src/, _log goes to stderr")
+
+
+def test_every_in_page_fetch_is_bounded():
+    """page.evaluate has no timeout of its own, so an in-page fetch that never
+    settles hangs the checkout — worst case between order/create and payment. Every
+    fetch must go through the _f wrapper, which carries an AbortController."""
+    import re as _re
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "src", "checkout.py")
+    src = open(path, encoding="utf-8").read()
+
+    body = src.split("_JS_FETCH = ", 1)[1].split('"""', 2)[1]
+    check("AbortController" in body and "clearTimeout" in body,
+          "the _f helper lost its AbortController")
+
+    # Inside the in-page snippets themselves, every request must go through _f.
+    # (Scan the snippets, not the whole file — prose in comments says "fetch" too.)
+    snippets = _re.findall(r'_js\("""(.*?)"""\)', src, _re.S)
+    raw = [s for s in snippets if _re.search(r"(?<!_)\bfetch\(", s)]
+    check(not raw,
+          f"{len(raw)} in-page snippet(s) call fetch() directly, bypassing the timeout")
+
+    # Every page.evaluate must be wrapped by _js(), which injects _f.
+    evals = _re.findall(r"page\.evaluate\(\s*(\w+)?", src)
+    check(all(e == "_js" for e in evals if e),
+          f"page.evaluate not wrapped in _js(): {[e for e in evals if e != '_js']}")
+    check(len(evals) >= 6, f"expected ≥6 in-page calls, found {len(evals)}")
+
+    # And the generated JS must actually parse — otherwise it fails at payment time.
+    node = glob_node()
+    if node:
+        import subprocess
+        import tempfile
+        from src.checkout import _js
+        bodies = _re.findall(r'_js\("""(.*?)"""\)', src, _re.S)
+        check(len(bodies) >= 6, f"expected ≥6 _js bodies, found {len(bodies)}")
+        for i, b in enumerate(bodies):
+            with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as fh:
+                fh.write("const fn = " + _js(b) + ";\n")
+                tmp = fh.name
+            r = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
+            os.unlink(tmp)
+            check(r.returncode == 0,
+                  f"in-page snippet #{i} is not valid JS: {r.stderr.strip()[:200]}")
+        print(f"  in-page fetches: {len(bodies)} snippets bounded and syntax-checked")
+    else:
+        print(f"  in-page fetches: {len(evals)} bounded (node absent, syntax check skipped)")
+
+
+def glob_node():
+    import glob
+    hits = glob.glob(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".venv", "lib", "python*", "site-packages", "playwright", "driver", "node"))
+    return hits[0] if hits and os.access(hits[0], os.X_OK) else None
+
+
 def main():
     print("audit regressions (2026-07-25):")
     test_spending_categories_walks_the_interval_tree()
     test_err_redacts_the_sessionid()
     test_cinema_schedule_emits_objectid()
+    test_nothing_writes_to_stdout()
+    test_every_in_page_fetch_is_bounded()
     if failures:
         print("\nFAILED:")
         for f in failures:

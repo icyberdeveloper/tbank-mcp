@@ -35,6 +35,7 @@ re-verified against a fresh authorized frontend trace. Validate with a small liv
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 from . import journal
@@ -43,6 +44,56 @@ from . import observability as obs
 # Shared web-checkout query string (capture-verified) for every grocery web fetch.
 # Single source of truth — bump here, not in 5 separate JS template strings.
 GROCERY_WEB_QS = "appName=grocery_evo&appVersion=7.31.6&platform=webview_ios"
+
+# How long the checkout page gets to bring its cart API up. The old 10 s was a bare
+# number; this is the p99 page-ready time observed in the capture session (~3.5 s)
+# with generous headroom, and it is a CEILING, not a wait — the poll exits as soon
+# as the API answers.
+CART_READY_TIMEOUT_MS = 20000
+CART_POLL_INTERVAL_MS = 500
+
+# Per-request ceiling for every in-page fetch. Playwright's page.evaluate has NO
+# timeout of its own (Page.evaluate passes timeout_calculator=None and _inner_send
+# awaits without a deadline), so a fetch that never settles hangs the checkout —
+# and the worst place for that is between order/create and payment, where the
+# money is committed but the result is unknown. AbortController bounds it inside
+# the page and returns a value we can classify instead of hanging.
+FETCH_TIMEOUT_MS = 30000
+
+# Prepended to every in-page evaluate. Returns the same {status, body} shape as
+# before; on timeout or network failure it returns status 0 with `timedOut`/`error`
+# so the caller can tell "the request failed" from "the server said no" — for the
+# payment step those two are NOT the same and must not be collapsed.
+_JS_FETCH = """
+  const _f = async (url, opts, ms) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), ms);
+    try {
+      const r = await fetch(url, Object.assign({}, opts || {}, {signal: c.signal}));
+      return {status: r.status, body: await r.json().catch(() => ({}))};
+    } catch (e) {
+      return {status: 0, body: {}, timedOut: true, error: String(e)};
+    } finally {
+      clearTimeout(t);
+    }
+  };
+"""
+
+
+def _js(body: str) -> str:
+    """Wrap an in-page snippet as `async (a) => { <_f helper> <body> }`.
+
+    Every fetch in this file goes through `_f`, so none of them can hang. `a` is the
+    single argument object passed from Python."""
+    return "async (a) => {" + _JS_FETCH + body + "}"
+
+
+def _log(msg: str) -> None:
+    """Progress goes to STDERR. FastMCP speaks JSON-RPC over stdout, so a bare
+    print() here injects garbage into the protocol stream — during a payment, which
+    is the worst possible moment to desync the client. server.py already writes all
+    of its diagnostics to stderr; this file was the one place that did not."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 class CheckoutError(RuntimeError):
@@ -138,10 +189,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
 
             def web_cart(app):
                 """GET web cart, return (sum, goods, raw)."""
-                wc = page.evaluate("""async (a) => {
-                    const r = await fetch('/api/supreme/lifestyle/api/grocery/cart?' + a.qs + '&appId=' + a.appId + '&origin=web,ib5,platform', {headers: {'Accept': 'application/json'}});
-                    return {status: r.status, body: await r.json().catch(() => ({}))};
-                }""", {"appId": app, "qs": GROCERY_WEB_QS})
+                wc = page.evaluate(_js("""
+                    return await _f('/api/supreme/lifestyle/api/grocery/cart?' + a.qs
+                        + '&appId=' + a.appId + '&origin=web,ib5,platform',
+                        {headers: {'Accept': 'application/json'}}, a.ms);
+                """), {"appId": app, "qs": GROCERY_WEB_QS, "ms": FETCH_TIMEOUT_MS})
                 body = wc.get("body", {}) or {}
                 cart = (body.get("payload") or {}).get("cart", {}) if isinstance(body, dict) else {}
                 s = cart.get("goodsSum", 0) or cart.get("sum", 0)
@@ -151,35 +203,50 @@ def checkout(session, app_id: str = "", point_id: str = "",
             # (replaces a blind sleep(8) — poll the cart endpoint until it answers
             # with goods, or ~10s timeout). #15
             page.goto(checkout_url, wait_until="domcontentloaded", timeout=30000)
-            _waited = 0
-            while _waited < 10000:
+            # Wait for the cart API to come UP, which is the actual readiness signal.
+            # The old loop waited for a NON-EMPTY cart, which conflates two different
+            # facts: "the page is not ready yet" and "the cart really is empty". A
+            # genuinely empty cart therefore burned the whole deadline and then
+            # reported a misleading error. Track both so the message can say which.
+            _waited, _answered, _g = 0, False, []
+            while _waited < CART_READY_TIMEOUT_MS:
                 try:
-                    _, _g, _ = web_cart(app_id)
+                    _, _g, _raw = web_cart(app_id)
+                    _answered = _raw.get("status") == 200
                 except Exception:
-                    _g = []
-                if _g:
+                    _answered, _g = False, []
+                if _answered:
                     break
-                time.sleep(0.5); _waited += 500
-            print(f"[checkout] page ready (cart API answered in ~{_waited}ms)")
+                time.sleep(CART_POLL_INTERVAL_MS / 1000.0)
+                _waited += CART_POLL_INTERVAL_MS
+            if not _answered:
+                raise CheckoutError(
+                    f"checkout page never brought its cart API up within "
+                    f"{CART_READY_TIMEOUT_MS} ms — no order was created, safe to retry")
+            _log(f"[checkout] cart API up after ~{_waited}ms")
 
             # 2. GET web cart → pre-delivery sum + goods
             pre_sum, goods, _ = web_cart(app_id)
             pre_count = len(goods)
             actual_sum = pre_sum or sum_val
-            print(f"[checkout] web cart (pre-delivery): sum={actual_sum} {pre_count} items")
+            _log(f"[checkout] web cart (pre-delivery): sum={actual_sum} {pre_count} items")
             if not goods:
-                raise CheckoutError("web cart is empty — cart sync failed or cart was cleared")
+                raise CheckoutError(
+                    "web cart is empty while its API is healthy — the mobile cart did "
+                    "not sync to web. Check grocery_cart(app_id, point_id) shows items "
+                    "for the SAME store, then retry; no order was created.")
 
             # 3. POST deliveries (appId + pointId) → CHECK status. Fire-and-forget
             # was the old bug: a delivery failure silently led to a stale sum + bad order.
             _t0 = time.time()
-            deliv = page.evaluate("""async (args) => {
-                const r = await fetch('/api/supreme/lifestyle/api/grocery/deliveries?' + args.qs + '&appId=' + args.appId + '&pointId=' + args.pointId, {
+            deliv = page.evaluate(_js("""
+                return await _f('/api/supreme/lifestyle/api/grocery/deliveries?' + a.qs
+                    + '&appId=' + a.appId + '&pointId=' + a.pointId, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({serviceKeys: ["FEE", "DYNAMIC_CASHBACK", "PICKING_CART_SUM"]})
-                });
-                return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", {"appId": app_id, "pointId": point_id, "qs": GROCERY_WEB_QS})
+                }, a.ms);
+            """), {"appId": app_id, "pointId": point_id, "qs": GROCERY_WEB_QS,
+                   "ms": FETCH_TIMEOUT_MS})
             _dur = int((time.time() - _t0) * 1000)
             dbody = deliv.get("body", {}) if isinstance(deliv, dict) else {}
             d_err = ""
@@ -193,7 +260,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if deliv.get("status", 0) >= 400 or d_err:
                 raise CheckoutError(
                     f"deliveries failed (http={deliv.get('status')}, err={d_err[:120]})")
-            print(f"[checkout] deliveries ok (http={deliv.get('status')})")
+            _log(f"[checkout] deliveries ok (http={deliv.get('status')})")
 
             # 4. post-delivery: the deliveries RESPONSE carries payload.cartPrice (weight
             # items recompute here — e.g. 1630.00 → 1600.20). Use it as the authoritative
@@ -210,21 +277,22 @@ def checkout(session, app_id: str = "", point_id: str = "",
             post_sum, post_goods, _ = web_cart(app_id)
             if cart_price:
                 if cart_price != actual_sum:
-                    print(f"[checkout] sum adjusted after delivery: {actual_sum} → {cart_price}")
+                    _log(f"[checkout] sum adjusted after delivery: {actual_sum} → {cart_price}")
                 actual_sum = cart_price
             elif post_sum:
                 actual_sum = post_sum
             if len(post_goods) < pre_count:
                 # items dropped after recalculation (out of stock?) — surface it
-                print(f"[checkout] WARN: item count changed {pre_count} → {len(post_goods)} after delivery")
+                _log(f"[checkout] WARN: item count changed {pre_count} → {len(post_goods)} after delivery")
             _safe_record(attempt_id, "delivery", "delivery_ready", amount=actual_sum)
 
             # 5. resolve the payment agreement + customer email from the capture-
             # verified endpoints (NOT a guess from list_accounts). #8/#9
-            agr_res = page.evaluate("""async (a) => {
-                const r = await fetch('/api/supreme/lifestyle/api/user/payment/account/last?' + a.qs + '&serviceName=GROCERY', {headers: {'Accept': 'application/json'}});
-                return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", {"qs": GROCERY_WEB_QS})
+            agr_res = page.evaluate(_js("""
+                return await _f('/api/supreme/lifestyle/api/user/payment/account/last?'
+                    + a.qs + '&serviceName=GROCERY',
+                    {headers: {'Accept': 'application/json'}}, a.ms);
+            """), {"qs": GROCERY_WEB_QS, "ms": FETCH_TIMEOUT_MS})
             agr_body = agr_res.get("body", {}) if isinstance(agr_res, dict) else {}
             agr_payload = agr_body.get("payload", {}) if isinstance(agr_body, dict) else {}
             agreement = (agr_payload.get("accountId") if isinstance(agr_payload, dict) else "") or account
@@ -233,10 +301,10 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if not agreement:
                 raise CheckoutError("no payment account: user/payment/account/last returned no accountId")
 
-            ci_res = page.evaluate("""async (a) => {
-                const r = await fetch('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?' + a.qs, {headers: {'Accept': 'application/json'}});
-                return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", {"qs": GROCERY_WEB_QS})
+            ci_res = page.evaluate(_js("""
+                return await _f('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?'
+                    + a.qs, {headers: {'Accept': 'application/json'}}, a.ms);
+            """), {"qs": GROCERY_WEB_QS, "ms": FETCH_TIMEOUT_MS})
             ci_body = ci_res.get("body", {}) if isinstance(ci_res, dict) else {}
             ci_email = ci_body.get("email") if isinstance(ci_body, dict) else ""
             if not ci_email and isinstance(ci_body, dict):
@@ -255,13 +323,13 @@ def checkout(session, app_id: str = "", point_id: str = "",
             # server's generic-exception handler treats it as UNKNOWN (no blind retry).
             _safe_record(attempt_id, "order_create", "order_posting", amount=actual_sum)
             _t0 = time.time()
-            order_res = page.evaluate("""async (a) => {
+            order_res = page.evaluate(_js("""
                 const o = JSON.parse(a.body);
-                const r = await fetch('/api/supreme/lifestyle/api/grocery/order/create?appId=' + o.appId + '&' + a.qs + '&sum=' + o.sum, {
+                return await _f('/api/supreme/lifestyle/api/grocery/order/create?appId='
+                    + o.appId + '&' + a.qs + '&sum=' + o.sum, {
                     method: 'POST', headers: {'Content-Type': 'application/json'}, body: a.body
-                });
-                return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", {"body": order_body, "qs": GROCERY_WEB_QS})
+                }, a.ms);
+            """), {"body": order_body, "qs": GROCERY_WEB_QS, "ms": FETCH_TIMEOUT_MS})
             _dur = int((time.time() - _t0) * 1000)
             obody = order_res.get("body", {}) if isinstance(order_res, dict) else {}
             order = obody.get("payload", {}).get("order", {}) if isinstance(obody, dict) else {}
@@ -282,7 +350,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
                     f"order/create returned no orderId (http={order_res.get('status')}, "
                     f"code={o_code}) — order may exist, do NOT retry blindly. "
                     f"See grocery_attempts()/diagnostics() for details.")
-            print(f"[checkout] order created: id={order_id}")
+            _log(f"[checkout] order created: id={order_id}")
             _safe_record(attempt_id, "order_create", "order_posted", order_id=order_id)
 
             # 7. POST payment_gate_pay IMMEDIATELY (before auto-cancel). agreement =
@@ -294,12 +362,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 "amount": {"type": "simple", "amount": actual_sum, "currencyCode": "643"},
             })
             _t0 = time.time()
-            pay_res = page.evaluate("""async (body) => {
-                const r = await fetch('/api/common/pg-api/v1/payment-gate/payments?origin=web,ib5,platform', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: body
-                });
-                return {status: r.status, body: await r.json().catch(() => ({}))};
-            }""", pay_body)
+            pay_res = page.evaluate(_js("""
+                return await _f('/api/common/pg-api/v1/payment-gate/payments?origin=web,ib5,platform', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: a.body
+                }, a.ms);
+            """), {"body": pay_body, "ms": FETCH_TIMEOUT_MS})
             _dur = int((time.time() - _t0) * 1000)
             pbody = pay_res.get("body", {}) if isinstance(pay_res, dict) else {}
             stage = pbody.get("stage", {}) if isinstance(pbody, dict) else {}
@@ -316,15 +383,50 @@ def checkout(session, app_id: str = "", point_id: str = "",
                              order_id=order_id, payment_id=payment_id)
                 return {"order_id": order_id, "payment_id": payment_id,
                         "status": status, "sum": actual_sum}
-            # Order exists but payment did not return SUCCESS → UNKNOWN. Retrying would
-            # create a duplicate order; the unpaid order auto-cancels, user reconciles. (#9/#10)
+
+            # Payment did not report SUCCESS — but that is not the same as "not paid".
+            # A timed-out or dropped payment fetch (status 0) is exactly the case where
+            # the money may have moved while we lost the answer. Before declaring the
+            # result UNKNOWN and blocking every retry, make the ONE read that settles
+            # it — the same order lookup the app itself uses for reconciliation.
+            order_state, paid = "", False
+            try:
+                chk = page.evaluate(_js("""
+                    return await _f('/api/supreme/lifestyle/api/grocery/order?' + a.qs
+                        + '&appId=' + a.appId + '&orderId=' + a.orderId,
+                        {headers: {'Accept': 'application/json'}}, a.ms);
+                """), {"appId": app_id, "orderId": order_id, "qs": GROCERY_WEB_QS,
+                       "ms": FETCH_TIMEOUT_MS})
+                cb = chk.get("body") or {}
+                o = (cb.get("payload") or {}).get("order") or cb.get("payload") or {}
+                order_state = str(o.get("status") or o.get("state") or "")
+                paid = bool(o.get("paid")) or order_state.upper() in ("PAID", "PAYED", "SUCCESS")
+            except Exception as e:
+                order_state = f"<lookup failed: {type(e).__name__}>"
+            obs.emit("payment_reconcile", attempt_id=attempt_id, order_id_present=bool(order_id),
+                     payment_status=status, order_state=order_state, paid=paid)
+
+            if paid:
+                # The gateway answer was lost, not the payment. Report the truth.
+                _safe_record(attempt_id, "payment", "paid",
+                             order_id=order_id, payment_id=payment_id)
+                _log(f"[checkout] payment answer lost (stage={status!r}) but order "
+                     f"{order_id} reads back as {order_state} — treating as paid")
+                return {"order_id": order_id, "payment_id": payment_id,
+                        "status": order_state or "PAID", "sum": actual_sum,
+                        "note": "confirmed by order lookup, not by the payment response"}
+
+            # Still unresolved. Retrying would create a duplicate order; the unpaid one
+            # auto-cancels and the user reconciles. (#9/#10)
             _safe_record(attempt_id, "payment", "unknown",
                          order_id=order_id, payment_id=payment_id,
                          http=pay_res.get("status"),
-                         payment_status=status,
+                         payment_status=status, order_state=order_state,
                          err=json.dumps(pbody, ensure_ascii=False)[:160])
             raise CheckoutUnknown(
                 f"payment not SUCCESS (order {order_id} exists, stage={status!r}, "
-                f"http={pay_res.get('status')}) — order may be unpaid/pending; do NOT retry blindly")
+                f"http={pay_res.get('status')}, order reads {order_state or 'unknown'!r}"
+                + (", the payment request TIMED OUT" if pay_res.get("timedOut") else "")
+                + ") — order may be unpaid/pending; do NOT retry blindly")
         finally:
             browser.close()

@@ -250,9 +250,14 @@ exhibition), `movie_main` (films only), `grocery`. Hits come back grouped by
 - `grocery_checkout` contract is verified against captures.xml: agreement from
   `user/payment/account/last`, clientEmail from `get-customer-information`,
   post-delivery sum from deliveries `payload.cartPrice`, and no blind sleep (it polls
-  the cart API instead). After an UNKNOWN result the auto-retry is BLOCKED — reconcile
-  via `grocery_attempts` + `grocery_order_status(order_id)`, and force only after the
-  user confirms no order exists.
+  the cart API until it answers). Every in-page request is bounded by an
+  AbortController — `page.evaluate` has no timeout of its own, and a hung fetch
+  between order/create and payment is the one place that must never stall.
+  If the payment answer is lost, the order is read back once before the result is
+  called unknown: a lost response is not an unpaid order. After a genuinely UNKNOWN
+  result the auto-retry is BLOCKED — reconcile via `grocery_attempts` +
+  `grocery_order_status(order_id)`, and force only after the user confirms no order
+  exists.
 - Diagnostics: checkout stages (delivery/order/payment) and session refresh emit
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
