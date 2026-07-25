@@ -483,17 +483,19 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
         order = payload.get("order", payload) if isinstance(payload, dict) else {}
         if not isinstance(order, dict):
             order = {}
-        def g(*keys):
-            for k in keys:
-                if order.get(k) is not None:
-                    return order.get(k)
-            return ""
-        pay = order.get("paymentInfo", {}) if isinstance(order, dict) else {}
-        status = g("status", "orderStatus", "paymentStatus")
-        summ = g("sum", "goodsSum", "amount") or (pay.get("amount") if isinstance(pay, dict) else "")
-        return (f"order={order_id} | status={status or '?'} | sum={summ or '?'} | "
-                f"service={g('serviceName')} | app={g('applicationName', 'appId')} | "
-                f"paid={bool(pay.get('paid')) if isinstance(pay, dict) else '?'}")
+        # Real schema (capture item 691, a genuinely placed+paid order):
+        # order.{id,status,paymentId,application{id,name},cart{sum,goodsSum,goods}}.
+        # There is NO paymentInfo and no top-level sum — reading those made every
+        # order look unpaid with an unknown sum. Payment is evidenced by paymentId,
+        # and CREATED_DYNAMIC is the NORMAL status of a placed order, not a failure.
+        cart = order.get("cart") or {}
+        app = order.get("application") or {}
+        status = order.get("status") or "?"
+        summ = cart.get("sum") or cart.get("goodsSum") or "?"
+        pay_id = order.get("paymentId") or ""
+        return (f"order={order_id} | status={status} | sum={summ} | "
+                f"app={app.get('name') or app.get('id') or '-'} | "
+                f"paymentId={pay_id or '-'} | paid={'yes' if pay_id else 'no payment id'}")
     except Exception as e:
         return _err(e)
 
