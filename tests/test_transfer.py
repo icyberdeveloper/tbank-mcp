@@ -231,6 +231,70 @@ def test_the_result_carries_what_the_agent_needs_next():
     print("  result: paymentId, account and amount returned instead of an argument echo")
 
 
+def test_filter_sections_refuse_to_pretend():
+    """get_data("providers") hits /providers/compatible/filter, which the app calls
+    with ?ids=fns-rf,… — with no ids it is a filter with no filter and returns
+    nothing. Silently answering "empty" taught the agent the user has no providers."""
+    from src.client import TbankApiError
+
+    class Sec(MobileSession):
+        def __init__(self):
+            self.seen = None
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            self.seen = (key, overrides)
+            return {"payload": {"providers": []}}
+
+    s = Sec()
+    for section in ("providers", "requisites"):
+        try:
+            s.get_data(section)
+            failures.append(f"get_data({section!r}) with no arg must raise, not return empty")
+        except TbankApiError as e:
+            check("ARG_REQUIRED" in str(e.result_code), f"wrong error for {section}: {e}")
+            check(len(str(e.message)) > 60,
+                  f"the error must explain what to pass for {section}: {e.message}")
+
+    s.get_data("providers", "fns-rf,gibdd-online-rf")
+    check(s.seen[1] == {"ids": "fns-rf,gibdd-online-rf"},
+          f"the ids must reach the query: {s.seen}")
+    s.get_data("requisites", "+79991234567")
+    check(s.seen[1] == {"pointer": "+79991234567"}, f"the pointer must reach the query: {s.seen}")
+
+    # A section that needs no argument keeps working unchanged.
+    s.get_data("loans")
+    check(s.seen == ("active_loans", None), f"a plain section must not gain a param: {s.seen}")
+    print("  get_data: filter sections demand their argument instead of faking an empty result")
+
+
+def test_payment_commission_rejects_a_body_it_cannot_use():
+    saved = server._require
+
+    class Stub(MobileSession):
+        def __init__(self):
+            self.seen = None
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def payment_commission(self, b=None):
+            self.seen = b
+            return {"commission": 0}
+
+    server._require = lambda: Stub()
+    try:
+        for bad, why in (("", "empty"), ("не json", "not json"), ('{"a": 1}', "no payParameters")):
+            out = server.payment_commission(bad)
+            check("payParameters" in out or "не JSON" in out,
+                  f"a {why} body must be explained, got: {out[:90]}")
+            check("Traceback" not in out, f"a {why} body must not raise: {out[:90]}")
+        ok = server.payment_commission('{"payParameters": {"account": "1"}}')
+        check("commission" in ok, f"a valid body must go through: {ok[:90]}")
+    finally:
+        server._require = saved
+    print("  payment_commission: a body it cannot use is explained, not thrown")
+
+
 def main():
     print("transfer money path:")
     test_body_matches_the_real_pay_request()
@@ -238,6 +302,8 @@ def main():
     test_the_chosen_account_is_the_one_debited()
     test_a_lost_transfer_blocks_the_next_identical_one()
     test_the_result_carries_what_the_agent_needs_next()
+    test_filter_sections_refuse_to_pretend()
+    test_payment_commission_rejects_a_body_it_cannot_use()
     if failures:
         print("\nFAILED:")
         for f in failures:

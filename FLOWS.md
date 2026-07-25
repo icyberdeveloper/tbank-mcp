@@ -91,16 +91,24 @@ You normally just call a read tool; the above runs under the hood. Call
    `pointerLinkId` per bank + `isDefaultBank`. **Required for a NEW (unsaved)
    recipient** before commission/transfer; if several banks and no default, ask the
    user which bank (never silently pick — wrong bank = money gone).
-2. `payment_commission(body)` → preview the fee (`payParameters`, same shape as
-   transfer — with the resolved `providerFields`, `paymentType:"Transfer"`,
-   `pointerType:"8276"`, `pointer:"+7…"`. Do NOT use the old `pointerType:"ACCOUNT"`,
-   the bank rejects it → INVALID_REQUEST_DATA).
+2. `payment_commission(body)` → preview the fee. `payParameters` with the resolved
+   `providerFields`, `pointerType:"8276"`, `pointer:"+7…"` — plus
+   **`paymentType:"Transfer"`, which commission REQUIRES and the transfer itself must
+   NOT carry**: it appears in every captured commission body and in none of the three
+   captured `/v1/pay` bodies. Do NOT use `pointerType:"ACCOUNT"`, the bank rejects it
+   → INVALID_REQUEST_DATA.
 3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
-   pointer_link_id)` → moves REAL money. The HMAC `x-api-signature` over `/v1/pay`
-   (base64(HMAC-SHA256(key=sessionid, msg=METHOD+path_tail+query+body))) is applied
-   INSIDE `transfer`. If the member fields are omitted, the recipient is AUTO-resolved
-   (default bank, or single match; several-without-default → `RECIPIENT_MULTIPLE_BANKS`).
-   `provider="transfer-inner"` for between-own-accounts.
+   pointer_link_id, from_account, force)` → moves REAL money. The HMAC
+   `x-api-signature` over `/v1/pay` (base64(HMAC-SHA256(key=sessionid,
+   msg=METHOD+path_tail+query+body))) is applied INSIDE `transfer`, over the query
+   too — so the device/anti-fraud block it sends is part of what gets signed.
+   `from_account` picks the debited account; omitted, it falls back to the first
+   Current RUB, which is a guess. If the member fields are omitted, the recipient is
+   AUTO-resolved (default bank, or single match; several-without-default →
+   `RECIPIENT_MULTIPLE_BANKS`). `provider="transfer-inner"` for between-own-accounts.
+   Returns `paymentId` — the only handle for `payment_receipt()`, unavailable later.
+   An unconfirmed outcome BLOCKS the next identical transfer; `force=True` retries
+   with the same `userPaymentId` so the bank sees a repeat, not a second payment.
 
 > Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
 > is cookie-only.

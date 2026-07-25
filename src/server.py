@@ -315,6 +315,9 @@ def list_accounts() -> str:
     try:
         s = _require(); s.ensure_fresh()
         accs = s.list_accounts()
+        if not accs:
+            return ("Счетов не найдено. Это НЕ ошибка запроса — сессия жива, банк "
+                    "вернул пустой список. Проверь session_status().")
         return "\n".join(f"- {a.get('id','?')} | {a.get('accountType','')} | "
             f"{a.get('name','')[:30]} | {(a.get('moneyAmount') or {}).get('value','?')} "
             f"{((a.get('currency') or {}).get('name','') if isinstance(a.get('currency'),dict) else a.get('currency',''))}"
@@ -373,7 +376,13 @@ def spending_categories(account_id: str, days: int = 30) -> str:
 @mcp.tool()
 def operations_histogram(account_id: str = "", days: int = 30,
                         period: str = "day", group_by: str = "category") -> str:
-    """Траты по периодам/категориям/мерчантам."""
+    """Траты, сгруппированные банком. Возвращает сырой JSON (дерево
+    summary + intervals[].aggregated[]); для готовой разбивки по категориям
+    бери spending_categories() — он это дерево уже разворачивает.
+
+    period: проверены «day» и «month». group_by: проверен «category».
+    Другие значения в захвате приложения не встречались — эндпоинт отвечает 400
+    на неизвестный enum, так что пробуй их только осознанно."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -383,15 +392,24 @@ def operations_histogram(account_id: str = "", days: int = 30,
         return _err(e)
 
 @mcp.tool()
-def get_data(section: str) -> str:
-    """Универсальный getter. section = subscriptions | credit_schedule | statements |
-    requisites | invoices | templates | contacts | providers | cards | loans | autopayments |
+def get_data(section: str, arg: str = "") -> str:
+    """Универсальный getter. section = subscriptions | credit_schedule | credit_rating |
+    statements | invoices | templates | contacts | cards | loans | autopayments |
     sbp | offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
     cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
-    pension | broker_margin | shared. (invest_portfolio/operations/securities — отдельные тулы.)"""
+    invest_offers | invest_yield | pension | broker_margin | shared | appointments.
+
+    Двум секциям НУЖЕН arg, иначе они возвращают пустоту (это фильтры):
+      providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
+                   Перечислить все провайдеры этим эндпоинтом нельзя, только найти
+                   известные по id.
+      requisites — arg = телефон. Обычно вместо этого нужен transfer_sbp_resolve(phone);
+                   а реквизиты СВОЕГО счёта — это account_requisites(account_id).
+
+    (invest_portfolio/operations/securities и account_requisites — отдельные тулы.)"""
     try:
         s = _require(); s.ensure_fresh()
-        return _json_out(s.get_data(section), 5000)
+        return _json_out(s.get_data(section, arg), 5000)
     except Exception as e:
         return _err(e)
 
@@ -404,6 +422,9 @@ def grocery_stores() -> str:
     try:
         s = _require(); s.ensure_fresh()
         stores = s.grocery_stores()
+        if not stores:
+            return ("Магазинов не найдено — вероятно, не задан адрес доставки в "
+                    "приложении. Без магазина grocery-тулы работать не будут.")
         return "\n".join(f"- {st['name']} appId={st['appId']} pointId={st['pointId']} "
             f"minSum={st.get('minOrderSum','')} cashback={st.get('cashback','')}%" for st in stores)
     except Exception as e:
@@ -702,6 +723,8 @@ def messenger_conversations() -> str:
                 f"{f' | непрочитано: {unread}' if unread else ''}"
                 f" | {(c.get('updatedAt') or '')[:16]}"
                 f"{' | ' + ' '.join(last.split())[:60] if last else ''}")
+        if not lines:
+            return "Чатов нет. Это не ошибка — мессенджер ответил пустым списком."
         return "\n".join(lines)
     except Exception as e:
         return _err(e)
@@ -731,11 +754,23 @@ def messenger_messages(conversation_id: str) -> str:
 
 @mcp.tool()
 def messenger_send(conversation_id: str, text: str) -> str:
-    """Отправить сообщение."""
+    """Отправить сообщение в чат — НЕОБРАТИМО, его прочитает живой человек
+    (обычно поддержка банка). Денег не двигает, но и отозвать нельзя.
+
+    Покажи пользователю текст и дождись согласия, прежде чем отправлять.
+    conversation_id — из messenger_conversations()."""
     try:
         s = _require(); s.ensure_fresh()
-        s.messenger_send(conversation_id, text)
-        return f"Sent: {text[:50]}"
+        res = s.messenger_send(conversation_id, text) or {}
+        # Echoing the argument back would say "sent" even if the API answered with
+        # an error envelope. Report what the server acknowledged.
+        mid = ""
+        if isinstance(res, dict):
+            payload = res.get("payload") if isinstance(res.get("payload"), dict) else res
+            mid = str(payload.get("id") or payload.get("messageId") or "")
+        return (f"Отправлено в чат {conversation_id}"
+                + (f", id сообщения {mid}" if mid else " (банк не вернул id сообщения)")
+                + f": «{text[:80]}»")
     except Exception as e:
         return _err(e)
 
@@ -906,10 +941,33 @@ def transfer(amount: float, to_account: str, description: str = "",
 
 @mcp.tool()
 def payment_commission(body: str = "") -> str:
-    """Предпросмотр комиссии (без денег)."""
+    """Предпросмотр комиссии (денег НЕ двигает). body обязателен — это JSON-строка.
+
+    Форма (сверена с захватом):
+      {"payParameters": {
+         "account": "<счёт списания из list_accounts()>",
+         "moneyAmount": 1500,
+         "currency": "RUB",
+         "paymentType": "Transfer",     // "Payment" для оплаты услуг
+         "provider": "p2p-anybank",     // или transfer-inner / id провайдера
+         "providerFields": { ... }      // для СБП — provider_fields из
+       }}                               // transfer_sbp_resolve(), как есть
+
+    НЕ пиши pointerType:"ACCOUNT" — банк отвечает INVALID_REQUEST_DATA.
+    paymentType здесь обязателен, хотя в самом переводе его быть НЕ должно."""
     try:
         s = _require(); s.ensure_fresh()
-        b = json.loads(body) if body else None
+        if not body.strip():
+            return ("body обязателен: JSON-строка с payParameters "
+                    "(account, moneyAmount, currency, paymentType, provider, "
+                    "providerFields). Смотри описание тула — там форма целиком.")
+        try:
+            b = json.loads(body)
+        except ValueError as e:
+            return f"body — не JSON ({e}). Ожидается {{\"payParameters\": {{...}}}}."
+        if not isinstance(b, dict) or "payParameters" not in b:
+            return ("В body нет ключа payParameters. Ожидается "
+                    "{\"payParameters\": {\"account\": …, \"moneyAmount\": …}}.")
         # via the client method — it form-encodes and defaults the isTransferStatus/
         # isUrgentTransfer flags. Calling _call_read directly posts JSON → 400.
         return _json_out(s.payment_commission(b), 1000)
@@ -941,8 +999,12 @@ def invest_portfolio(broker_account_id: str, days: int = 30) -> str:
 
 @mcp.tool()
 def invest_operations(broker_account_id: str, operation_type: str = "", limit: int = 50) -> str:
-    """Брокерские операции, новые сверху. operation_type — фильтр (пусто = все).
-    limit применяется и к запросу, и к выводу (0 = все, что вернул банк)."""
+    """Брокерские операции, новые сверху. limit применяется и к запросу, и к
+    выводу (0 = всё, что вернул банк).
+
+    operation_type — фильтр по типу; пусто = все. Список допустимых значений
+    банк нигде не отдаёт, а в захвате фильтр не использовался — так что сначала
+    вызови без него и посмотри, какие типы реально встречаются в ответе."""
     try:
         s = _require(); s.ensure_fresh()
         ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
@@ -1041,13 +1103,23 @@ def card_limits(ucid: str) -> str:
 @mcp.tool()
 def card_requisites(ucid: str, reveal: bool = False) -> str:
     """Реквизиты карты: держатель, срок, номер. ucid — из list_cards().
-    По умолчанию номер маскируется, а CVV не выводится вообще — это полные
-    платёжные данные. reveal=True показывает номер и CVV целиком."""
+
+    По умолчанию номер маскируется, а CVV не выводится вообще.
+    reveal=True выдаёт ПОЛНЫЙ номер и CVV — этого достаточно, чтобы платить картой.
+    Ставь его ТОЛЬКО когда пользователь явным текстом попросил показать полные
+    реквизиты, и предупреди, что они попадут в переписку. «Покажи мою карту» —
+    это не такая просьба."""
     try:
         s = _require(); s.ensure_client_session()
         c = s.card_credentials(ucid)
         if not c:
             return f"[ucid {ucid}] реквизиты не получены."
+        if reveal:
+            # Full PAN + CVV are about to enter the model's context and the user's
+            # transcript. Record THAT it happened (never the values) so the exposure
+            # is auditable after the fact — diagnostics() will show it.
+            from . import observability as obs
+            obs.emit("card_reveal", ucid_present=bool(ucid), pan_revealed=True)
         pan = str(c.get("cardNumber") or "")
         exp = str(c.get("expireDate") or "")
         exp_fmt = f"{exp[:2]}/{exp[2:]}" if len(exp) == 4 else exp
@@ -1055,6 +1127,7 @@ def card_requisites(ucid: str, reveal: bool = False) -> str:
         if reveal:
             out.append(f"Номер: {' '.join(pan[i:i+4] for i in range(0, len(pan), 4))}")
             out.append(f"CVV: {c.get('cvv2','?')}")
+            out.append("⚠️ Это полные платёжные данные — они теперь в переписке.")
         else:
             out.append(f"Номер: {pan[:4]} **** **** {pan[-4:]}" if len(pan) >= 8 else "Номер: скрыт")
             out.append("CVV: скрыт (reveal=True покажет номер и CVV)")

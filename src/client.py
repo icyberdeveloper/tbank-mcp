@@ -2610,11 +2610,19 @@ class MobileSession:
                                overrides={"paymentId": str(payment_id)})
         return data if isinstance(data, bytes) else bytes(data or b"")
 
-    def get_data(self, section: str) -> Any:
-        """Unified getter for banking data. section = one of:
-        subscriptions, credit_schedule, statements, requisites, invoices,
-        templates, contacts, providers, cards, finhealth, invest, bundles,
-        manager, loans, autopayments, sbp, offers, gifts, services."""
+    # Sections whose endpoint is a FILTER and returns nothing useful without an
+    # argument. `providers` hits /providers/compatible/filter, which the app calls as
+    # ?ids=fns-rf,gibdd-online-rf,… — with no ids it is a filter with no filter, so
+    # the tool could never list anything. `requisites` is the SBP pointer lookup and
+    # needs the phone.
+    _SECTION_ARG = {"providers": "ids", "requisites": "pointer"}
+
+    def get_data(self, section: str, arg: str = "") -> Any:
+        """Unified getter for banking data.
+
+        `arg` is required by the sections in _SECTION_ARG (providers → a
+        comma-separated id list; requisites → a phone). Passing it for any other
+        section is ignored."""
         _SECTIONS = {
             "subscriptions": "subscription_all", "subscription_bills": "subscription_all_bills",
             "credit_schedule": "credit_payment_schedule", "credit_rating": "credit_rating",
@@ -2645,6 +2653,20 @@ class MobileSession:
             # route through _call_userinfo, not the generic _call_read (which 401s).
             return self._call_userinfo()
         key = _SECTIONS.get(section.lower(), section)
+        arg_key = self._SECTION_ARG.get(section.lower())
+        if arg_key:
+            if not arg:
+                raise TbankApiError("ARG_REQUIRED",
+                    f"get_data('{section}') is a filter endpoint and returns nothing "
+                    f"without an argument: pass {arg_key}. "
+                    + ("Provider ids look like 'fns-rf', 'gibdd-online-rf' "
+                       "(capture-verified) — they cannot be enumerated through this "
+                       "endpoint, only looked up."
+                       if arg_key == "ids" else
+                       "For a recipient lookup prefer transfer_sbp_resolve(phone), "
+                       "which parses the same response; for YOUR OWN account details "
+                       "use account_requisites(account_id) — a different endpoint."))
+            return self._call_read(key, overrides={arg_key: arg})
         return self._call_read(key)
 
 
