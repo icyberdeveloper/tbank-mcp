@@ -54,7 +54,7 @@ def tool_names():
 # preamble; keeping the list here means adding a new internal reference is a conscious
 # act, not an accident.
 NOT_TOOLS = {
-    "pay", "group_pay", "payment_gate_pay", "grocery_goods", "grocery_cart_set",
+    "pay", "group_pay", "payment_gate_pay",
     "ensure_fresh", "ensure_client_session", "silent_relogin",
     "issueTokenBySSO", "grocery_order_create", "checkout_process_order",
     "login_cli", "nutrition", "python", "json", "getpass",
@@ -88,6 +88,46 @@ def test_documented_tools_exist():
                     f"{rel}:{line_no} tells the agent to call `{name}(...)`, "
                     f"which is not an MCP tool")
     print(f"  {len(tools)} tools; every `name()` in {len(doc_files())} docs resolves")
+
+
+def test_evals_only_ask_for_tools_that_exist():
+    """An eval is the spec for how the skill should behave, so a tool name in one is
+    an instruction too — and nothing was checking them. `portfolio(days=90)` sat in
+    the invest evals while the tool is `invest_portfolio(broker_account_id, days)`."""
+    import glob
+    tools = tool_names()
+    # No space before the paren: eval prose says «без query (или …)», which is not
+    # a call, while every real call is written name(...).
+    call = re.compile(r"\b([a-z][a-z0-9_]{3,})\(")
+    for path in sorted(glob.glob(os.path.join(ROOT, "skills", "*", "evals", "*.json"))):
+        rel = os.path.relpath(path, ROOT)
+        for name in set(call.findall(open(path, encoding="utf-8").read())):
+            check(name in tools or name in NOT_TOOLS,
+                  f"{rel} expects the agent to call {name}(...), which is not a tool")
+    print("  evals name only real tools")
+
+
+def test_the_marketplace_entry_matches_the_plugin():
+    """Two manifests describing the same thing drift: the marketplace card advertised
+    «6 skills» at version 0.1.0 while plugin.json shipped 10 at 0.1.1. Nobody counts
+    them by hand twice and gets it right twice, so it is asserted instead."""
+    import json as _json
+    market = os.path.join(ROOT, ".claude-plugin", "marketplace.json")
+    if not os.path.exists(market):
+        print("  marketplace.json absent — nothing to keep in sync")
+        return
+    m = _json.load(open(market, encoding="utf-8"))
+    p = _json.load(open(os.path.join(ROOT, "plugin.json"), encoding="utf-8"))
+    n = len(p.get("skills") or [])
+    check(m.get("metadata", {}).get("version") == p.get("version"),
+          f"marketplace version {m.get('metadata', {}).get('version')!r} != "
+          f"plugin version {p.get('version')!r}")
+    for entry in m.get("plugins") or []:
+        desc = entry.get("description", "")
+        found = re.findall(r"(\d+)\s+skills", desc)
+        check(found and int(found[0]) == n,
+              f"marketplace advertises {found or ['no']} skills, plugin.json ships {n}")
+    print(f"  marketplace.json agrees with plugin.json: v{p.get('version')}, {n} skills")
 
 
 def test_every_tool_is_documented():
@@ -216,6 +256,8 @@ def main():
     test_every_tool_is_documented()
     test_every_tool_is_reachable_from_a_skill()
     test_plugin_ships_every_skill()
+    test_evals_only_ask_for_tools_that_exist()
+    test_the_marketplace_entry_matches_the_plugin()
     test_flows_serves_every_section()
     test_flows_unknown_topic_is_actionable()
     test_money_tools_warn_in_the_description_the_agent_receives()

@@ -2279,8 +2279,11 @@ class MobileSession:
           NOT to pay — no real pay body carries it.
         between own accounts (provider='transfer-inner'): to_account = target account;
           providerFields = {'bankContract': to_account}.
-        by details (provider='transfer-legal'): use the low-level pay() tool with
-          explicit providerFields (bankBik/bankAcnt/inn/kpp/...) — not built here.
+        by details (provider='transfer-legal'): NOT supported. It needs explicit
+          providerFields (bankBik/bankAcnt/inn/kpp/...) and no capture shows the
+          shape, so there is nothing to replay. There is no lower-level tool to
+          fall back to either — the MCP exposes no raw pay(); this path belongs to
+          the app.
 
         `account` = the payer account id (from list_accounts). Empty falls back to the
         first Current RUB with a positive balance — which is a GUESS, and was
@@ -2301,9 +2304,12 @@ class MobileSession:
         if provider == "transfer-inner":
             pf = {"bankContract": to_account}
         elif provider == "transfer-legal":
-            raise TbankApiError("NO_TEMPLATE",
-                "transfer-legal needs explicit providerFields (bankBik/bankAcnt/inn/kpp/...) "
-                "— use the low-level pay(body) tool with a hand-built payParameters.")
+            raise TbankApiError("NOT_SUPPORTED",
+                "Перевод по банковским реквизитам (БИК/счёт/ИНН) через MCP не "
+                "реализован: нужны providerFields (bankBik/bankAcnt/inn/kpp/…), "
+                "формы которых нет ни в одном захвате, а угадывать тело платежа "
+                "нельзя. Низкоуровневого тула для этого тоже нет — отправь "
+                "пользователя платить в приложение.")
         else:  # p2p-anybank (phone / SBP)
             # The caller's CHOICE is the two ids. maskedFIO is a display name the
             # bank echoes back, not part of the routing — and requiring it here meant

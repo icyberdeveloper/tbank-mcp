@@ -403,9 +403,10 @@ def operations_histogram(account_id: str = "", days: int = 30,
     summary + intervals[].aggregated[]); для готовой разбивки по категориям
     бери spending_categories() — он это дерево уже разворачивает.
 
-    period: проверены «day» и «month». group_by: проверен «category».
-    Другие значения в захвате приложения не встречались — эндпоинт отвечает 400
-    на неизвестный enum, так что пробуй их только осознанно."""
+    В захвате приложения этот эндпоинт вызывался 27 раз и КАЖДЫЙ раз с
+    period=«day», group_by=«category» — только эта пара проверена. Любое другое
+    значение (в том числе «month») ничем не подтверждено, а на неизвестный enum
+    эндпоинт отвечает 400: пробуй осознанно и проверяй ответ."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -1101,9 +1102,10 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
     """Брокерские операции, новые сверху. limit применяется и к запросу, и к
     выводу (0 = всё, что вернул банк).
 
-    operation_type — фильтр по типу; пусто = все. Список допустимых значений
-    банк нигде не отдаёт, а в захвате фильтр не использовался — так что сначала
-    вызови без него и посмотри, какие типы реально встречаются в ответе."""
+    operation_type — фильтр по типу; пусто = все. Полного списка банк нигде не
+    отдаёт; в захвате приложения встретились ровно два значения — «payIn»
+    (пополнение) и «outMulti» (вывод). Всё остальное — догадка, поэтому сначала
+    вызови без фильтра и посмотри, какие типы реально пришли в ответе."""
     try:
         s = _require(); s.ensure_fresh()
         ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
@@ -1404,9 +1406,14 @@ def orders(kind: str = "", limit: int = 10) -> str:
             f = o.get("fields") or {}
             what = (f.get("eventName") or f.get("hotelName") or f.get("objectName")
                     or f.get("applicationName") or f.get("partnerName") or "")
+            # paymentId is on 338 of 563 captured order records and is the ONLY
+            # argument payment_receipt() takes — the docstring pointed here for it
+            # while this row printed the orderId and nothing else.
+            pay = o.get("paymentId")
             return (f"- {str(o.get('created',''))[:10]} | {o.get('objectType','?'):13} "
                     f"| {o.get('status','?'):15} | {o.get('amount','?'):>10} ₽ "
-                    f"| {what[:34]} | id={o.get('orderId','?')}")
+                    f"| {what[:34]} | id={o.get('orderId','?')}"
+                    + (f" | paymentId={pay}" if pay else ""))
         return _rows_out(picked, render, limit=limit, total=len(picked),
                          header="Заказы" + (f" ({kind})" if kind else ""))
     except Exception as e:
@@ -1687,7 +1694,10 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
 def cinema_search(query: str = "", city: str = "Москва", limit: int = 20) -> str:
     """Найти фильм в прокате и его eventId (нужен для cinema_schedule).
     query — часть названия; пусто = вся сегодняшняя афиша города (её видно
-    целиком только при limit=0 — по умолчанию показаны первые 20)."""
+    целиком только при limit=0 — по умолчанию показаны первые 20).
+    city — город афиши, по умолчанию Москва. Спроси пользователя, если он его
+    не назвал: молчаливая Москва даёт правдоподобный список чужого города.
+    Сам eventId от города не зависит."""
     try:
         s = _require(); s.ensure_fresh()
         movies, scanned, listing = s.cinema_movies(city=city, query=query)
@@ -1718,6 +1728,10 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
     """Сеансы фильма на дату. event_id — из cinema_search(), date — YYYY-MM-DD.
     cinema — подстрока названия кинотеатра ("каро 11"), around — время "17:00",
     window_min — допуск в минутах вокруг него.
+    city — город, по умолчанию Москва. Он же задаёт точку, от которой считается
+    расстояние до кинотеатров, поэтому передавай тот же город, что и в
+    cinema_search(): расписание Петербурга, отсортированное от центра Москвы,
+    выглядит правдоподобно и бессмысленно.
     Отдаёт objectId площадки и slotId каждого сеанса — оба нужны для
     cinema_seats() и cinema_book(), поодиночке бесполезны."""
     try:
@@ -2008,8 +2022,12 @@ def insurance_policies() -> str:
 
 @mcp.tool()
 def payment_receipt(payment_id: str, save_to: str = "") -> str:
-    """Скачать PDF-чек по операции. payment_id — поле paymentId из orders()
-    или из истории операций. save_to — путь файла (по умолчанию /tmp)."""
+    """Скачать PDF-чек по платежу. save_to — путь файла (по умолчанию /tmp).
+
+    payment_id берётся ровно из четырёх мест, других производителей нет:
+    orders() (поле paymentId в строке заказа), grocery_order_status(),
+    и ответы transfer() и ticket_pay(). В list_operations() его НЕТ —
+    операция и платёж нумеруются по-разному."""
     try:
         s = _require(); s.ensure_fresh()
         pdf = s.payment_receipt_pdf(payment_id)

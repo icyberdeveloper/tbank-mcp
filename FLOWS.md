@@ -11,7 +11,8 @@ for the list of topics. Reading the whole file is rarely what you want.
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
-> `grocery_goods`, `grocery_cart_set`, `active_loans` are NOT MCP tools).
+> `active_loans` are NOT MCP tools — and there is no raw `pay` to drop down to when
+> a flow is unsupported; unsupported means the app).
 
 ## 0. Bootstrap (first-time login)
 
@@ -54,8 +55,10 @@ You normally just call a read tool; the above runs under the hood. Call
 > return `NO_STORE_CONTEXT`, and mixing contexts makes the cart look empty. Keep app_id/pointId
 > identical across the whole add → cart → checkout flow.
 
-1. `grocery_goods(category_id, app_id, point_id, page)` → search catalog.
-   Requires: `sortBy=DEFAULT` (not `sort`), `onlyDirectGoods=false`, `categoryId`.
+1. `grocery_search(query, app_id, point_id)` → find goods by name and get their
+   `id`, which every cart call addresses them by. (`grocery_plan_order` does the
+   same for a whole shopping list at once, and `grocery_rank` sorts the hits —
+   see §10.)
 2. `grocery_add_to_cart` (adds) / `grocery_set_cart` (absolute counts, `count: 0` removes, `clear=True` empties) → both go through cart/set on the
    mobile API, which REPLACES the whole cart — there is no delete endpoint, so
    removing an item means resending the list without it. The `delivery` block it builds
@@ -121,8 +124,9 @@ You normally just call a read tool; the above runs under the hood. Call
 1. `messenger_unread()` → how many unread, and in which chats (by name).
 2. `messenger_conversations()` → list chats (find the support chat
    `conversationId`, e.g. title "Поддержка").
-3. `messenger_messages(conversation_id)` → read the chat history (newest first;
-   `direction`/`message_id` to page).
+3. `messenger_messages(conversation_id)` → the chat history, oldest first, with
+   author and time. It takes the id and nothing else: there is no paging argument,
+   so what it returns is the whole window the bank gives.
 4. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
    real support agent — not money, but not undoable either; say what you are
    about to send before sending it.
@@ -221,8 +225,11 @@ skill. The order here is the part you must not improvise:
 
 1. `cinema_search(query, city)` → `eventId` (city-independent). For concerts,
    theatre and exhibitions use `search_app(query, screen="afisha")` instead.
-2. `cinema_schedule(event_id, date, cinema="каро 11", around="17:00")` → showtimes
-   per venue, filtered by venue-name substring and a time window (`window_min`).
+2. `cinema_schedule(event_id, date, cinema="каро 11", around="17:00", city)` →
+   showtimes per venue, filtered by venue-name substring and a time window
+   (`window_min`). Pass the SAME `city` as in step 1 — it also anchors the
+   distance sort, and a Petersburg schedule ordered from the centre of Moscow
+   looks plausible and is nonsense. Default is Москва, silently.
    Concerts: `concert_schedule(event_id)` — their showings are not date-keyed.
    Take **both** `slotId` and `objectId`; a `slotId` without its venue is useless.
 3. `cinema_seats(event_id, slot_id, object_id, row, max_price, kind)` → free seats

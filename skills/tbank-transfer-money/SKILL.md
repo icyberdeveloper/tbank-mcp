@@ -14,7 +14,7 @@ description: |
 | Тул | Что делает |
 |---|---|
 | `list_accounts()` | Список счетов пользователя (источник) |
-| `get_data("requisites")` | Реквизиты счёта (номер, БИК — для входящих) |
+| `account_requisites(account_id)` | Реквизиты счёта (номер, БИК) — чтобы ПРИНЯТЬ перевод, а не отправить |
 | `transfer_sbp_resolve(phone)` | **Резолвинг получателя СБП по номеру (read-only, БЕЗ денег).** Возвращает банки получателя (маскированное имя + банк + isDefaultBank + bankMemberId/pointerLinkId). ОБЯЗАТЕЛЬНО для НОВОГО (несохранённого) получателя перед комиссией/переводом |
 | `payment_commission(body)` | Предпросмотр комиссии (БЕЗ денег) |
 | `transfer(amount, to_account, description, provider, bank_member_id, masked_fio, pointer_link_id, from_account, force)` | Перевод (подпись внутри). phone/СБП по умолчанию; `provider="transfer-inner"` — между своими счетами. Получатель резолвится АВТО-если поля не переданы |
