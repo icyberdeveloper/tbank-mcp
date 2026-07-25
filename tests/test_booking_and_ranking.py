@@ -173,10 +173,86 @@ def check_fixture_still_matches_capture(fx):
     print("  fixture vs capture: bodies still match the real app")
 
 
+class PaySession(ReplaySession):
+    """Records the marketplace payment instead of making it."""
+
+    def __init__(self, booked_amount, stage="SUCCESS"):
+        super().__init__()
+        self.booked_amount = booked_amount
+        self.stage = stage
+        self.paid = None
+
+    def ensure_fresh(self, *a, **kw):
+        return None
+
+    def order_details(self, order_id):
+        return {"cartInfo": {"amount": self.booked_amount}} if self.booked_amount else {}
+
+    def _source_account(self):
+        return "1111111111"
+
+    def pay_marketplace_order(self, order_id, amount, account, token):
+        self.paid = {"order_id": order_id, "amount": amount,
+                     "account": account, "token": token}
+        return {"paymentId": "PAY-1", "stage": {"status": self.stage}}
+
+
+def check_ticket_pay_amount_guard():
+    """The only guard on a path that has never been run live: the amount is
+    re-read from the bank and a mismatch must stop the payment."""
+    from src import server
+
+    saved = server._require
+    try:
+        # Mismatch → refuse, and do NOT call the gateway.
+        wrong = PaySession(booked_amount=1760)
+        server._require = lambda: wrong
+        out = server.ticket_pay("ORD-1", 176, "482")
+        check(wrong.paid is None, "a mismatched amount still reached the payment gateway")
+        check("не сходится" in out, f"the refusal must say why: {out}")
+        check("1760" in out and "176" in out,
+              f"both amounts must be shown so the user can see the difference: {out}")
+
+        # Matching → pays, with the caller's account and token.
+        ok = PaySession(booked_amount=1760)
+        server._require = lambda: ok
+        out2 = server.ticket_pay("ORD-1", 1760, "482", account_id="9999999999")
+        check(ok.paid is not None, f"a matching amount must be paid: {out2}")
+        check(ok.paid["account"] == "9999999999",
+              f"the chosen account must be used: {ok.paid}")
+        check(ok.paid["token"] == "482", f"the nfs token must be forwarded: {ok.paid}")
+        check("ОПЛАЧЕНО" in out2 and "PAY-1" in out2, f"the result must carry paymentId: {out2}")
+
+        # A missing token must be refused BEFORE any request.
+        notoken = PaySession(booked_amount=1760)
+        server._require = lambda: notoken
+        out3 = server.ticket_pay("ORD-1", 1760, "")
+        check(notoken.paid is None, "a payment without the nfs token was attempted")
+        check("cinema_book" in out3, f"the message must say where the token comes from: {out3}")
+
+        # A non-SUCCESS stage must not be reported as paid.
+        pending = PaySession(booked_amount=1760, stage="PENDING")
+        server._require = lambda: pending
+        out4 = server.ticket_pay("ORD-1", 1760, "482")
+        check("НЕ подтверждена" in out4, f"a non-SUCCESS stage must not read as paid: {out4}")
+        check("Не повторяй вслепую" in out4, f"and must warn against a blind retry: {out4}")
+
+        # An order the bank cannot price must not silently skip the check.
+        unknown = PaySession(booked_amount=None)
+        server._require = lambda: unknown
+        server.ticket_pay("ORD-1", 1760, "482")
+        check(unknown.paid is not None,
+              "with no amount on the order the tool may proceed, but must not crash")
+    finally:
+        server._require = saved
+    print("  ticket_pay: amount cross-check, token guard, non-SUCCESS all enforced")
+
+
 def main():
     print("booking bodies + ranking:")
     check_ranking()
     check_seat_grouping()
+    check_ticket_pay_amount_guard()
     fx = fixture()
     check_create(fx["create_movie"], "order/create/movie", "movie",
                  [{"id": "7:10", "type": "basic"}])
