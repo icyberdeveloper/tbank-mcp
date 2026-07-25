@@ -9,11 +9,11 @@
 - **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
   transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
   login
-- **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which
-  no OS ships and 13 of the 18 bank hosts need. Shipped in `ca/roots/`, pinned by
-  SHA-256. Leaf/intermediate rotation needs no action; a root rotation is a PEM drop
-  into `ca/roots/` (or `TBANK_EXTRA_CA`). Certificates are never learned from the
-  network — see the header of `src/tls.py`.
+- **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which no
+  OS ships and every `*.t-bank-app.ru` host needs — that is most of the 22 hosts this
+  MCP talks to. Shipped in `ca/roots/`, pinned by SHA-256. Leaf/intermediate rotation
+  needs no action; a root rotation is a PEM drop into `ca/roots/` (or `TBANK_EXTRA_CA`).
+  Certificates are never learned from the network — see the header of `src/tls.py`.
 - **Grocery checkout**: search → cart → order → pay (proven end-to-end)
 - **Secure login**: password/PIN stay OUT of the LLM context (local CLI or env var)
 
@@ -33,37 +33,41 @@ claude mcp add tbank -- ./.venv/bin/python -m src.server
 cp -r skills/* ~/.claude/skills/
 ```
 
-## 🔒 Login — БЕЗОПАСНО (пароль не попадает к агенту)
+## 🔒 Login — the password never reaches the agent
 
-Пароль и PIN — это секреты. Они **НЕ передаются в контекст модели (LLM)**.
-Логин выполняется локальным скриптом ИЛИ через env-переменную.
+The password and the PIN are secrets, and they are **not put into the model's
+context**. Logging in is done by a local script, or through an environment variable.
 
-### Способ 1 (рекомендуемый): локальный CLI
+### Option 1 (recommended): the local CLI
+
+The script asks for the password itself, via `getpass`, so it is never echoed to the
+terminal and never passes through the agent. Its prompts are in Russian, as shown:
 
 ```bash
 cd tbank-mcp
 
-# Пароль спросит скрипт (getpass — не отображается в терминале):
 .venv/bin/python login_cli.py +7XXXXXXXXXX
-# [1/3] login(+7XXXXXXXXXX) ... SMS отправлена
-# [2/3] SMS-код: ****        ← вводишь код из SMS (скрытый ввод)
-# [3/3] Пароль (не отображается): ****   ← вводишь пароль (скрытый ввод)
-# ✓ ГОТОВО! session.json сохранён (права 0600).
-#   Запусти Claude Code в этом репозитории.
-#   Пароль НЕ передан агенту — он работает с сохранённой сессией.
+# [1/3] login(+7XXXXXXXXXX) ...
+#     SMS отправлена
+# [2/3] SMS-код: ****                     ← the code from the SMS (hidden input)
+# [3/3] Пароль (не отображается): ****    ← your password (hidden input)
+#
+# ✓ ГОТОВО! Сессия сохранена: ~/.local/share/tbank-mcp/session.json (права 0600).
+#   MCP читает этот же файл — путь совпадает без ручной настройки.
 ```
 
-Или с паролем в env (CI/скрипты):
+Or with the password in the environment, for CI and scripts:
+
 ```bash
-TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +7XXXXXXXXXX
+TBANK_PASSWORD="your-password" .venv/bin/python login_cli.py +7XXXXXXXXXX
 ```
 
-После логина — **запусти Claude Code**. Агент видит сохранённую сессию и работает
-без пароля. Пароль никогда не попадает в контекст LLM.
+Then **start Claude Code**. The agent picks up the saved session and works without
+the password, which never enters the LLM context.
 
-### Способ 2: через агента (удобно, но пароль виден LLM)
+### Option 2: through the agent (convenient, but the LLM sees the password)
 
-Если тебе удобно передавать пароль агенту:
+If you are content to hand the password to the agent:
 
 ```
 > login(+7XXXXXXXXXX)
@@ -73,15 +77,15 @@ TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +7XXXXXXXXXX
 > confirm_password("YourPassword")
 ```
 
-⚠️ **Внимание:** пароль попадает в контекст модели и журналы вызовов.
-Для чувствительных аккаунтов используй Способ 1.
+⚠️ **Note:** the password ends up in the model's context and in call logs. For an
+account you care about, use Option 1.
 
-### Способ 3: env-переменная (CI/автоматизация)
+### Option 3: environment variables (CI / automation)
 
 ```bash
-export TBANK_PASSWORD="пароль"
+export TBANK_PASSWORD="your-password"
 export TBANK_PHONE="+7XXXXXXXXXX"
-# login() автоматически подхватит пароль из env после confirm_otp()
+# login() picks the password up from the environment after confirm_otp()
 ```
 
 ## Other agents (Codex, ChatGPT, Hermes, OpenClaw)
@@ -101,6 +105,8 @@ export TBANK_PHONE="+7XXXXXXXXXX"
 ## Tools
 
 Each tool's docstring is the reference — this table is only a map of the surface.
+The docstrings, the skills and everything the tools print are in Russian: the bank is
+Russian and so is the person reading the answer.
 
 | Group | Tools |
 |---|---|
@@ -121,7 +127,7 @@ Each tool's docstring is the reference — this table is only a map of the surfa
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
 
-Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`) require `app_id` + `point_id` taken from `grocery_stores()` — there's no silent default store, so add/cart/checkout always operate on the same cart (no more "Корзина пуста" after adding).
+Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`) require `app_id` + `point_id` taken from `grocery_stores()` — there's no silent default store, so add/cart/checkout always operate on the same cart, instead of reporting an empty one right after something was added to a different store's.
 
 ## Skills
 
@@ -130,8 +136,8 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank` | **Entry point** — what the bank can do and which skill handles it |
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
-| `tbank-bill-pay` | Topping up a phone (a P2P transfer). Service bills — ЖКХ, taxes, fines — are **not** implemented; the skill says so and points at the app |
-| `tbank-transfer-money` | P2P, СБП, account transfers |
+| `tbank-bill-pay` | Topping up a phone (a P2P transfer). Service bills — utilities, taxes, fines — are **not** implemented; the skill says so and points at the app |
+| `tbank-transfer-money` | P2P, SBP (СБП), account transfers |
 | `tbank-cards-documents` | Cards, limits, requisites, passport and other documents |
 | `tbank-messenger` | Bank chats and support |
 | `tbank-budget-analyzer` | Spending analysis, subscription audit, savings tips |
@@ -157,22 +163,29 @@ present the tests additionally check the fixtures have not drifted from it.
 
 ## Security
 
-- **`session.json`** — канонический путь `~/.local/share/tbank-mcp/session.json`
-  (переопределяется env `TBANK_SESSION`), права 0600 (owner-only). Содержит токены.
-  Один и тот же файл читают и `login_cli.py`, и MCP-сервер — без ручной настройки.
-  При старте MCP логирует только путь/размер/права доступа, без токенов и cookies.
-- **Пароль/PIN** — НЕ в git, НЕ в коде, НЕ в контексте LLM (если используешь login_cli.py).
+- **`session.json`** — canonical path `~/.local/share/tbank-mcp/session.json`
+  (override with `TBANK_SESSION`), mode 0600, owner-only. It holds tokens. Both
+  `login_cli.py` and the MCP server read the same file, so there is nothing to
+  configure. On start-up the MCP logs the path, size and permissions only — never a
+  token or a cookie.
+- **Password / PIN** — not in git, not in the code, and not in the LLM context if you
+  use `login_cli.py`.
 - **No secrets in the repo.** Two kinds of committed material look secret-adjacent and
   are not: `ca/roots/*.pem` are public CA root certificates, shipped on purpose and
   pinned by SHA-256 in `src/tls.py`; `tests/fixtures/*.json` are request contracts
   scrubbed from a real capture — real structure and protocol values, synthetic
   account, phone, address and device ids. The captures themselves are gitignored and
   never leave the machine.
-- **`events.jsonl` + `attempts.jsonl`** — redacted diagnostics-логи (`~/.local/share/tbank-mcp/`).
-  Содержат только step / http_status / blame / сумму / order id — никогда токены, cookies,
-  адрес, телефон, email, номера счетов. Безопасны для расшаривания при дебаге (читаются тулом `diagnostics`).
-- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) требуют подтверждения
-  конкретной суммы — просьба «купи» подтверждением не считается.
+- **`events.jsonl` + `attempts.jsonl`** — redacted diagnostics in
+  `~/.local/share/tbank-mcp/`. They carry step, http_status, blame, amount and order
+  id, and never tokens, cookies, addresses, phone numbers, emails or account numbers.
+  Safe to share while debugging; the `diagnostics` tool reads them.
+- **Device profile.** Payments carry a 3DS/anti-fraud block whose device facts —
+  screen size, locale, timezone — default to the device the traffic was captured
+  from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` / `TBANK_DEVICE_LANGUAGE` /
+  `TBANK_DEVICE_TIMEZONE` so your payments do not describe someone else's phone.
+- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) require confirmation of a
+  specific amount — "buy it" is not a confirmation.
 
 ## Disclaimer
 
