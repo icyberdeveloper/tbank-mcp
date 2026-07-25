@@ -114,6 +114,70 @@ class SessionExpired(TbankApiError):
 _LIVE_QUERY = {"sessionid", "wuid"}
 _LIVE_HEADERS = {"authorization", "cookie"}
 
+
+def delivery_eta(nearest: dict | None, now=None) -> tuple[float | None, str]:
+    """A store's nearest delivery slot as (minutes_until_it_lands, human_label).
+
+    `nearestTime` comes in two shapes and they are NOT interchangeable — in the
+    capture 55 of 80 retailers use one and 25 the other:
+
+      type=Relative — `from`/`to` are MINUTES as strings, and `from` is often ""
+        ("Самокат: to=15" means within 15 minutes).
+      type=Absolute — `from`/`to` are ISO-8601 TIMESTAMPS of a booked slot
+        ("METRO: 2026-07-22T08:00 → 11:00", i.e. tomorrow morning).
+
+    The old code formatted both as f"{from}-{to} min", which turned the majority
+    shape into "2026-07-22T08:00:00+03:00-2026-07-22T11:00:00+03:00 min" — an
+    absolute date range labelled as minutes. Nothing caught it because
+    grocery_stores() never printed the field.
+
+    Minutes are measured to the END of the window: that is the "you will have it by"
+    number, and it is the only figure comparable across both shapes. A store with no
+    slot, or whose window has already passed (stale data), returns None — which sorts
+    LAST in both directions, the same rule the nutrition ranking uses. Unknown is not
+    zero, and a stale slot must never win "fastest"."""
+    import datetime as _dt
+
+    nearest = nearest or {}
+    kind = str(nearest.get("type") or "")
+    raw_from, raw_to = nearest.get("from"), nearest.get("to")
+    if not raw_to:
+        return None, ""
+
+    if kind == "Absolute":
+        try:
+            end = _dt.datetime.fromisoformat(str(raw_to))
+            start = _dt.datetime.fromisoformat(str(raw_from)) if raw_from else None
+        except ValueError:
+            return None, ""
+        ref = (now if isinstance(now, _dt.datetime)
+               else _dt.datetime.fromtimestamp(now if now is not None else time.time(),
+                                               tz=end.tzinfo or _dt.timezone.utc))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=ref.tzinfo)
+        if start is not None and start.tzinfo is None:
+            start = start.replace(tzinfo=ref.tzinfo)
+        ref = ref.astimezone(end.tzinfo)
+        days = (end.date() - ref.date()).days
+        day = {0: "сегодня", 1: "завтра"}.get(days) or end.strftime("%d.%m")
+        span = (f"{start:%H:%M}–{end:%H:%M}" if start else f"до {end:%H:%M}")
+        label = f"{day} {span}"
+        minutes = (end - ref).total_seconds() / 60.0
+        return (minutes if minutes > 0 else None), label
+
+    # Relative (and anything else that carries plain numbers)
+    try:
+        to_min = float(str(raw_to).strip())
+    except ValueError:
+        return None, ""
+    try:
+        from_min = float(str(raw_from).strip()) if str(raw_from or "").strip() else None
+    except ValueError:
+        from_min = None
+    label = (f"{from_min:g}–{to_min:g} мин" if from_min is not None
+             else f"до {to_min:g} мин")
+    return to_min, label
+
 # iOS device OS version used in the mobile User-Agent, format
 # `iPhone/iOS(<ver>)/TCSMB/<appVersion>(<build>)`. Build is derived from
 # app_version, e.g. 7.31.6 -> 7*1_000_000 + 31*10_000 + 6*1_000 = 7316000.
@@ -1473,10 +1537,11 @@ class MobileSession:
                     # cart/set body — omitting it makes the backend reject the cart.
                     # This is the only endpoint that ever returns it.
                     area_id = str((ret.get("delivery", {}) or {}).get("areaId", "") or "")
+                    eta, window = delivery_eta(nearest)
                     if app_id and name:
                         stores.append({"appId": app_id, "name": name, "areaId": area_id,
                                        "pointId": point_id, "minOrderSum": min_sum,
-                                       "deliveryTime": f"{nearest.get('from','')}-{nearest.get('to','')} min" if nearest.get("to") else "",
+                                       "etaMin": eta, "deliveryWindow": window,
                                        "deliveryPrice": nearest.get("price", 0),
                                        "cashback": cashback.get("value", ""),
                                        "category": cat.get("name", "")})

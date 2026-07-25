@@ -440,17 +440,61 @@ def get_data(section: str, arg: str = "") -> str:
 
 # ── GROCERY ─────────────────────────────────────────────────
 
+STORE_SORT_KEYS = {"speed": "etaMin", "price": "deliveryPrice", "min_sum": "minOrderSum"}
+
+
+def _duration(minutes: float) -> str:
+    """A wait in the unit a person would say it in. «через ~1980 мин» is a number
+    nobody can read as "tomorrow afternoon"."""
+    if minutes < 90:
+        return f"через ~{int(minutes)} мин"
+    if minutes < 24 * 60:
+        return f"через ~{minutes / 60:.0f} ч"
+    return f"через ~{minutes / 1440:.0f} дн"
+
+
 @mcp.tool()
-def grocery_stores() -> str:
-    """Список магазинов (название, appId, доставка, кешбэк)."""
+def grocery_stores(sort_by: str = "", order: str = "asc") -> str:
+    """Магазины, доступные по адресу пользователя: appId/pointId (нужны всем
+    остальным grocery-тулам), окно ближайшей доставки, её цена, минимальная сумма
+    заказа и кешбэк.
+
+    Это ИНСТРУМЕНТ, а не политика: без sort_by порядок остаётся тем, что вернул
+    банк. Сортируй, только когда пользователь назвал критерий.
+
+    sort_by: speed (быстрее приедет) | price (дешевле доставка) | min_sum (ниже
+    минимальная сумма). order: asc | desc.
+
+    «Быстрее» считается по КОНЦУ ближайшего окна — «привезут не позже», — потому
+    что банк отдаёт два разных вида слота: «до 15 мин» и «завтра 08:00–11:00», и
+    сравнимы они только по этому числу. Магазины, у которых слота нет (или он уже
+    прошёл), уходят в КОНЕЦ и при asc, и при desc: «неизвестно» не равно нулю и не
+    должно выигрывать запрос «побыстрее»."""
     try:
         s = _require(); s.ensure_fresh()
+        key = sort_by.strip().lower()
+        if key and key not in STORE_SORT_KEYS:
+            return (f"Неизвестное поле сортировки {sort_by!r}. Доступны: "
+                    f"{', '.join(STORE_SORT_KEYS)} (или пусто — порядок банка).")
         stores = s.grocery_stores()
         if not stores:
             return ("Магазинов не найдено — вероятно, не задан адрес доставки в "
                     "приложении. Без магазина grocery-тулы работать не будут.")
-        return "\n".join(f"- {st['name']} appId={st['appId']} pointId={st['pointId']} "
-            f"minSum={st.get('minOrderSum','')} cashback={st.get('cashback','')}%" for st in stores)
+        rows = _rank_rows(stores, STORE_SORT_KEYS.get(key, ""), order)
+
+        def render(st):
+            eta = st.get("etaMin")
+            when = st.get("deliveryWindow") or "срок не указан"
+            # A relative window already reads in minutes («до 15 мин») — repeating
+            # the number adds nothing. An absolute one reads as a clock time, and
+            # «завтра 13:00–16:00» does not say how far away that is.
+            speed = (f"{when} ({_duration(eta)})"
+                     if eta is not None and not when.endswith("мин") else when)
+            return (f"- {st['name']} appId={st['appId']} pointId={st['pointId']} "
+                    f"| доставка: {speed}, {_money(st.get('deliveryPrice'), '₽')} "
+                    f"| minSum={st.get('minOrderSum', '')} "
+                    f"| cashback={st.get('cashback', '')}%")
+        return "\n".join(render(st) for st in rows)
     except Exception as e:
         return _err(e)
 

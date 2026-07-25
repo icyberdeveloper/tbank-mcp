@@ -152,6 +152,106 @@ def test_the_cart_prints_the_ids_it_must_be_edited_by():
     print("  grocery_cart: every good is printed with the id grocery_set_cart needs")
 
 
+def test_delivery_speed_is_read_from_both_slot_shapes():
+    """`nearestTime` comes in two shapes and they are not interchangeable — in the
+    capture 55 of 80 retailers use one and 25 the other:
+
+      Relative — from/to are MINUTES as strings ("Самокат: to=15").
+      Absolute — from/to are ISO-8601 TIMESTAMPS ("METRO: tomorrow 08:00–11:00").
+
+    The old code formatted both as f"{from}-{to} min", which turned the majority
+    shape into "2026-07-22T08:00:00+03:00-2026-07-22T11:00:00+03:00 min". Nothing
+    caught it because grocery_stores() never printed the field at all."""
+    import datetime as dt
+    from src.client import delivery_eta
+
+    tz = dt.timezone(dt.timedelta(hours=3))
+    now = dt.datetime(2026, 7, 22, 7, 0, tzinfo=tz)
+
+    eta, label = delivery_eta({"type": "Relative", "from": "", "to": "15"}, now)
+    check(eta == 15.0, f"a relative slot must give its minutes, got {eta!r}")
+    check(label == "до 15 мин", f"unexpected label: {label!r}")
+
+    eta, label = delivery_eta({"type": "Relative", "from": "20", "to": "35"}, now)
+    check(eta == 35.0, f"a range must be measured to its END, got {eta!r}")
+    check(label == "20–35 мин", f"unexpected label: {label!r}")
+
+    # The shape that used to be printed as an ISO range labelled "min".
+    eta, label = delivery_eta({"type": "Absolute",
+                               "from": "2026-07-22T08:00:00+03:00",
+                               "to": "2026-07-22T11:00:00+03:00"}, now)
+    check(eta == 240.0, f"an absolute slot must convert to minutes, got {eta!r}")
+    check(label == "сегодня 08:00–11:00", f"unexpected label: {label!r}")
+    check("T" not in label and "+03:00" not in label,
+          f"a raw timestamp leaked into the label: {label!r}")
+    check("мин" not in label,
+          f"an absolute slot must NOT be labelled in minutes: {label!r}")
+
+    eta, label = delivery_eta({"type": "Absolute",
+                               "from": "2026-07-23T13:00:00+03:00",
+                               "to": "2026-07-23T16:00:00+03:00"}, now)
+    check(eta == 1980.0 and label == "завтра 13:00–16:00",
+          f"next-day slot: {eta!r} {label!r}")
+
+    # Unknown, malformed and already-passed windows are all "no idea", never 0.
+    for junk, why in ((None, "no delivery block"), ({}, "empty block"),
+                      ({"type": "Relative", "from": "", "to": ""}, "no upper bound"),
+                      ({"type": "Absolute", "from": "", "to": "не дата"}, "garbage date"),
+                      ({"type": "Absolute", "from": "2026-07-21T09:00:00+03:00",
+                        "to": "2026-07-21T09:30:00+03:00"}, "window already passed")):
+        eta, _ = delivery_eta(junk, now)
+        check(eta is None, f"{why}: expected None, got {eta!r} — it would win «fastest»")
+    print("  delivery_eta: relative minutes and absolute slots, unknown stays unknown")
+
+
+def test_the_store_list_shows_and_sorts_by_delivery_speed():
+    """«Самая быстрая доставка» needs the tool to return the time at all — it did
+    not: the client parsed nearestTime and grocery_stores() printed only name, ids,
+    minSum and cashback."""
+    stores = [
+        {"appId": "578", "name": "Азбука Вкуса", "pointId": "2", "minOrderSum": 500.0,
+         "etaMin": 110.0, "deliveryWindow": "до 110 мин", "deliveryPrice": 0.0,
+         "cashback": 5},
+        {"appId": "590", "name": "Самокат", "pointId": "b7", "minOrderSum": 0.0,
+         "etaMin": 15.0, "deliveryWindow": "до 15 мин", "deliveryPrice": 0.0,
+         "cashback": 3},
+        {"appId": "246", "name": "METRO", "pointId": "0503", "minOrderSum": 2000.0,
+         "etaMin": 1980.0, "deliveryWindow": "завтра 08:00–11:00",
+         "deliveryPrice": 170.0, "cashback": 7},
+        {"appId": "11", "name": "Без слота", "pointId": "x", "minOrderSum": 0.0,
+         "etaMin": None, "deliveryWindow": "", "deliveryPrice": 0.0, "cashback": 0},
+    ]
+    names = lambda out: [ln.split()[1] for ln in out.splitlines() if ln.startswith("- ")]
+
+    plain = run(server.grocery_stores, Stub(grocery_stores=stores))
+    check("до 15 мин" in plain and "завтра 08:00–11:00" in plain,
+          f"the delivery window must be printed at all: {plain}")
+    check("170.00 ₽" in plain, f"the delivery price must be printed: {plain}")
+    check("срок не указан" in plain,
+          f"a store with no slot must say so, not show a blank: {plain}")
+    check(names(plain) == ["Азбука", "Самокат", "METRO", "Без"],
+          f"without sort_by the bank's order must survive: {names(plain)}")
+
+    fast = run(server.grocery_stores, Stub(grocery_stores=stores), "speed")
+    check(names(fast) == ["Самокат", "Азбука", "METRO", "Без"],
+          f"«fastest» must sort by the end of the window: {names(fast)}")
+
+    # Unknown stays last in BOTH directions — «no slot» is not «instant».
+    slow = run(server.grocery_stores, Stub(grocery_stores=stores), "speed", "desc")
+    check(names(slow)[-1] == "Без",
+          f"a store with no slot must stay last under desc too: {names(slow)}")
+
+    cheap = run(server.grocery_stores, Stub(grocery_stores=stores), "price")
+    check(names(cheap)[-1] == "METRO", f"price sort: {names(cheap)}")
+    small = run(server.grocery_stores, Stub(grocery_stores=stores), "min_sum")
+    check(names(small)[-1] == "METRO", f"min_sum sort: {names(small)}")
+
+    bad = run(server.grocery_stores, Stub(grocery_stores=stores), "быстро")
+    check("speed" in bad and "min_sum" in bad,
+          f"an unknown sort key must list the real ones: {bad!r}")
+    print("  grocery_stores: window and price shown, speed/price/min_sum sortable")
+
+
 def test_money_formatting_is_unambiguous():
     """A bare float used to fall through to str(), so every caller holding a plain
     number printed «1000.0» — no separator, no currency, easy to misread."""
@@ -182,6 +282,8 @@ def main():
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
+    test_delivery_speed_is_read_from_both_slot_shapes()
+    test_the_store_list_shows_and_sorts_by_delivery_speed()
     test_money_formatting_is_unambiguous()
     if failures:
         print("\nFAILED:")

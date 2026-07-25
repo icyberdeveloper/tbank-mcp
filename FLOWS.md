@@ -48,7 +48,10 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 3. Grocery cart assembly → order → pay  (Город) — PROVEN end-to-end
 
-> **Store context is mandatory.** Get `app_id`/`point_id` from `grocery_stores()` and pass
+> **Store context is mandatory.** Get `app_id`/`point_id` from
+> `grocery_stores(sort_by)` — which also reports each store's nearest delivery
+> window, its price and the minimum order, and sorts by `speed`/`price`/`min_sum`
+> when the user names a criterion — and pass
 > them to `grocery_search` / `grocery_plan_order` / `grocery_add_to_cart` /
 > `grocery_set_cart` / `grocery_cart` /
 > `grocery_checkout`. There is NO silent default store — without explicit context the tools
