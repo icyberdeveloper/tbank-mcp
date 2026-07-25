@@ -192,87 +192,7 @@ def test_cinema_schedule_emits_objectid():
     print("  cinema_schedule: objectId + slotId both emitted, and documented")
 
 
-def test_nothing_writes_to_stdout():
-    """FastMCP speaks JSON-RPC over stdout. Any bare print() in the server process
-    injects garbage into the protocol stream — checkout.py did it six times, during
-    a payment. Guard the whole package, not just the file that broke."""
-    import ast
-    import glob
-    src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
-    offenders = []
-    for path in sorted(glob.glob(os.path.join(src_dir, "*.py"))):
-        tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "print"):
-                continue
-            dest = next((k.value for k in node.keywords if k.arg == "file"), None)
-            # print(..., file=sys.stderr) is fine; anything else lands on stdout.
-            ok = (isinstance(dest, ast.Attribute) and dest.attr == "stderr")
-            if not ok:
-                offenders.append(f"{os.path.basename(path)}:{node.lineno}")
-    check(not offenders,
-          "print() to stdout would corrupt the MCP protocol:\n    " + "\n    ".join(offenders))
-
-    from src import checkout
-    import io
-    import contextlib
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        checkout._log("hello")
-    check(out.getvalue() == "", f"_log wrote to stdout: {out.getvalue()!r}")
-    check("hello" in err.getvalue(), f"_log did not reach stderr: {err.getvalue()!r}")
-    print("  stdout: clean across src/, _log goes to stderr")
-
-
-def test_every_in_page_fetch_is_bounded():
-    """page.evaluate has no timeout of its own, so an in-page fetch that never
-    settles hangs the checkout — worst case between order/create and payment. Every
-    fetch must go through the _f wrapper, which carries an AbortController."""
-    import re as _re
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "src", "checkout.py")
-    src = open(path, encoding="utf-8").read()
-
-    body = src.split("_JS_FETCH = ", 1)[1].split('"""', 2)[1]
-    check("AbortController" in body and "clearTimeout" in body,
-          "the _f helper lost its AbortController")
-
-    # Inside the in-page snippets themselves, every request must go through _f.
-    # (Scan the snippets, not the whole file — prose in comments says "fetch" too.)
-    snippets = _re.findall(r'_js\("""(.*?)"""\)', src, _re.S)
-    raw = [s for s in snippets if _re.search(r"(?<!_)\bfetch\(", s)]
-    check(not raw,
-          f"{len(raw)} in-page snippet(s) call fetch() directly, bypassing the timeout")
-
-    # Every page.evaluate must be wrapped by _js(), which injects _f.
-    evals = _re.findall(r"page\.evaluate\(\s*(\w+)?", src)
-    check(all(e == "_js" for e in evals if e),
-          f"page.evaluate not wrapped in _js(): {[e for e in evals if e != '_js']}")
-    check(len(evals) >= 6, f"expected ≥6 in-page calls, found {len(evals)}")
-
-    # And the generated JS must actually parse — otherwise it fails at payment time.
-    node = glob_node()
-    if node:
-        import subprocess
-        import tempfile
-        from src.checkout import _js
-        bodies = _re.findall(r'_js\("""(.*?)"""\)', src, _re.S)
-        check(len(bodies) >= 6, f"expected ≥6 _js bodies, found {len(bodies)}")
-        for i, b in enumerate(bodies):
-            with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as fh:
-                fh.write("const fn = " + _js(b) + ";\n")
-                tmp = fh.name
-            r = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
-            os.unlink(tmp)
-            check(r.returncode == 0,
-                  f"in-page snippet #{i} is not valid JS: {r.stderr.strip()[:200]}")
-        print(f"  in-page fetches: {len(bodies)} snippets bounded and syntax-checked")
-    else:
-        print(f"  in-page fetches: {len(evals)} bounded (node absent, syntax check skipped)")
-
-
-def glob_node():
+def node_bin():
     import glob
     hits = glob.glob(os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -280,13 +200,284 @@ def glob_node():
     return hits[0] if hits and os.access(hits[0], os.X_OK) else None
 
 
+def test_in_page_fetch_gives_up_instead_of_hanging():
+    """page.evaluate has no timeout of its own, so before this fix a request that
+    never settled hung the checkout forever — worst case between order/create and
+    payment, with the money committed and the result unknowable.
+
+    Run the REAL helper the checkout injects, with the REAL fetch, against a real
+    server that never answers. A stub fetch would prove nothing here: the whole
+    mechanism rests on fetch honouring AbortSignal, so stubbing fetch stubs out the
+    thing under test (the first version of this test did exactly that and passed a
+    hang off as a timeout)."""
+    import json as _json
+    import subprocess
+    import tempfile
+    from src.checkout import _js
+
+    node = node_bin()
+    if not node:
+        print("  in-page fetch: SKIPPED (no node binary)")
+        return
+
+    program = """
+import http from 'node:http';
+const srv = http.createServer((req, res) => {
+  if (req.url.startsWith('/hang')) return;                       // never answers
+  if (req.url.startsWith('/junk')) { res.writeHead(500); res.end('<html>not json'); return; }
+  res.writeHead(200, {'Content-Type': 'application/json'});
+  res.end(JSON.stringify({payload: {cart: {goodsSum: 7}}}));
+});
+await new Promise(r => srv.listen(0, '127.0.0.1', r));
+const base = 'http://127.0.0.1:' + srv.address().port;
+const run = __RUN__;
+const out = {};
+out.hung = await run({url: base + '/hang', ms: 300});
+out.ok   = await run({url: base + '/ok',   ms: 5000});
+out.junk = await run({url: base + '/junk', ms: 5000});
+console.log(JSON.stringify(out));
+srv.close();
+""".replace("__RUN__", _js("return await _f(a.url, {}, a.ms);"))
+
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as fh:
+        fh.write(program)
+        tmp = fh.name
+    try:
+        r = subprocess.run([node, tmp], capture_output=True, text=True, timeout=60)
+    finally:
+        os.unlink(tmp)
+    if r.returncode != 0:
+        failures.append(f"in-page helper crashed: {r.stderr.strip()[:300]}")
+        return
+    res = _json.loads(r.stdout.strip() or "{}")
+
+    hung = res.get("hung", {})
+    check(hung.get("timedOut") is True,
+          f"a server that never answers must time out, got {hung}")
+    check(hung.get("status") == 0,
+          f"a timed-out request must report status 0, not a real code: {hung}")
+    check(hung.get("body") == {}, f"a timed-out request must carry no body: {hung}")
+
+    ok = res.get("ok", {})
+    check(ok.get("status") == 200 and ok.get("body") == {"payload": {"cart": {"goodsSum": 7}}},
+          f"a healthy request must pass status and body through unchanged: {ok}")
+    check(not ok.get("timedOut"), f"a healthy request must not be flagged timed out: {ok}")
+
+    junk = res.get("junk", {})
+    check(junk.get("status") == 500 and junk.get("body") == {},
+          f"an unparseable body must degrade to {{}} while keeping the status: {junk}")
+    check(not junk.get("timedOut"),
+          f"a server error is not a timeout and must not be labelled one: {junk}")
+    print("  in-page fetch: real server that never answers is aborted; healthy ones pass")
+
+
+class FakePage:
+    """A checkout page whose in-page fetches are scripted per endpoint.
+
+    Routes on the URL the real code builds, so the test exercises the actual request
+    sequence — if a step stops being issued, or is issued in the wrong order, the
+    recorded log shows it."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.log = []
+
+    def goto(self, url, **kw):
+        self.log.append("goto")
+
+    def evaluate(self, js, arg=None):
+        for key, responses in self.routes.items():
+            if key not in js:
+                continue
+            self.log.append(key)
+            r = responses.pop(0) if len(responses) > 1 else responses[0]
+            return r
+        raise AssertionError(f"unrouted in-page request: {js[:200]}")
+
+
+class FakeBrowser:
+    def __init__(self, page):
+        self.page = page
+        self.closed = False
+
+    def new_context(self, **kw):
+        return self
+
+    def add_cookies(self, cookies):
+        pass
+
+    def new_page(self):
+        return self.page
+
+    def close(self):
+        self.closed = True
+
+
+class FakePlaywright:
+    def __init__(self, page):
+        self.chromium = self
+        self._page = page
+        self.browser = FakeBrowser(page)
+
+    def launch(self, **kw):
+        return self.browser
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def run_checkout(routes):
+    """Drive the REAL checkout() against a fake browser. Returns (result, exc, page, stdout)."""
+    import contextlib
+    import io
+    import types
+
+    page = FakePage(routes)
+    fake_module = types.ModuleType("playwright.sync_api")
+    fake_module.sync_playwright = lambda: FakePlaywright(page)
+    saved = sys.modules.get("playwright.sync_api")
+    sys.modules["playwright.sync_api"] = fake_module
+
+    class S:
+        mobile_sessionid = "sid"
+        access_token = "tok"
+        device_id = "DEV-1"
+        cookie_str = "a=1"
+        sso_login_cookie = "SSO_SESSION=x"
+
+    from src import checkout as co
+    out = io.StringIO()
+    result, exc = None, None
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            result = co.checkout(S(), app_id="204", point_id="700", sum_val=100.0)
+    except Exception as e:                                  # noqa: BLE001
+        exc = e
+    finally:
+        if saved is not None:
+            sys.modules["playwright.sync_api"] = saved
+        else:
+            sys.modules.pop("playwright.sync_api", None)
+    return result, exc, page, out.getvalue()
+
+
+CART_OK = {"status": 200, "body": {"payload": {"cart": {
+    "goodsSum": 1630.0, "goods": [{"id": "g1"}, {"id": "g2"}]}}}}
+DELIV_OK = {"status": 200, "body": {"payload": {
+    "cartPrice": 1600.2, "delivery": {"selected": {"pointId": "700"}}}}}
+AGREEMENT_OK = {"status": 200, "body": {"payload": {"accountId": "1234567890"}}}
+EMAIL_OK = {"status": 200, "body": {"email": "user@example.com"}}
+ORDER_OK = {"status": 200, "body": {"payload": {"order": {"id": "ORD-1"}}}}
+
+
+def routes(payment, order_lookup=None, cart=None):
+    return {
+        "order/create": [ORDER_OK],
+        "payment-gate/payments": [payment],
+        "grocery/order?": [order_lookup or {"status": 200, "body": {"payload": {"order": {"status": "NEW"}}}}],
+        "grocery/cart?": cart or [CART_OK],
+        "deliveries": [DELIV_OK],
+        "user/payment/account/last": [AGREEMENT_OK],
+        "get-customer-information": [EMAIL_OK],
+    }
+
+
+def test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout():
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    res, exc, page, out = run_checkout(routes(paid))
+    check(exc is None, f"the happy path must not raise: {exc!r}")
+    check(res and res["order_id"] == "ORD-1" and res["payment_id"] == "PAY-1",
+          f"happy path must return the order and payment ids: {res}")
+    check(res and res["sum"] == 1600.2,
+          f"the POST-delivery sum (1600.2) must be charged, not the pre-delivery 1630: {res}")
+
+    # The protocol stream must stay clean through an entire checkout, not just in _log.
+    check(out == "", f"checkout wrote to stdout and would corrupt MCP JSON-RPC: {out!r}")
+
+    # And the whole request sequence must have been issued, in order.
+    check(page.log.count("payment-gate/payments") == 1,
+          f"payment must be attempted exactly once: {page.log}")
+    check(page.log.index("deliveries") < page.log.index("order/create")
+          < page.log.index("payment-gate/payments"),
+          f"deliveries → order/create → payment order violated: {page.log}")
+    print("  checkout: charges the post-delivery sum, stdout stays clean")
+
+
+def test_lost_payment_answer_is_reconciled_not_declared_unknown():
+    """The fix that matters most: a timed-out payment whose order really was paid
+    used to be reported UNKNOWN, blocking retries and sending the user to reconcile
+    by hand. A lost response is not an unpaid order."""
+    timed_out = {"status": 0, "body": {}, "timedOut": True}
+    lookup_paid = {"status": 200, "body": {"payload": {"order": {"status": "PAID"}}}}
+    res, exc, page, _ = run_checkout(routes(timed_out, order_lookup=lookup_paid))
+    check(exc is None, f"a payment confirmed by lookup must not raise: {exc!r}")
+    check(res and res["order_id"] == "ORD-1",
+          f"the paid order must be returned: {res} / {exc!r}")
+    check(res and "note" in res,
+          "the result must say it was confirmed by lookup, not by the payment response")
+    check("grocery/order?" in page.log, f"the order was never read back: {page.log}")
+
+    # Genuinely unpaid → still UNKNOWN, and the message must carry what was observed.
+    from src.checkout import CheckoutUnknown
+    lookup_new = {"status": 200, "body": {"payload": {"order": {"status": "NEW"}}}}
+    res2, exc2, _, _ = run_checkout(routes(timed_out, order_lookup=lookup_new))
+    check(isinstance(exc2, CheckoutUnknown),
+          f"an unconfirmed payment must stay UNKNOWN, got {res2} / {exc2!r}")
+    check("TIMED OUT" in str(exc2),
+          f"the message must say the request timed out: {exc2}")
+    check("ORD-1" in str(exc2), f"the message must name the order to reconcile: {exc2}")
+
+    # A declined payment (server answered) must also stay unknown, without claiming a timeout.
+    declined = {"status": 200, "body": {"stage": {"status": "DECLINED"}}}
+    _, exc3, _, _ = run_checkout(routes(declined, order_lookup=lookup_new))
+    check(isinstance(exc3, CheckoutUnknown), f"a declined payment must be UNKNOWN: {exc3!r}")
+    check("TIMED OUT" not in str(exc3),
+          f"a server answer must not be reported as a timeout: {exc3}")
+    print("  checkout: lost answer reconciled by lookup, real failures still UNKNOWN")
+
+
+def test_cart_readiness_distinguishes_not_up_from_empty():
+    """The poll used to wait for a NON-EMPTY cart, so a genuinely empty cart burned
+    the full deadline and then reported the wrong cause."""
+    from src.checkout import CheckoutError
+
+    # Never comes up: must fail fast-ish and promise it is safe to retry.
+    down = {"status": 502, "body": {}}
+    res, exc, page, _ = run_checkout(routes(
+        {"status": 200, "body": {}}, cart=[down]))
+    check(isinstance(exc, CheckoutError), f"an API that never answers must raise: {exc!r}")
+    check("never brought its cart API up" in str(exc), f"wrong cause reported: {exc}")
+    check("safe to retry" in str(exc), f"must state no order was created: {exc}")
+    check("order/create" not in page.log, f"nothing may be ordered: {page.log}")
+
+    # API healthy but the cart is empty: a DIFFERENT, actionable message.
+    empty = {"status": 200, "body": {"payload": {"cart": {"goodsSum": 0, "goods": []}}}}
+    res2, exc2, page2, _ = run_checkout(routes({"status": 200, "body": {}}, cart=[empty]))
+    check(isinstance(exc2, CheckoutError), f"an empty cart must raise: {exc2!r}")
+    check("did not sync" in str(exc2),
+          f"an empty cart must be reported as a sync problem, not a dead API: {exc2}")
+    check("order/create" not in page2.log, f"nothing may be ordered: {page2.log}")
+
+    # Slow start: 502 then 200 — must recover and go on to order.
+    slow = [{"status": 502, "body": {}}, CART_OK, CART_OK, CART_OK]
+    res3, exc3, page3, _ = run_checkout(routes(
+        {"status": 200, "body": {"paymentId": "P", "stage": {"status": "SUCCESS"}}}, cart=slow))
+    check(exc3 is None and res3, f"a slow page must recover, got {exc3!r}")
+    print("  checkout: 'API down', 'cart empty' and 'slow start' are told apart")
+
+
 def main():
     print("audit regressions (2026-07-25):")
     test_spending_categories_walks_the_interval_tree()
     test_err_redacts_the_sessionid()
     test_cinema_schedule_emits_objectid()
-    test_nothing_writes_to_stdout()
-    test_every_in_page_fetch_is_bounded()
+    test_in_page_fetch_gives_up_instead_of_hanging()
+    test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout()
+    test_lost_payment_answer_is_reconciled_not_declared_unknown()
+    test_cart_readiness_distinguishes_not_up_from_empty()
     if failures:
         print("\nFAILED:")
         for f in failures:

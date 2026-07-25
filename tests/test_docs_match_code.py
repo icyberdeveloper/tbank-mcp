@@ -31,18 +31,22 @@ def check(cond, msg):
         failures.append(msg)
 
 
+def registered_tools():
+    """The tools the MCP server actually serves, from its live registry.
+
+    Not a scan of the source: this is the same list a connected agent receives, so a
+    tool that fails to register (bad signature, decorator dropped, import error) is a
+    miss here even though the `def` is still sitting in the file."""
+    import asyncio
+    import inspect
+    listed = server.mcp._tool_manager.list_tools()
+    if inspect.isawaitable(listed):
+        listed = asyncio.run(listed)
+    return {t.name: t for t in listed}
+
+
 def tool_names():
-    """The @mcp.tool()-decorated function names in server.py."""
-    src = open(os.path.join(ROOT, "src", "server.py"), encoding="utf-8").read().splitlines()
-    names = set()
-    for i, line in enumerate(src):
-        if line.startswith("@mcp.tool"):
-            for j in range(i + 1, min(i + 4, len(src))):
-                m = re.match(r"(?:async )?def (\w+)", src[j])
-                if m:
-                    names.add(m.group(1))
-                    break
-    return names
+    return set(registered_tools())
 
 
 # Names the documents mention on purpose while stating they are NOT tools: internal
@@ -142,18 +146,20 @@ def test_flows_unknown_topic_is_actionable():
     print("  flows(): unknown topic answers with the list of real topics")
 
 
-def test_money_tools_warn_in_their_own_docstring():
-    """A skill may not be loaded. The tool's own docstring is the last line of
-    defence before a real charge."""
+def test_money_tools_warn_in_the_description_the_agent_receives():
+    """A skill may not be loaded. The description the MCP actually ships with the
+    tool is the last line of defence before a real charge — so assert on that, not
+    on the docstring in the file."""
+    tools = registered_tools()
     for name in ("transfer", "grocery_checkout", "ticket_pay"):
-        fn = getattr(server, name, None)
-        check(fn is not None, f"money tool {name} is missing entirely")
-        if fn is None:
+        t = tools.get(name)
+        check(t is not None, f"money tool {name} is not registered with the server")
+        if t is None:
             continue
-        doc = (fn.__doc__ or "").upper()
-        check("РЕАЛЬН" in doc or "REAL" in doc,
-              f"{name}'s docstring never says the money is real: {fn.__doc__!r}")
-    print("  money tools: transfer / grocery_checkout / ticket_pay all warn in-docstring")
+        desc = (t.description or "").upper()
+        check("РЕАЛЬН" in desc or "REAL" in desc,
+              f"{name}'s shipped description never says the money is real: {t.description!r}")
+    print("  money tools: the descriptions shipped to the agent all warn about real money")
 
 
 def main():
@@ -162,7 +168,7 @@ def main():
     test_every_tool_is_documented()
     test_flows_serves_every_section()
     test_flows_unknown_topic_is_actionable()
-    test_money_tools_warn_in_their_own_docstring()
+    test_money_tools_warn_in_the_description_the_agent_receives()
     if failures:
         print("\nFAILED:")
         for f in failures:
