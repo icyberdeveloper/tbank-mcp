@@ -229,6 +229,95 @@ def test_limit_zero_means_everything_in_every_list_tool():
     print("  limit=0 means «all» in card_operations and orders, as in list_operations")
 
 
+class AnySession(MobileSession):
+    """Answers whatever the tool under test asks for with one canned value."""
+
+    def __init__(self, **answers):
+        self._memo = {}
+        for name, value in answers.items():
+            setattr(self, name, (lambda v: (lambda *a, **kw: v))(value))
+
+    def ensure_fresh(self, *a, **kw):
+        return None
+
+    def ensure_client_session(self, *a, **kw):
+        return None
+
+
+# One payload big enough to overflow every limit in use (1000 … 5000 chars).
+BIG = {"records": [{"id": f"r-{i}", "name": "Запись " + "я" * 50, "amount": 100 + i}
+                   for i in range(200)]}
+MANY = [{"date": f"2026-07-{(i % 28) + 1:02d}", "amount": {"value": 100 + i},
+         "description": f"Операция номер {i}"} for i in range(200)]
+
+# Every tool that can answer with more than it shows. The point is coverage of the
+# CALL SITES: _json_out and _rows_out were pinned by direct unit tests plus a single
+# tool, so reverting get_data or invest_operations to a bare slice broke nothing.
+JSON_TOOLS = [
+    ("session_status", lambda: server.session_status(),
+     AnySession(session_status=BIG)),
+    ("operations_histogram", lambda: server.operations_histogram("1111111111", 30),
+     AnySession(operations_histogram=BIG)),
+    ("get_data", lambda: server.get_data("subscriptions"),
+     AnySession(get_data=BIG)),
+    ("payment_commission",
+     lambda: server.payment_commission('{"payParameters": {"moneyAmount": 1}}'),
+     AnySession(payment_commission=BIG)),
+    ("invest_portfolio", lambda: server.invest_portfolio("2000000001", 30),
+     AnySession(invest_portfolio=BIG)),
+]
+ROW_TOOLS = [
+    ("list_operations", lambda lim: server.list_operations("1111111111", 30, lim),
+     AnySession(list_operations=MANY)),
+    ("invest_operations", lambda lim: server.invest_operations("2000000001", "", lim),
+     AnySession(invest_operations=MANY)),
+    ("cinema_search", lambda lim: server.cinema_search("", "Москва", lim),
+     AnySession(cinema_movies=([{"name": f"Фильм {i}", "eventId": str(i)}
+                                for i in range(200)], 200, 200))),
+]
+
+
+def test_every_json_tool_trims_by_records_not_by_characters():
+    saved = server._require
+    try:
+        for name, call, session in JSON_TOOLS:
+            server._require = lambda s=session: s
+            out = call()
+            check(out.startswith("# ПОКАЗАНО"),
+                  f"{name} did not go through _json_out — a raw slice? {out[:100]!r}")
+            parsed = trimmed_body(out)
+            check(parsed is not None, f"{name} returned unparseable JSON: {out[:100]!r}")
+            if parsed is not None:
+                kept = len(parsed.get("records", []))
+                check(0 < kept < 200, f"{name} kept {kept} of 200 records")
+                check(f"из 200" in out,
+                      f"{name} must state the true total: {out.splitlines()[0]}")
+    finally:
+        server._require = saved
+    print(f"  {len(JSON_TOOLS)} JSON tools trim whole records and report the total")
+
+
+def test_every_row_tool_reports_what_it_hides():
+    saved = server._require
+    try:
+        for name, call, session in ROW_TOOLS:
+            server._require = lambda s=session: s
+            head = (call(5).splitlines() or [""])[0]
+            check("200 всего" in head and "показано 5" in head,
+                  f"{name} hides its truncation: {head!r}")
+            # Either wording is fine — cinema_search suggests narrowing the query
+            # instead of asking for 200 films — as long as the agent is told of a
+            # concrete argument that widens the window.
+            check("limit=200" in head or "limit=0" in head,
+                  f"{name} does not say how to get the rest: {head!r}")
+            rows = [ln for ln in call(0).splitlines() if ln.startswith("- ")]
+            check(len(rows) == 200,
+                  f"{name}(limit=0) returned {len(rows)} rows, expected all 200")
+    finally:
+        server._require = saved
+    print(f"  {len(ROW_TOOLS)} row tools state their total and honour limit=0")
+
+
 def test_real_capture_payload_survives():
     """The concrete case from the audit: 8 subscriptions must not become 6."""
     cap = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
@@ -275,6 +364,8 @@ def main():
     test_list_tools_report_the_total_they_are_hiding()
     test_list_operations_end_to_end()
     test_limit_zero_means_everything_in_every_list_tool()
+    test_every_json_tool_trims_by_records_not_by_characters()
+    test_every_row_tool_reports_what_it_hides()
     test_real_capture_payload_survives()
     if failures:
         print("\nFAILED:")

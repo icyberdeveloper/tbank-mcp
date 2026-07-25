@@ -104,8 +104,15 @@ def test_conversation_ids_survive_intact():
     out = run(server.messenger_conversations, Stub(messenger_conversations=convs))
     check(long_id in out,
           "the conversationId was truncated — it is the argument to messenger_messages")
-    check("…" not in out.split("id=")[1].split(" ")[0] if "id=" in out else True,
-          f"no ellipsis may appear inside an id: {out}")
+    # Written as `… if "id=" in out else True`, this could not fail: rename the label
+    # and the assertion evaluates to True having checked nothing — the one shape a
+    # test must never have. Assert the ids are THERE, then that they are intact.
+    ids = re.findall(r"id=(\S+)", out)
+    check(len(ids) == 2, f"every chat must be printed with its id, got {ids}")
+    check(all("…" not in i and "..." not in i for i in ids),
+          f"an id was elided — it cannot be passed to messenger_messages: {ids}")
+    check(ids[:1] == [long_id],
+          f"the id must be the conversationId verbatim: {ids[:1]}")
     check("Поддержка" in out, f"the chat title must be shown: {out}")
     check("Бот доставки" in out,
           f"a bot chat has no title — its name comes from the member: {out}")

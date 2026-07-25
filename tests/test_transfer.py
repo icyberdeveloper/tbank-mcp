@@ -47,9 +47,45 @@ def check(cond, msg):
         failures.append(msg)
 
 
+CAPTURE = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
+
+
 def fixture():
     with open(FIXTURE, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def test_the_fixture_still_matches_the_capture():
+    """Everything below is checked against fixtures/transfer.json. That file is a
+    scrub of one real signed /v1/pay, and the two OTHER fixtures each guard
+    themselves against drifting away from the capture — this one did not, so the
+    whole /v1/pay contract rested on a snapshot nothing re-derived.
+
+    Regenerating is deterministic (the scrub substitutes fixed values), so the check
+    is simply: does regen produce what is committed? A mismatch means either the app
+    changed its request or the scrub changed, and both want a human, not a silent
+    pass. Runs only where the capture lives — the assertions below run everywhere."""
+    if not os.path.exists(CAPTURE):
+        print(f"  (capture absent at {CAPTURE} — fixture-vs-capture drift check "
+              f"skipped; the contract below was still verified against the fixture)")
+        return
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fixtures"))
+    import regen                                            # noqa: E402
+    regen.T.CAPTURE = CAPTURE
+    try:
+        fresh = regen.build_transfer()
+    except Exception as e:                                  # noqa: BLE001
+        failures.append(f"transfer.json can no longer be regenerated from the "
+                        f"capture ({type(e).__name__}: {e})")
+        return
+    mine = fixture()
+    for key in ("query_keys", "form_keys", "query_static", "pay_parameters"):
+        check(mine.get(key) == fresh.get(key),
+              f"fixtures/transfer.json {key} drifted from captures.xml #1477 — "
+              f"rerun tests/fixtures/regen.py and read the diff before committing "
+              f"(fixture={mine.get(key)!r} capture={fresh.get(key)!r})")
+    print("  fixture vs capture: /v1/pay keys and protocol constants still match")
 
 
 class CaptureSession(MobileSession):
@@ -410,6 +446,7 @@ def test_the_recipient_bank_the_user_picked_is_the_one_used():
 
 def main():
     print("transfer money path:")
+    test_the_fixture_still_matches_the_capture()
     test_body_matches_the_real_pay_request()
     test_description_reaches_the_recipient()
     test_the_chosen_account_is_the_one_debited()
