@@ -248,9 +248,17 @@ skill. The order here is the part you must not improvise:
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
 
-> Cancellation (`ticket_cancel`) is NOT proven: both paths answered 500 in the
-> capture. On error the order status is UNKNOWN, not "still booked" — check
-> `orders("афиша")` before doing anything else, and never retry blind.
+7. `ticket_cancel(order_id, kind, payment_id)` → cancels. `paymentId` goes in the
+   query **next to** `orderId` and is resolved from `orders()` when the caller
+   omits it. With it missing the host still answers `200 {"status":"Success"}`
+   while the order stays active and nothing is refunded — a success message is
+   not evidence of a cancellation. A paid order settles as
+   **PARTIALLY_CANCELED**: tickets refunded, service fee kept.
+
+> On error the order status is UNKNOWN, not "still booked" — check
+> `orders("афиша")` and the refund in `list_operations()` before doing anything
+> else, and never retry blind. (The earlier 500s in `captures.xml` read as a
+> broken endpoint; the path works, it was the missing `paymentId`.)
 
 ## 12. Global search across the app
 

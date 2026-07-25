@@ -2333,10 +2333,52 @@ class MobileSession:
     def _grocery_cart_write(self, goods: list[dict], app_id: str, delivery: dict) -> dict:
         """POST the FULL goods list. cart/set replaces the cart wholesale — that is
         also how the app removes an item: capture item [369] posts 6 goods, [375]
-        posts 5 after a removal. There is no delete endpoint."""
+        posts 5 after a removal. There is no delete endpoint.
+
+        `cartSetMode` escalates exactly the way the app escalates it. `SINGLE_CART`
+        is refused with app code 268 — whose text is the generic "Сервис временно
+        недоступен", not anything about carts — once a cart exists for a DIFFERENT
+        retailer. The app answers that by resending the identical body with
+        `SINGLE_CART_WITH_OTHER_CART_RESET`, which succeeds: captures2.xml [1073]
+        fails and [1077] succeeds, and the two bodies differ in this field alone.
+
+        Sending the reset mode unconditionally would work too, and would silently
+        discard other retailers' carts on every write. So try the narrow mode first
+        and escalate only on 268, then flag it: the caller has to be able to tell
+        the user their other cart is gone. An empty goods list never escalates —
+        clearing a cart is accepted in the narrow mode."""
+        from . import observability as obs
+
         body = {"goods": goods, "cartSetMode": "SINGLE_CART", "delivery": delivery}
-        return self._call_read("grocery_cart_set", body=body,
-                               overrides={"appId": app_id})
+
+        def _write(mode: str) -> dict:
+            body["cartSetMode"] = mode
+            started = time.time()
+            try:
+                res = self._call_read("grocery_cart_set", body=body,
+                                      overrides={"appId": app_id})
+            except TbankApiError as e:
+                code = str(getattr(e, "result_code", "") or "")
+                obs.emit("cart_set", app_id=app_id, item_count=len(goods),
+                         cart_set_mode=mode, app_code=code,
+                         blame=obs.blame_of(200, code),
+                         duration_ms=int((time.time() - started) * 1000))
+                raise
+            obs.emit("cart_set", app_id=app_id, item_count=len(goods),
+                     cart_set_mode=mode, http_status=200, blame="ok",
+                     duration_ms=int((time.time() - started) * 1000))
+            return res
+
+        try:
+            return _write("SINGLE_CART")
+        except TbankApiError as e:
+            if str(getattr(e, "result_code", "")) != "268" or not goods:
+                raise
+            res = _write("SINGLE_CART_WITH_OTHER_CART_RESET")
+            if isinstance(res, dict):
+                res = dict(res)
+                res["otherCartsReset"] = True
+            return res
 
     def grocery_set_cart(self, items: list[dict], app_id: str = "", point_id: str = "",
                          clear: bool = False) -> dict:
@@ -3000,12 +3042,37 @@ class MobileSession:
         data = self._call_read("payment_gate_pay_mobile", body=body)
         return data if isinstance(data, dict) else {}
 
-    def cancel_ticket_order(self, order_id: str, kind: str = "movie") -> Any:
-        """Cancel a ticket order. The capture shows this answering 500
-        ("Сервис временно недоступен") for both the movie-specific and the generic
-        path, so treat a failure as "unknown, check the app", not "still booked"."""
+    def payment_id_for_order(self, order_id: str) -> str:
+        """paymentId of one order out of the orders() feed, "" if it has none.
+
+        Only ~60% of captured order records carry one; an unpaid reservation
+        never does."""
+        return next((str(o.get("paymentId")) for o in self.orders()
+                     if str(o.get("orderId")) == str(order_id) and o.get("paymentId")),
+                    "")
+
+    def cancel_ticket_order(self, order_id: str, kind: str = "movie",
+                            payment_id: str = "") -> Any:
+        """Cancel a ticket order. `paymentId` rides in the query NEXT TO `orderId`:
+        both, empty body, form-urlencoded content type. Sending orderId alone is
+        the quiet failure mode — the host answers 200 {"status":"Success"} and
+        does nothing, so the order stays active and no money comes back. (The
+        earlier 500s in captures.xml read as "endpoint broken"; the real app's
+        request in delete-order.xml differs only by this parameter.)
+
+        A paid order lands in PARTIALLY_CANCELED, not CANCELED: the tickets are
+        refunded, the service fee is not.
+
+        payment_id is looked up from orders() when the caller hasn't got it. An
+        unpaid reservation has none — it cancels on orderId alone, and expires by
+        itself regardless."""
+        if not payment_id:
+            payment_id = self.payment_id_for_order(order_id)
         key = "order_cancel_movie" if kind == "movie" else "order_cancel"
-        return self._call_read(key, overrides={"orderId": str(order_id)}, body={})
+        params = {"orderId": str(order_id)}
+        if payment_id:
+            params["paymentId"] = str(payment_id)
+        return self._call_read(key, overrides=params, body={})
 
     # ---- extras ----------------------------------------------------------
 

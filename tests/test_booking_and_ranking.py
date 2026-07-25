@@ -24,6 +24,11 @@ from src.client import MobileSession  # noqa: E402
 from src.server import _rank_rows, _seat_rows  # noqa: E402
 
 CAPTURE = os.environ.get("TBANK_CAPTURE2", os.path.expanduser("~/tbank-app/captures2.xml"))
+# The one recorded cancellation: captures.xml only ever caught this endpoint
+# answering 500, which read as "endpoint broken" until this capture showed the
+# real request carries paymentId too.
+CANCEL_CAPTURE = os.environ.get("TBANK_CAPTURE_CANCEL",
+                                os.path.expanduser("~/tbank-app/delete-order.xml"))
 
 CREATE_MOVIE = 748     # POST /api/order/create/movie
 CREATE_CONCERT = 970   # POST /api/order/create/concert
@@ -295,18 +300,212 @@ def test_the_ticket_payment_names_its_calling_system():
     print("  ticket payment: Pg-Api-System names the entertainment system")
 
 
+CANCEL_ORDER, CANCEL_PAYMENT = "10000000000", "100000000001"
+
+
+def check_cancel_carries_both_ids():
+    """orderId alone is the silent no-op: the host answers 200 "Success", the
+    order stays active and no money comes back. Both ids go in the QUERY."""
+    s = ReplaySession()
+    s.cancel_ticket_order(CANCEL_ORDER, payment_id=CANCEL_PAYMENT)
+    check(s.sent_key == "order_cancel_movie", f"wrong template: {s.sent_key!r}")
+    check(s.sent_overrides.get("orderId") == CANCEL_ORDER,
+          f"orderId missing from the query: {s.sent_overrides}")
+    check(s.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
+          f"paymentId missing from the query: {s.sent_overrides}")
+    check(s.sent_body == {}, f"the body must stay empty, got {s.sent_body!r}")
+
+    concert = ReplaySession()
+    concert.cancel_ticket_order(CANCEL_ORDER, kind="concert",
+                                payment_id=CANCEL_PAYMENT)
+    check(concert.sent_key == "order_cancel",
+          f"concerts use the generic path, not {concert.sent_key!r}")
+
+    # No paymentId passed → looked up from the orders() feed.
+    class WithFeed(ReplaySession):
+        def orders(self):
+            return [{"orderId": "99", "paymentId": "999"},
+                    {"orderId": CANCEL_ORDER, "paymentId": CANCEL_PAYMENT}]
+
+    looked_up = WithFeed()
+    looked_up.cancel_ticket_order(CANCEL_ORDER)
+    check(looked_up.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
+          f"paymentId was not resolved from orders(): {looked_up.sent_overrides}")
+
+    # An unpaid reservation has none: cancel on orderId alone rather than
+    # sending paymentId=None and 400-ing.
+    unpaid = ReplaySession()
+    unpaid.cancel_ticket_order(CANCEL_ORDER)
+    check("paymentId" not in unpaid.sent_overrides,
+          f"an unresolved paymentId must be omitted: {unpaid.sent_overrides}")
+    print("  cancel: orderId + paymentId in the query, empty body, feed lookup")
+
+
+def check_cancel_warns_when_payment_unresolved():
+    """A paid order whose paymentId cannot be found would be cancelled in name
+    only — the tool must not report that as done."""
+    from src import server
+
+    class CancelSession(ReplaySession):
+        def __init__(self, feed):
+            super().__init__()
+            self.feed = feed
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def orders(self):
+            return self.feed
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            super()._call_read(key, overrides=overrides, body=body)
+            return {"status": "Success"}
+
+    saved = server._require
+    try:
+        found = CancelSession([{"orderId": CANCEL_ORDER, "paymentId": CANCEL_PAYMENT}])
+        server._require = lambda: found
+        out = server.ticket_cancel(CANCEL_ORDER)
+        check(found.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
+              f"the resolved paymentId never reached the request: {found.sent_overrides}")
+        check("⚠️" not in out, f"a resolved cancel must not warn: {out}")
+        check("Success" in out, f"the host's status must be reported: {out}")
+
+        missing = CancelSession([{"orderId": "other", "paymentId": "1"}])
+        server._require = lambda: missing
+        warned = server.ticket_cancel(CANCEL_ORDER)
+        check("⚠️" in warned and "paymentId" in warned,
+              f"an unresolved paymentId must be flagged, not swallowed: {warned}")
+
+        # Explicit payment_id must win without consulting the feed at all.
+        explicit = CancelSession([])
+        server._require = lambda: explicit
+        server.ticket_cancel(CANCEL_ORDER, payment_id=CANCEL_PAYMENT)
+        check(explicit.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
+              f"an explicit payment_id was dropped: {explicit.sent_overrides}")
+    finally:
+        server._require = saved
+    print("  ticket_cancel: resolves paymentId, warns instead of faking success")
+
+
+class WireSession(MobileSession):
+    """Builds the request for real — through _call_read's own param assembly —
+    and records it at the HTTP boundary instead of sending it.
+
+    ReplaySession stops one layer too early to see a QUERY-string endpoint:
+    cancel carries everything in the query and nothing in the body, so the only
+    way to check what actually goes on the wire is to let the params be built."""
+
+    def __init__(self):
+        super().__init__(mobile_sessionid="sid", refresh_token="rt")
+        self.access_token = "tok"
+        self.device_id = self.old_device_id = "dev"
+        self.platform, self.app_name, self.app_version = "ios", "mobile", "7.31.6"
+        self.origin = "mobile,ib5,loyalty,platform"
+        self.sent = {}
+
+        outer = self
+
+        class FakeHTTP:
+            def post(self, url, **kw):
+                outer.sent = {"url": url, "params": kw.get("params") or {},
+                              "json": kw.get("json"), "data": kw.get("data"),
+                              "headers": kw.get("headers") or {}}
+                return object()
+
+            def get(self, url, **kw):
+                return self.post(url, **kw)
+
+        self._http = FakeHTTP()
+
+    def _unwrap(self, r):
+        return {"status": "Success"}
+
+
+def check_cancel_request_matches_fixture(fx):
+    """Runs EVERYWHERE, capture or no capture — the fixture is the contract.
+
+    Asserts the built request against the real app's shape: same method, host and
+    path, and no query key the app sends is missing from ours."""
+    import urllib.parse
+
+    real = fx["cancel"]
+    s = WireSession()
+    s.cancel_ticket_order(CANCEL_ORDER, payment_id=CANCEL_PAYMENT)
+
+    parts = urllib.parse.urlsplit(s.sent["url"])
+    check(f"{parts.scheme}://{parts.netloc}" == real["host"],
+          f"host drifted: ours={parts.scheme}://{parts.netloc} app={real['host']}")
+    check(parts.path == real["path"],
+          f"path drifted: ours={parts.path} app={real['path']}")
+
+    params = s.sent["params"]
+    missing = [k for k in real["query_keys"] if k not in params]
+    check(not missing, f"the app sends {missing} in the query, we omit them")
+    check(str(params.get("orderId")) == CANCEL_ORDER,
+          f"orderId not in the query: {sorted(params)}")
+    check(str(params.get("paymentId")) == CANCEL_PAYMENT,
+          f"paymentId not in the query: {sorted(params)}")
+    # Content-Length: 0 in the capture — an empty dict, never a JSON payload.
+    check(s.sent["json"] in ({}, None) and not s.sent["data"],
+          f"the cancel body must stay empty: json={s.sent['json']!r} "
+          f"data={s.sent['data']!r}")
+    print(f"  cancel wire shape: POST {parts.path}, "
+          f"{len(real['query_keys'])} query keys incl. orderId+paymentId")
+
+
+def check_cancel_fixture_still_matches_capture(fx):
+    """Only where the capture lives: the fixture must not drift from the app.
+    Prints key names only — the capture holds live ids."""
+    import urllib.parse
+
+    with open(CANCEL_CAPTURE, "rb") as fh:
+        blob = fh.read().decode("utf-8", "replace")
+    real = None
+    for item in re.findall(r"<item>(.*?)</item>", blob, re.S):
+        url = re.search(r"<url>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</url>", item, re.S)
+        if not url or "/order/cancel" not in url.group(1):
+            continue
+        parts = urllib.parse.urlsplit(url.group(1).strip())
+        method = re.search(r"<method>(?:<!\[CDATA\[)?(\w+)", item)
+        real = {"method": method.group(1) if method else "",
+                "host": f"{parts.scheme}://{parts.netloc}", "path": parts.path,
+                "query_keys": sorted(urllib.parse.parse_qs(parts.query))}
+        break
+    if real is None:
+        check(False, f"no /order/cancel request found in {CANCEL_CAPTURE}")
+        return
+    mine = fx["cancel"]
+    for field in ("method", "host", "path"):
+        check(mine[field] == real[field],
+              f"fixture cancel.{field} drifted — fixture={mine[field]!r} "
+              f"capture={real[field]!r}")
+    check(sorted(mine["query_keys"]) == real["query_keys"],
+          f"fixture cancel.query_keys drifted — fixture={sorted(mine['query_keys'])} "
+          f"capture={real['query_keys']}")
+    print("  cancel fixture vs capture: still matches the real app")
+
+
 def main():
     print("booking bodies + ranking:")
     check_ranking()
     check_seat_grouping()
     check_ticket_pay_amount_guard()
     test_the_ticket_payment_names_its_calling_system()
+    check_cancel_carries_both_ids()
+    check_cancel_warns_when_payment_unresolved()
     fx = fixture()
     check_create(fx["create_movie"], "order/create/movie", "movie",
                  [{"id": "7:10", "type": "basic"}])
     check_create(fx["create_concert"], "order/create/concert", "concert",
                  [{"id": "Фанзона|5000§~§54093386|default"}])
     check_pay(fx["pay"])
+    check_cancel_request_matches_fixture(fx)
+    if os.path.exists(CANCEL_CAPTURE):
+        check_cancel_fixture_still_matches_capture(fx)
+    else:
+        print(f"  (cancel capture absent at {CANCEL_CAPTURE} — the wire shape above "
+              f"was still verified against the fixture; only drift check skipped)")
     if os.path.exists(CAPTURE):
         check_fixture_still_matches_capture(fx)
     else:

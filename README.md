@@ -19,6 +19,30 @@
 
 ## Quick Install
 
+### As a Claude Code plugin (server + all 10 skills in one step)
+
+```bash
+/plugin marketplace add icyberdeveloper/tbank-mcp
+/plugin install tbank@tbank-mcp
+/reload-plugins
+```
+
+There is no store to be admitted to — a marketplace is just a git repo with a
+`.claude-plugin/marketplace.json`, and anyone can host one.
+
+The venv and the Python dependencies are created on the server's first start by
+`bin/tbank-mcp`: a plugin manifest cannot run install steps (`install` is not a
+field in the schema), so the launcher does it once and every later start goes
+straight to the server. Only the grocery checkout needs a browser, and 150 MB is
+not something to download behind your back — install it yourself if you want that
+flow:
+
+```bash
+~/.claude/plugins/*/tbank/.venv/bin/python -m playwright install chromium
+```
+
+### Manually (clone, no plugin)
+
 ```bash
 git clone https://github.com/icyberdeveloper/tbank-mcp.git
 cd tbank-mcp
@@ -29,7 +53,8 @@ python -m playwright install chromium
 # MCP server:
 claude mcp add tbank -- ./.venv/bin/python -m src.server
 
-# Skills:
+# Skills — a COPY, so it does not follow the repo. Re-run after every pull, or
+# the installed skills quietly describe an older version of these tools:
 cp -r skills/* ~/.claude/skills/
 ```
 
@@ -144,12 +169,50 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank-invest-advisor` | Portfolio, P&L, rebalancing, tax optimization |
 | `tbank-login` | Multi-step login, session management |
 
+## Example requests
+
+Ask in Russian — the tools answer in Russian. Everything below was run against the
+live bank.
+
+**Кино и афиша**
+```
+Что идёт в кино сегодня?
+Купи два билета на «Майкла» на завтра в Каро 11 около 20:00 в центре зала
+```
+
+**Деньги**
+```
+Покажи мои счета
+Переведи 10 рублей Алёне на +79991234567
+Последние 5 операций по карте
+Какие лимиты по основоной карте?
+Дай реквизиты счёта
+```
+
+**Продукты**
+```
+Хочу оливье, собери корзину с минимальным КБЖУ
+Найди самый дешёвый картофель за килограмм
+```
+
+**Карты и документы**
+```
+Покажи реквизиты основной карты
+Покажи реквизиты моего паспорта
+Когда истекает мой загранпаспорт?
+```
+
+**Заказы**
+```
+Покажи последние 5 моих заказов
+```
+
 ## Tests
 
 No pytest — the tests are standalone scripts. Run them all:
 
 ```bash
-.venv/bin/python tests/run_all.py            # 11 files, ~35 s, offline
+.venv/bin/python tests/run_all.py            # every file, ~35 s, offline
 .venv/bin/python tests/run_all.py transfer   # only files matching "transfer"
 ```
 

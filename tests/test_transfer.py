@@ -125,8 +125,12 @@ class CaptureSession(MobileSession):
             template_key, body_str, extra_query)
         if self.fail:
             raise ConnectionError("connection reset by peer")
+        # The REAL response shape, from the fixture. The stub here used to be
+        # {"paymentId": …, "commissionInfo": {"value": 0}} — a shape the bank
+        # never sends, invented to match the code. It made a renderer that read
+        # the wrong money object out of commissionInfo look correct.
         return self.payload if self.payload is not None else {
-            "payload": {"paymentId": "125301542205", "commissionInfo": {"value": 0}}}
+            "payload": json.loads(json.dumps(fixture()["pay_response"]))}
 
     def sent_pay_parameters(self):
         return json.loads(urllib.parse.parse_qs(self.body)["payParameters"][0])
@@ -301,7 +305,7 @@ def test_a_lost_transfer_blocks_the_next_identical_one():
         ok = CaptureSession()
         server._require = lambda: ok
         forced = server.transfer(500, "+79991234567", from_account="0000000000", force=True)
-        check("paymentId=125301542205" in forced, f"force must go through: {forced}")
+        check("paymentId=100000000001" in forced, f"force must go through: {forced}")
         check(ok.sent_pay_parameters()["userPaymentId"] == first_upid,
               f"the retry must reuse the original userPaymentId "
               f"({first_upid} → {ok.sent_pay_parameters()['userPaymentId']}), "
@@ -347,7 +351,7 @@ def test_the_result_carries_what_the_agent_needs_next():
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         out = server.transfer(1936, "+79991234567", masked_fio="И. И.",
                               from_account="0000000000")
-        check("125301542205" in out, f"paymentId must be returned: {out}")
+        check("100000000001" in out, f"paymentId must be returned: {out}")
         check("payment_receipt" in out, f"the tool that uses it must be named: {out}")
         check("0000000000" in out, f"the debited account must be stated: {out}")
         # The amount must be readable AND carry its currency — a bare «1936.0» is
@@ -364,6 +368,54 @@ def test_the_result_carries_what_the_agent_needs_next():
     finally:
         server._require = saved
     print("  result: paymentId, account and amount returned instead of an argument echo")
+
+
+def _money_obj(value):
+    return {"currency": {"name": "RUB", "strCode": "643", "code": 643}, "value": value}
+
+
+def test_the_reported_commission_is_the_commission():
+    """commissionInfo holds three money objects — amount (sent), commission (fee),
+    amountWithCommission (debited). Reading the wrong one reports the transfer as
+    its own fee: a live 10 ₽ transfer said «комиссия 10.0» on a free transfer, and
+    a 150 000 ₽ one would have said «комиссия 150000»."""
+    saved = server._require
+    try:
+        # Free transfer — the real fixture shape, fee 0 on a 1000 ₽ amount.
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        free = CaptureSession()
+        server._require = lambda: free
+        out = server.transfer(1000, "+79991234567", from_account="0000000000")
+        check("комиссия 0.00 RUB" in out,
+              f"a free transfer must report a ZERO fee: {out!r}")
+        check("комиссия 1" not in out,
+              f"the amount sent must never be printed as the fee: {out!r}")
+        check("{" not in out,
+              f"a raw money dict must never reach the user: {out!r}")
+
+        # Charged transfer — fee and the amount actually debited both matter.
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        charged = CaptureSession(payload={"payload": {
+            "paymentId": "100000000001",
+            "commissionInfo": {"amount": _money_obj(1000.0),
+                               "commission": _money_obj(90.0),
+                               "amountWithCommission": _money_obj(1090.0)}}})
+        server._require = lambda: charged
+        out2 = server.transfer(1000, "+79991234567", from_account="0000000000")
+        check("комиссия 90.00 RUB" in out2, f"the fee must be the fee: {out2!r}")
+        check("1 090.00 RUB" in out2 or "1 090.00 RUB" in out2,
+              f"what actually left the account must be stated: {out2!r}")
+
+        # A bank that sends no commissionInfo must not make one up.
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        silent = CaptureSession(payload={"payload": {"paymentId": "100000000001"}})
+        server._require = lambda: silent
+        out3 = server.transfer(1000, "+79991234567", from_account="0000000000")
+        check("комиссия" not in out3,
+              f"no commissionInfo must mean no claim about the fee: {out3!r}")
+    finally:
+        server._require = saved
+    print("  commission: the fee is reported, not the amount it was charged on")
 
 
 def test_filter_sections_refuse_to_pretend():
@@ -530,6 +582,7 @@ def main():
     test_the_chosen_account_is_the_one_debited()
     test_a_lost_transfer_blocks_the_next_identical_one()
     test_the_result_carries_what_the_agent_needs_next()
+    test_the_reported_commission_is_the_commission()
     test_filter_sections_refuse_to_pretend()
     test_payment_commission_rejects_a_body_it_cannot_use()
     test_a_refusal_is_not_reported_as_a_possible_charge()

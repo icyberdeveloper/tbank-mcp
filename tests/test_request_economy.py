@@ -72,13 +72,13 @@ class CountingSession(MobileSession):
 ACCOUNTS = [
     {"id": "1111111111", "name": "Black", "accountType": "Current",
      "moneyAmount": {"value": 13449.27, "currency": {"name": "RUB"}},
-     "cards": [{"id": "291395142", "ucid": "1293548933", "name": "Black",
+     "cards": [{"id": "100000002", "ucid": "1000000001", "name": "Black",
                 "status": "Активна", "value": "553691******1234",
                 "paymentSystem": "MC", "expiration": {"milliseconds": 2029957200000}}]},
     {"id": "2222222222", "name": "Депозит", "accountType": "Deposit"},
     {"id": "3333333333", "name": "Внешняя", "accountType": "ExternalAccount",
-     "card": {"id": "57534194", "ucid": "", "name": "Газпромбанк *7710",
-              "value": "220001******7710"}},
+     "card": {"id": "100000003", "ucid": "", "name": "Внешний банк *0000",
+              "value": "220001******0000"}},
 ]
 
 

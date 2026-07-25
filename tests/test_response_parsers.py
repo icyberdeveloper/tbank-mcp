@@ -62,7 +62,7 @@ def run(tool, session, *args, **kw):
 
 # The shape of a genuinely placed and paid order (capture item 691).
 PAID_ORDER = {"payload": {"order": {
-    "id": "70123456", "status": "CREATED_DYNAMIC", "paymentId": "125301542205",
+    "id": "70123456", "status": "CREATED_DYNAMIC", "paymentId": "100000000001",
     "application": {"id": "204", "name": "ВкусВилл"},
     "cart": {"sum": 1600.2, "goodsSum": 1630.0, "goods": [{"id": "1"}]},
 }}}
@@ -75,7 +75,7 @@ def test_a_paid_order_does_not_read_as_unpaid():
     check("CREATED_DYNAMIC" in out,
           f"the real status must be shown, not translated into a failure: {out}")
     check("ВкусВилл" in out, f"the store must be named: {out}")
-    check("125301542205" in out, f"the paymentId must be shown for reconciliation: {out}")
+    check("100000000001" in out, f"the paymentId must be shown for reconciliation: {out}")
 
     # No paymentId → honestly unpaid, and the sum still resolves.
     unpaid = {"payload": {"order": {"id": "70123457", "status": "NEW",

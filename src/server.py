@@ -710,8 +710,15 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
         if "goodsSum" not in pl:
             return (f"[store appId={app_id} pointId={point_id}] ОШИБКА: бэкенд не принял "
                     f"корзину (в ответе нет goodsSum). Товары НЕ добавлены. Ответ: {str(pl)[:300]}")
+        # The write had to escalate to SINGLE_CART_WITH_OTHER_CART_RESET, which is
+        # what the backend demands once another retailer has a cart — and it wipes
+        # that cart. Silently succeeding here would lose someone's basket without
+        # a word, so say it.
+        reset = ("\n⚠️ Корзины ДРУГИХ магазинов при этом очищены — бэкенд не даёт "
+                 "держать две сразу. Если там что-то лежало, оно потеряно."
+                 if pl.get("otherCartsReset") else "")
         return (f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl['goodsSum']}"
-                f" (в корзине {len(json.loads(items))} новых позиций)")
+                f" (в корзине {len(json.loads(items))} новых позиций){reset}")
     except Exception as e:
         return _err(e)
 
@@ -747,6 +754,9 @@ def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
         head = (f"[store appId={app_id} pointId={point_id}] "
                 f"{'корзина очищена' if clear else 'корзина обновлена'}: "
                 f"{len(goods)} позиций, goodsSum={pl['goodsSum']}")
+        if pl.get("otherCartsReset"):
+            head += ("\n⚠️ Корзины ДРУГИХ магазинов очищены — бэкенд не даёт держать "
+                     "две сразу. Если там что-то лежало, оно потеряно.")
         rows = [f"- {g.get('name','?')[:40]} ×{g.get('count','?')} | id={g.get('id','?')}"
                 for g in goods]
         return "\n".join([head] + rows)
@@ -966,6 +976,10 @@ def diagnostics(limit: int = 40) -> str:
                 parts.append(f"order={'Y' if r.get('order_id_present') else 'N'}")
             if "payment_id_present" in r:
                 parts.append(f"payId={'Y' if r.get('payment_id_present') else 'N'}")
+            if r.get("cart_set_mode"):
+                parts.append(f"mode={r.get('cart_set_mode')}")
+            if r.get("item_count") is not None:
+                parts.append(f"items={r.get('item_count')}")
             if r.get("duration_ms") is not None:
                 parts.append(f"{r.get('duration_ms')}ms")
             if r.get("result"):
@@ -1285,13 +1299,31 @@ def transfer(amount: float, to_account: str, description: str = "",
         pid = str(payload.get("paymentId") or payload.get("id") or "") if isinstance(payload, dict) else ""
         journal.record(attempt, "pay", "paid" if pid else "unknown",
                        user_payment_ms=int(upid), payment_id=pid)
+        # commissionInfo holds THREE money objects and confusing them misreports
+        # the charge: `amount` is what was sent, `commission` is the fee,
+        # `amountWithCommission` is what actually left the account. The old
+        # `c.get('value', c.get('amount'))` found no top-level `value`, fell back
+        # to `amount` and printed the TRANSFER as its own fee — a 10 ₽ transfer
+        # said «комиссия 10.0», a 150 000 ₽ one would say «комиссия 150000».
+        # Shape verified against captures.xml #1477 and captures2.xml #595.
         commission = ""
         if isinstance(payload, dict):
-            c = payload.get("commissionInfo") or payload.get("commission")
-            if isinstance(c, dict):
-                commission = f", комиссия {c.get('value', c.get('amount','?'))}"
-            elif c is not None:
-                commission = f", комиссия {c}"
+            info = payload.get("commissionInfo")
+            info = info if isinstance(info, dict) else {}
+            fee = info.get("commission")
+            if fee is None and not isinstance(payload.get("commission"), dict):
+                fee = payload.get("commission")
+            if fee is not None:
+                commission = f", комиссия {_money(fee, 'RUB')}"
+                total = info.get("amountWithCommission")
+                fee_value = fee.get("value") if isinstance(fee, dict) else fee
+                try:
+                    charged = float(fee_value or 0) > 0
+                except (TypeError, ValueError):
+                    charged = False
+                if charged and total is not None:
+                    # Only worth printing when it differs from the amount sent.
+                    commission += f", списано {_money(total, 'RUB')}"
         who = f" ({masked_fio})" if masked_fio else ""
         if not pid:
             return (f"Отправлено {_money(amount, 'RUB')} → {to_account}{who} со счёта {src}, "
@@ -2275,16 +2307,34 @@ def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
         return _err(e)
 
 @mcp.tool()
-def ticket_cancel(order_id: str, kind: str = "movie") -> str:
+def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "") -> str:
     """Отменить заказ билета. kind — "movie" или "concert".
 
-    ⚠️ Надёжность не подтверждена: в захвате оба пути отмены отвечали 500. Если
-    тул вернёт ошибку, считай статус НЕИЗВЕСТНЫМ (не «всё ещё забронировано») —
-    проверь orders() и при необходимости отменяй через приложение."""
+    payment_id нужен бэкенду наравне с order_id и подставляется из orders(),
+    если его не передать. Без него хост отвечает 200 «Success», но заказ
+    остаётся активным и деньги не возвращаются — так что если тул сообщает, что
+    paymentId не найден, это НЕ отмена. Он же лежит в ответе ticket_pay().
+
+    Оплаченный заказ уходит в PARTIALLY_CANCELED, а не CANCELED: билеты
+    возвращают, сервисный сбор — нет.
+
+    Если тул вернёт ошибку, считай статус НЕИЗВЕСТНЫМ (не «всё ещё
+    забронировано») — проверь orders() и при необходимости отменяй через
+    приложение."""
     try:
         s = _require(); s.ensure_fresh()
-        s.cancel_ticket_order(order_id, kind=kind)
-        return f"Отмена заказа {order_id} принята. Проверь статус: orders(\"афиша\")."
+        # Resolved here, not left to the client, so the warning below can tell the
+        # caller a paid order went unmatched — and so orders() is fetched once.
+        payment_id = payment_id or s.payment_id_for_order(order_id)
+        res = s.cancel_ticket_order(order_id, kind=kind, payment_id=payment_id)
+        st = (res or {}).get("status") if isinstance(res, dict) else ""
+        head = (f"Отмена заказа {order_id} принята (status={st})."
+                if st else f"Отмена заказа {order_id} принята.")
+        if not payment_id:
+            # Silent no-op territory: say so instead of reporting a cancellation.
+            head += ("\n⚠️ paymentId не найден в orders() — для ОПЛАЧЕННОГО заказа "
+                     "такой запрос ничего не отменяет. Передай payment_id явно.")
+        return head + "\nПроверь статус и возврат: orders(\"афиша\") + list_operations()."
     except Exception as e:
         return (_err(e) + f"\nСтатус заказа {order_id} НЕИЗВЕСТЕН — проверь orders(\"афиша\"). "
                 "Если он всё ещё активен, отмени через приложение.")
@@ -2357,7 +2407,7 @@ def payment_receipt(payment_id: str, save_to: str = "") -> str:
 
 # ── UTILITY ─────────────────────────────────────────────────
 
-_FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "FLOWS.md")
+_FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "docs", "FLOWS.md")
 
 # Words an agent is likely to use, per section. Matched against the query in
 # addition to the section title, so a Russian request finds an English heading.
@@ -2379,7 +2429,7 @@ _FLOW_KEYWORDS = {
 
 
 def _flow_sections() -> list[tuple[str, str]]:
-    """FLOWS.md split on '## ' headings → [(title, body), …]."""
+    """docs/FLOWS.md split on '## ' headings → [(title, body), …]."""
     if not os.path.exists(_FLOWS_PATH):
         return []
     text = open(_FLOWS_PATH, encoding="utf-8").read()
@@ -2400,7 +2450,7 @@ def flows(topic: str = "") -> str:
     деньгами). Отдаёт только подходящие разделы, а не весь файл."""
     sections = _flow_sections()
     if not sections:
-        return f"FLOWS.md not found at {_FLOWS_PATH}"
+        return f"docs/FLOWS.md not found at {_FLOWS_PATH}"
 
     def body_of(name_part: str) -> str:
         for title, body in sections:
@@ -2411,7 +2461,7 @@ def flows(topic: str = "") -> str:
     q = topic.strip().lower()
     if not q:
         toc = "\n".join(f"- {t}" for t, _ in sections if not t.lower().startswith("notes"))
-        return ("Разделы FLOWS.md — вызови flows(topic) с нужным:\n" + toc +
+        return ("Разделы docs/FLOWS.md — вызови flows(topic) с нужным:\n" + toc +
                 "\n\n" + body_of("Notes"))
 
     tokens = [w for w in re.split(r"[^\wа-яёА-ЯЁ]+", q) if len(w) > 2]

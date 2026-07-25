@@ -1405,7 +1405,7 @@ BUILTIN_ENDPOINTS.update({
 # it authorizes on the Bearer alone (verified live). Trains and flights each need
 # a one-time link token that this client cannot mint —
 # `tsocial…/auth/game/link-token` answers B002D965 and `/v1/travel_link_auth_token`
-# answers INSUFFICIENT_PRIVILEGES even on a CLIENT-level session. See FLOWS.md.
+# answers INSUFFICIENT_PRIVILEGES even on a CLIENT-level session. See docs/FLOWS.md.
 BUILTIN_ENDPOINTS.update({
     # path is parameterized: /api/v1/hotels/bookings/{bookingId}
     "hotel_booking": {"method": "GET", "host": "https://hotels.t-bank-app.ru",
@@ -1433,7 +1433,9 @@ BUILTIN_ENDPOINTS.update({
                            "path": "/api/order/create/movie", "params": {}},
     "order_create_concert": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                              "path": "/api/order/create/concert", "params": {}},
-    # POST ?orderId= with an EMPTY body
+    # POST ?orderId=&paymentId= with an EMPTY body. BOTH ids or nothing happens:
+    # orderId alone still answers 200 {"status":"Success"} and leaves the order
+    # active — see cancel_ticket_order().
     "order_cancel_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                            "path": "/api/order/cancel/movie", "params": {}},
     "order_cancel": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",

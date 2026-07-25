@@ -255,7 +255,7 @@ def test_a_broken_tracer_cannot_break_a_payment():
     try:
         # Caught rather than allowed to propagate: this must be REPORTED as a
         # failure, not kill the run before the remaining checks say why.
-        out = run(Stub(transfer={"payload": {"paymentId": "125301542205"}},
+        out = run(Stub(transfer={"payload": {"paymentId": "100000000001"}},
                        list_accounts=[{"id": "1111111111", "accountType": "Current",
                                        "moneyAmount": {"value": 5000,
                                                        "currency": {"name": "RUB"}}}]),
@@ -266,9 +266,9 @@ def test_a_broken_tracer_cannot_break_a_payment():
                         f"{type(e).__name__}: {e}")
     finally:
         trace._append = saved
-    check("125301542205" in out,
+    check("100000000001" in out,
           f"a failing tracer swallowed the payment result: {out!r}")
-    check(not os.path.exists(path) or "125301542205" not in open(path).read(),
+    check(not os.path.exists(path) or "100000000001" not in open(path).read(),
           "the record was written despite the writer failing")
     print("  robustness: a tracer that cannot write does not disturb the tool")
 

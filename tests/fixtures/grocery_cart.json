@@ -734,5 +734,13 @@
   "responseTime": 26,
   "time": "2026-07-22T01:24:51+03:00",
   "status": "Error"
+ },
+ "cart_set_escalation": {
+  "refused_mode": "SINGLE_CART",
+  "accepted_mode": "SINGLE_CART_WITH_OTHER_CART_RESET",
+  "refused_code": "268",
+  "differing_keys": [
+   "cartSetMode"
+  ]
  }
 }

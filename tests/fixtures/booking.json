@@ -1,5 +1,5 @@
 {
- "_note": "Scrubbed from a Burp capture. Catalogue ids are real (they are the contract); the payer account and order id are synthetic. Regenerate with tests/fixtures/regen.py.",
+ "_note": "Scrubbed from a Burp capture. Catalogue ids are real (they are the contract); the payer account and order id are synthetic. `cancel` records a QUERY-string endpoint, so it holds key NAMES and no values at all. Regenerate with tests/fixtures/regen.py.",
  "create_movie": {
   "slotId": "133073041",
   "objectId": "10255",
@@ -20,6 +20,27 @@
     "id": "Фанзона|5000§~§54093386|default"
    }
   ]
+ },
+ "cancel": {
+  "method": "POST",
+  "host": "https://lifestyle.t-bank-app.ru",
+  "path": "/api/order/cancel/movie",
+  "query_keys": [
+   "appName",
+   "appVersion",
+   "ccc",
+   "connectionType",
+   "cpswc",
+   "deviceId",
+   "inache",
+   "oldDeviceId",
+   "orderId",
+   "origin",
+   "paymentId",
+   "platform",
+   "sessionid"
+  ],
+  "body": ""
  },
  "pay": {
   "amount": {

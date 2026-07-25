@@ -15,6 +15,7 @@ drift away from what the app sends.
 """
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -104,11 +105,71 @@ def build(items):
         "expected_azbuka": scrub(T.request_json(items, T.AZBUKA_CART_SET)),
         "expected_vkusvill": scrub(T.request_json(items, T.VKUSVILL_CART_SET)),
         "error_envelope": scrub_envelope(T.response_json(items, T.ERROR_ENVELOPE)),
+        "cart_set_escalation": build_cart_set_escalation(),
     }
 
 
+def build_cart_set_escalation():
+    """The cartSetMode escalation, from captures2.xml.
+
+    Holds no payload — just the two mode strings, the app code the narrow one is
+    refused with, and which keys actually differ between the refused and the
+    accepted body. That last part is the whole point: the two requests are
+    identical apart from cartSetMode, which is why «268 Сервис временно
+    недоступен» means «reset the other cart», not «come back later»."""
+    import test_cart_body_matches_capture as T
+
+    if not os.path.exists(T.CAPTURE2):
+        raise FileNotFoundError(T.CAPTURE2)
+    saved = T.CAPTURE
+    T.CAPTURE = T.CAPTURE2
+    try:
+        items = T._items()
+        refused = T.request_json(items, T.CART_SET_REFUSED)
+        accepted = T.request_json(items, T.CART_SET_ACCEPTED)
+        refused_resp = T.response_json(items, T.CART_SET_REFUSED)
+    finally:
+        T.CAPTURE = saved
+    differing = sorted(k for k in set(refused) | set(accepted)
+                       if refused.get(k) != accepted.get(k))
+    return {
+        "refused_mode": refused["cartSetMode"],
+        "accepted_mode": accepted["cartSetMode"],
+        "refused_code": str((refused_resp.get("payload") or {}).get("code", "")),
+        "differing_keys": differing,
+    }
+
+
+def build_cancel():
+    """The cancellation, from delete-order.xml (the only capture that has one).
+
+    Nothing but SHAPE survives: cancel puts everything in the query and sends an
+    empty body, and every one of those query values — orderId, paymentId,
+    sessionid, deviceId — is the user's. So the fixture keeps key NAMES only."""
+    import urllib.parse
+    import test_booking_and_ranking as B
+
+    with open(B.CANCEL_CAPTURE, "rb") as fh:
+        blob = fh.read().decode("utf-8", "replace")
+    for item in re.findall(r"<item>(.*?)</item>", blob, re.S):
+        url = re.search(r"<url>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</url>", item, re.S)
+        if not url or "/order/cancel" not in url.group(1):
+            continue
+        parts = urllib.parse.urlsplit(url.group(1).strip())
+        method = re.search(r"<method>(?:<!\[CDATA\[)?(\w+)", item)
+        return {
+            "method": method.group(1) if method else "POST",
+            "host": f"{parts.scheme}://{parts.netloc}",
+            "path": parts.path,
+            "query_keys": sorted(urllib.parse.parse_qs(parts.query)),
+            "body": "",
+        }
+    raise SystemExit(f"no /order/cancel request in {B.CANCEL_CAPTURE}")
+
+
 def build_booking():
-    """The three money-moving ticket bodies, from captures2.xml.
+    """The three money-moving ticket bodies from captures2.xml, plus the
+    cancellation shape from delete-order.xml.
 
     eventId/slotId/objectId/seat ids are public catalogue identifiers and stay real —
     they ARE the contract. The payer's account (`agreement`) and the real orderId are
@@ -124,9 +185,11 @@ def build_booking():
     return {
         "_note": ("Scrubbed from a Burp capture. Catalogue ids are real (they are the "
                   "contract); the payer account and order id are synthetic. "
-                  "Regenerate with tests/fixtures/regen.py."),
+                  "`cancel` records a QUERY-string endpoint, so it holds key NAMES "
+                  "and no values at all. Regenerate with tests/fixtures/regen.py."),
         "create_movie": movie,
         "create_concert": concert,
+        "cancel": build_cancel(),
         "pay": pay,
     }
 
@@ -160,14 +223,24 @@ def build_transfer():
         if k in pf:
             pf[k] = v
     secret = {"sessionid", "deviceId", "oldDeviceId"}
+
+    # The RESPONSE, from the same exchange. Its shape is the contract for what the
+    # tool reports back: commissionInfo carries three money objects and picking the
+    # wrong one turns the transfer itself into its own «commission». A stub written
+    # from memory (`commissionInfo: {"value": 0}`) is what let that ship.
+    resp = json.loads(T._raw(items[1477], "response").partition(b"\r\n\r\n")[2])
+    payload = resp.get("payload", resp)
+    payload["paymentId"] = "100000000001"
+
     return {
         "_note": ("Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). "
                   "Key sets and protocol constants are real; account, recipient, "
-                  "userPaymentId and device/session ids are synthetic."),
+                  "userPaymentId, paymentId and device/session ids are synthetic."),
         "query_keys": sorted(query),
         "query_static": {k: v[0] for k, v in sorted(query.items()) if k not in secret},
         "form_keys": sorted(form),
         "pay_parameters": pp,
+        "pay_response": payload,
     }
 
 

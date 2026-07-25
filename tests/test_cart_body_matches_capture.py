@@ -24,8 +24,17 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# cart/set emits observability events, and the module resolves the log path at
+# import time. run_all.py redirects these; running this file DIRECTLY did not, so
+# a test run appended to the user's real ~/.local/share/tbank-mcp/events.jsonl.
+os.environ.setdefault("TBANK_EVENTS",
+                      os.path.join(tempfile.mkdtemp(), "events.jsonl"))
+os.environ.setdefault("TBANK_ATTEMPTS",
+                      os.path.join(tempfile.gettempdir(), "tbank-test-attempts.jsonl"))
 
 from src.client import MobileSession, TbankApiError  # noqa: E402
 
@@ -38,6 +47,13 @@ CART_GET = 370           # a populated Azbuka cart
 CLIENT_INFO = 275        # payload.deliveryInfo.address — the cold-start address seed
 RETAILERS = 276          # the only source of areaId
 ERROR_ENVELOPE = 1120    # HTTP 200 + status:"Error"
+
+# The cartSetMode escalation lives in the OTHER capture: the app posts a cart, is
+# refused with app code 268, and resends the byte-identical body with the reset mode.
+CAPTURE2 = os.environ.get("TBANK_CAPTURE2",
+                          os.path.expanduser("~/tbank-app/captures2.xml"))
+CART_SET_REFUSED = 1073   # captures2: appId=695, SINGLE_CART → 268
+CART_SET_ACCEPTED = 1077  # captures2: appId=695, same goods, reset mode → goodsSum
 
 
 def _items():
@@ -203,6 +219,100 @@ def check_fixture_still_matches_capture(fx, failures):
     print("  fixture vs capture: structure and protocol values still match")
 
 
+class EscalationSession(ReplaySession):
+    """Refuses the narrow cartSetMode the way the backend does, then records what
+    the client resends."""
+
+    def __init__(self, fx, refuse_code="268", refuse_modes=("SINGLE_CART",)):
+        super().__init__(fx, store_has_cart=False)
+        self.refuse_code = refuse_code
+        self.refuse_modes = refuse_modes
+        self.modes = []
+
+    def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+        if key != "grocery_cart_set":
+            return super()._call_read(key, overrides=overrides, body=body,
+                                      path_override=path_override)
+        mode = (body or {}).get("cartSetMode")
+        self.modes.append(mode)
+        self.sent_body, self.sent_overrides = body, overrides or {}
+        if mode in self.refuse_modes:
+            raise TbankApiError(self.refuse_code,
+                                "Сервис временно недоступен. Попробуйте позже.")
+        return {"goodsSum": 139.0}
+
+
+def check_cart_set_escalation(fx, failures):
+    """«268 Сервис временно недоступен» on cart/set does NOT mean the service is
+    down — it means another retailer holds a cart. The app answers by resending
+    the same body with the reset mode, and so must we, or every add-to-cart fails
+    for good while the app keeps working."""
+    esc = fx["cart_set_escalation"]
+
+    # Refused once → retried with the reset mode → reported as a reset.
+    s = EscalationSession(fx)
+    try:
+        res = s.grocery_add_to_cart([{"id": "16072", "count": 1}],
+                                    app_id="204", point_id="5980")
+    except TbankApiError as e:
+        failures.append(f"escalation: {esc['refused_code']} was not retried with "
+                        f"{esc['accepted_mode']} — every add-to-cart fails while the "
+                        f"app keeps working ({e})")
+        return
+    if s.modes != [esc["refused_mode"], esc["accepted_mode"]]:
+        failures.append(f"escalation: modes sent {s.modes}, expected "
+                        f"{[esc['refused_mode'], esc['accepted_mode']]}")
+    if not res.get("otherCartsReset"):
+        failures.append("escalation: wiping another retailer's cart must be flagged "
+                        f"back to the caller, got {res!r}")
+
+    # A DIFFERENT app code is not this situation — it must surface, not be retried.
+    other = EscalationSession(fx, refuse_code="211", refuse_modes=("SINGLE_CART",))
+    try:
+        other.grocery_add_to_cart([{"id": "1", "count": 1}], app_id="204", point_id="5980")
+        failures.append("escalation: a non-268 error was swallowed and retried")
+    except TbankApiError:
+        if len(other.modes) != 1:
+            failures.append(f"escalation: a non-268 error must not retry, sent {other.modes}")
+
+    # Clearing a cart posts no goods and is accepted in the narrow mode — escalating
+    # there would reset other carts as a side effect of emptying this one.
+    clearing = EscalationSession(fx, refuse_modes=("SINGLE_CART", esc["accepted_mode"]))
+    try:
+        clearing.grocery_set_cart([], app_id="204", point_id="5980", clear=True)
+        failures.append("escalation: the stub refused everything, this must raise")
+    except TbankApiError:
+        if len(clearing.modes) != 1:
+            failures.append(f"escalation: an empty cart write must not escalate, "
+                            f"sent {clearing.modes}")
+    print(f"  cart/set escalation: {esc['refused_mode']} → {esc['refused_code']} → "
+          f"{esc['accepted_mode']}, only on 268 and only with goods")
+
+
+def check_escalation_still_matches_capture(fx, failures):
+    """The escalation is only real if the two captured bodies differ in nothing but
+    cartSetMode — otherwise 268 meant something else and the retry is a guess."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fixtures"))
+    import regen  # noqa: E402
+
+    try:
+        fresh = regen.build_cart_set_escalation()
+    except Exception as e:  # noqa: BLE001
+        failures.append(f"cart_set_escalation can no longer be rebuilt: "
+                        f"{type(e).__name__}: {e}")
+        return
+    if fresh != fx["cart_set_escalation"]:
+        failures.append(f"cart_set_escalation drifted — fixture="
+                        f"{fx['cart_set_escalation']!r} capture={fresh!r}")
+        return
+    if fresh["differing_keys"] != ["cartSetMode"]:
+        failures.append(f"the refused and accepted bodies differ in more than "
+                        f"cartSetMode: {fresh['differing_keys']} — the retry is "
+                        f"no longer justified by the capture")
+    print("  escalation vs capture: the two bodies still differ in cartSetMode alone")
+
+
 def main():
     failures = []
     fx = fixture()
@@ -211,6 +321,12 @@ def main():
     check_store(fx, "Азбука 578/2 existing cart", "578", "2", "expected_azbuka", True, failures)
     check_merge(fx, failures)
     check_error_envelope(fx, failures)
+    check_cart_set_escalation(fx, failures)
+    if os.path.exists(CAPTURE2):
+        check_escalation_still_matches_capture(fx, failures)
+    else:
+        print(f"  (captures2 absent at {CAPTURE2} — escalation drift check skipped;\n"
+              f"   the behaviour above was still verified against the fixture)")
     if os.path.exists(CAPTURE):
         check_fixture_still_matches_capture(fx, failures)
     else:

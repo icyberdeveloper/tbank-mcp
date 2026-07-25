@@ -1,5 +1,5 @@
 {
- "_note": "Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). Key sets and protocol constants are real; account, recipient, userPaymentId and device/session ids are synthetic.",
+ "_note": "Scrubbed from captures.xml #1477 (POST /v1/pay, p2p-anybank, 200). Key sets and protocol constants are real; account, recipient, userPaymentId, paymentId and device/session ids are synthetic.",
  "query_keys": [
   "appName",
   "appVersion",
@@ -77,5 +77,35 @@
    "pointerLinkId": "10000000000"
   },
   "moneyAmount": 1000
+ },
+ "pay_response": {
+  "paymentId": "100000000001",
+  "commissionInfo": {
+   "amount": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 1000.0
+   },
+   "commission": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 0.0
+   },
+   "amountWithCommission": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 1000.0
+   }
+  },
+  "extraFields": {}
  }
 }

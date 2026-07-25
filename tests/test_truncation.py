@@ -186,7 +186,7 @@ class RowsSession(MobileSession):
 
     def list_operations(self, account_id, start, end):
         return [{"operationTime": {"milliseconds": 1784658904000 - i * 3600_000},
-                 "type": "Debit", "card": "291395142",
+                 "type": "Debit", "card": "100000002",
                  "amount": {"value": 100 + i, "currency": {"name": "RUB"}},
                  "description": f"Покупка {i}"} for i in range(self.n)]
 
@@ -205,7 +205,7 @@ def test_limit_zero_means_everything_in_every_list_tool():
     server._require = lambda: RowsSession(120)
     try:
         for name, call in (("card_operations",
-                            lambda lim: server.card_operations("291395142", 30, lim)),
+                            lambda lim: server.card_operations("100000002", 30, lim)),
                            ("orders", lambda lim: server.orders("", lim))):
             every = call(0)
             rows = [ln for ln in every.splitlines() if ln.startswith("- ")]

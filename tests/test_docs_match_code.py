@@ -2,11 +2,11 @@
 
 Every previous audit found the same shape of bug: a tool is renamed or deleted, and
 the documents that teach an agent how to call it keep the old name. It is invisible
-because nothing executes a document. `grocery_pick_lightest` survived in FLOWS.md
+because nothing executes a document. `grocery_pick_lightest` survived in docs/FLOWS.md
 for a whole release after it was removed from server.py; an agent following that
 line calls a tool that does not exist and has no way to recover.
 
-The same rot hit the `flows` tool itself: it returned FLOWS.md[:6000] while the file
+The same rot hit the `flows` tool itself: it returned docs/FLOWS.md[:6000] while the file
 had grown to ~12 000 chars, so every flow from the messenger down — cards, orders,
 nutrition, tickets — was silently unreachable through the one tool meant to serve it.
 Truncation is invisible from the inside, so it is pinned here by section, not by
@@ -50,7 +50,7 @@ def tool_names():
 
 
 # Names the documents mention on purpose while stating they are NOT tools: internal
-# client methods and API steps that run inside a tool. FLOWS.md calls this out in its
+# client methods and API steps that run inside a tool. docs/FLOWS.md calls this out in its
 # preamble; keeping the list here means adding a new internal reference is a conscious
 # act, not an accident.
 NOT_TOOLS = {
@@ -60,7 +60,9 @@ NOT_TOOLS = {
     "login_cli", "nutrition", "python", "json", "getpass",
 }
 
-DOCS = ["FLOWS.md", "README.md", "AGENTS.md", "MOBILE_CHECKOUT.md"]
+# AGENTS.md was deleted (nothing read it); doc_files() skips missing entries, so the
+# name sat here harmlessly until someone recreated the file by accident.
+DOCS = ["docs/FLOWS.md", "README.md", "docs/MOBILE_CHECKOUT.md"]
 
 
 def doc_files():
@@ -110,24 +112,76 @@ def test_evals_only_ask_for_tools_that_exist():
 def test_the_marketplace_entry_matches_the_plugin():
     """Two manifests describing the same thing drift: the marketplace card advertised
     «6 skills» at version 0.1.0 while plugin.json shipped 10 at 0.1.1. Nobody counts
-    them by hand twice and gets it right twice, so it is asserted instead."""
+    them by hand twice and gets it right twice, so it is asserted instead.
+
+    The skill count now comes from the skills/ DIRECTORY, not from a list inside the
+    manifest: `skills` was dropped from plugin.json because Claude Code scans
+    skills/ by default, and a hand-kept list was one more thing to forget."""
     import json as _json
     market = os.path.join(ROOT, ".claude-plugin", "marketplace.json")
     if not os.path.exists(market):
         print("  marketplace.json absent — nothing to keep in sync")
         return
     m = _json.load(open(market, encoding="utf-8"))
-    p = _json.load(open(os.path.join(ROOT, "plugin.json"), encoding="utf-8"))
-    n = len(p.get("skills") or [])
+    # The manifest lives in .claude-plugin/. At the repo root it is not a manifest,
+    # it is a file nobody reads — Claude Code loads only .claude-plugin/plugin.json.
+    plugin_path = os.path.join(ROOT, ".claude-plugin", "plugin.json")
+    check(os.path.exists(plugin_path),
+          "plugin.json must live in .claude-plugin/ — anywhere else it is ignored")
+    check(not os.path.exists(os.path.join(ROOT, "plugin.json")),
+          "a plugin.json at the repo root is dead weight and drifts from the real one")
+    if not os.path.exists(plugin_path):
+        return
+    p = _json.load(open(plugin_path, encoding="utf-8"))
+    n = len([d for d in os.listdir(os.path.join(ROOT, "skills"))
+             if os.path.exists(os.path.join(ROOT, "skills", d, "SKILL.md"))])
     check(m.get("metadata", {}).get("version") == p.get("version"),
           f"marketplace version {m.get('metadata', {}).get('version')!r} != "
+          f"plugin version {p.get('version')!r}")
+    # Third copy of the same number, and the one that was already out of step.
+    pyproject = open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+    pv = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject)
+    check(pv and pv.group(1) == p.get("version"),
+          f"pyproject version {pv.group(1) if pv else None!r} != "
           f"plugin version {p.get('version')!r}")
     for entry in m.get("plugins") or []:
         desc = entry.get("description", "")
         found = re.findall(r"(\d+)\s+skills", desc)
         check(found and int(found[0]) == n,
-              f"marketplace advertises {found or ['no']} skills, plugin.json ships {n}")
+              f"marketplace advertises {found or ['no']} skills, skills/ holds {n}")
+        check(entry.get("version") in (None, p.get("version")),
+              f"marketplace entry version {entry.get('version')!r} != "
+              f"plugin version {p.get('version')!r}")
     print(f"  marketplace.json agrees with plugin.json: v{p.get('version')}, {n} skills")
+
+
+def test_the_plugin_command_exists_and_is_runnable():
+    """The manifest's server command is the whole plugin: if it is wrong, an install
+    yields a plugin that loads dead. It used to point at ${REPO_DIR}, a variable
+    Claude Code does not define, inside a .venv the manifest could not create —
+    `install` is not a field in the schema, so those steps never ran."""
+    import json as _json
+    plugin_path = os.path.join(ROOT, ".claude-plugin", "plugin.json")
+    if not os.path.exists(plugin_path):
+        print("  plugin.json absent — nothing to check")
+        return
+    p = _json.load(open(plugin_path, encoding="utf-8"))
+    servers = p.get("mcpServers") or {}
+    check(isinstance(servers, dict) and servers,
+          f"the plugin declares no MCP server: {servers!r}")
+    for name, cfg in (servers.items() if isinstance(servers, dict) else []):
+        cmd = cfg.get("command", "")
+        check("${REPO_DIR}" not in cmd and "${REPO_DIR}" not in str(cfg.get("cwd", "")),
+              f"{name}: ${{REPO_DIR}} is not a Claude Code variable — "
+              f"use ${{CLAUDE_PLUGIN_ROOT}}")
+        check("${CLAUDE_PLUGIN_ROOT}" in cmd,
+              f"{name}: the command must be rooted at ${{CLAUDE_PLUGIN_ROOT}}, got {cmd!r}")
+        rel = cmd.replace("${CLAUDE_PLUGIN_ROOT}/", "")
+        target = os.path.join(ROOT, rel)
+        check(os.path.exists(target), f"{name}: command {rel} does not exist in the repo")
+        check(os.access(target, os.X_OK),
+              f"{name}: command {rel} is not executable — git keeps the bit, chmod +x it")
+    print("  plugin command: rooted at CLAUDE_PLUGIN_ROOT, present and executable")
 
 
 def test_every_tool_declares_what_it_does_to_the_world():
@@ -266,29 +320,38 @@ def test_every_tool_is_reachable_from_a_skill():
 
 
 def test_plugin_ships_every_skill():
-    """A skill on disk but absent from plugin.json ships to nobody — that is how the
-    tickets skill was invisible to plugin installs."""
+    """A skill on disk but absent from the plugin ships to nobody — that is how the
+    tickets skill was invisible to plugin installs.
+
+    The manifest no longer lists skills: Claude Code scans skills/ by default, so
+    every directory with a SKILL.md ships automatically and the hand-kept list was
+    only a chance to forget one. What has to hold now is that nothing REPLACES that
+    default — a `skills` override narrows the scan back down to whatever it names."""
     import glob
     import json as _json
-    manifest = os.path.join(ROOT, "plugin.json")
-    check(os.path.exists(manifest), "plugin.json is missing")
+    manifest = os.path.join(ROOT, ".claude-plugin", "plugin.json")
+    check(os.path.exists(manifest), ".claude-plugin/plugin.json is missing")
     if not os.path.exists(manifest):
         return
-    listed = set(_json.load(open(manifest, encoding="utf-8")).get("skills") or [])
     on_disk = {"skills/" + os.path.basename(os.path.dirname(p))
                for p in glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md"))}
-    check(on_disk - listed == set(),
-          f"skills on disk but not shipped: {sorted(on_disk - listed)}")
-    check(listed - on_disk == set(),
-          f"plugin.json lists skills that do not exist: {sorted(listed - on_disk)}")
-    print(f"  plugin.json ships all {len(on_disk)} skills")
+    listed = _json.load(open(manifest, encoding="utf-8")).get("skills")
+    if listed is None:
+        print(f"  plugin ships all {len(on_disk)} skills (default skills/ scan)")
+        return
+    names = {listed} if isinstance(listed, str) else set(listed)
+    normalised = {n.strip("./").rstrip("/") for n in names}
+    check(on_disk - normalised == set(),
+          f"skills on disk but not shipped: {sorted(on_disk - normalised)}")
+    print(f"  plugin ships all {len(on_disk)} skills (explicit list)")
 
 
 def test_flows_serves_every_section():
     """flows() must reach the WHOLE file. It used to return the first 6000 chars,
     which silently cut everything from section 5 onward."""
     sections = server._flow_sections()
-    check(len(sections) >= 10, f"FLOWS.md parsed into only {len(sections)} sections")
+    check(len(sections) >= 10,
+          f"docs/FLOWS.md parsed into only {len(sections)} sections")
 
     toc = server.flows()
     for title, _ in sections:
@@ -307,7 +370,7 @@ def test_flows_serves_every_section():
     by_title = {t: b for t, b in sections}
     for fragment, query in probes.items():
         hit = next((t for t in by_title if fragment.lower() in t.lower()), None)
-        check(hit is not None, f"FLOWS.md has no section matching {fragment!r}")
+        check(hit is not None, f"docs/FLOWS.md has no section matching {fragment!r}")
         if hit is None:
             continue
         out = server.flows(query)
@@ -356,6 +419,7 @@ def main():
     test_plugin_ships_every_skill()
     test_evals_only_ask_for_tools_that_exist()
     test_the_marketplace_entry_matches_the_plugin()
+    test_the_plugin_command_exists_and_is_runnable()
     test_flows_serves_every_section()
     test_flows_unknown_topic_is_actionable()
     test_money_tools_warn_in_the_description_the_agent_receives()

@@ -1,0 +1,37 @@
+#!/bin/sh
+# Launcher for the MCP server, used by .claude-plugin/plugin.json.
+#
+# A plugin manifest cannot run install steps — `install` is not a field in the
+# schema and Claude Code ignores it — so a freshly installed plugin has no venv
+# and no dependencies. Without this script the server command points at a
+# .venv/bin/python that does not exist and the plugin loads dead.
+#
+# So bootstrap here, once: create the venv and install the package if they are
+# missing, then exec the server. Every later start skips straight to the exec.
+#
+# EVERY bootstrap byte goes to stderr. stdout is the MCP protocol channel — a
+# single stray line from pip or venv there corrupts the stream and the client
+# drops the connection.
+#
+# Playwright's chromium is deliberately NOT downloaded here: it is ~150 MB, only
+# grocery_checkout needs it, and a browser download has no business happening
+# implicitly while a client waits for a handshake. README covers it.
+set -e
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VENV="$ROOT/.venv"
+PY="$VENV/bin/python"
+
+if [ ! -x "$PY" ]; then
+    echo "tbank-mcp: creating venv at $VENV" >&2
+    "${TBANK_PYTHON:-python3}" -m venv "$VENV" >&2
+fi
+
+if ! "$PY" -c "import mcp" >/dev/null 2>&1; then
+    echo "tbank-mcp: installing dependencies (first run only)" >&2
+    "$PY" -m pip install --quiet --upgrade pip >&2
+    "$PY" -m pip install --quiet -e "$ROOT" >&2
+fi
+
+cd "$ROOT"
+exec "$PY" -m src.server
