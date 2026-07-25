@@ -1,6 +1,6 @@
 """T-Bank mobile API MCP server (FastMCP).
 
-33 tools for the agent. Low-level API calls are encapsulated in high-level tools.
+48 tools for the agent. Low-level API calls are encapsulated in high-level tools.
 get_data(section) covers 60+ read endpoints in one tool.
 
 Run: python -m src.server
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import traceback
@@ -33,10 +34,23 @@ _CHECKOUT_LOCK = threading.Lock()
 
 
 def _blank_session():
-    return MobileSession(mobile_sessionid="", refresh_token="",
+    return _with_persist(MobileSession(mobile_sessionid="", refresh_token="",
         client_id="gorod-app", client_version="112.0.0",
         vendor="t_ios", origin="mobile,ib5,loyalty,platform",
-        platform="ios", app_name="mobile", app_version="7.31.6")
+        platform="ios", app_name="mobile", app_version="7.31.6"))
+
+
+def _with_persist(s):
+    """Make the session save itself after every re-mint.
+
+    Not an optimisation: refresh() rotates the refresh_token, and ensure_fresh()
+    runs on the first call of nearly every tool. A re-mint that never reaches disk
+    leaves the next process holding a spent token, which then falls back to
+    silent_relogin and degrades the session to ANONYMOUS — see
+    MobileSession._persist for the full chain."""
+    if s is not None:
+        s._on_persist = lambda: _save_session(s)
+    return s
 
 
 def _save_session(s):
@@ -78,7 +92,7 @@ def _load_session():
 def _require():
     global _session
     if _session is None:
-        _session = _load_session()
+        _session = _with_persist(_load_session())
     if not _session or not _session.mobile_sessionid:
         raise TbankApiError("NO_SESSION",
             "Call login(phone) first.")
@@ -190,9 +204,11 @@ def refresh_session() -> str:
 
 @mcp.tool()
 def session_status() -> str:
-    """Проверить жива ли сессия."""
+    """Проверить жива ли сессия. Сам поднимает уровень до CLIENT, если окно
+    портальной сессии (~11 минут) успело закрыться."""
     try:
-        return json.dumps(_require().session_status(), ensure_ascii=False, default=str)[:1000]
+        s = _require(); s.ensure_client_session()
+        return json.dumps(s.session_status(), ensure_ascii=False, default=str)[:1000]
     except Exception as e:
         return _err(e)
 
@@ -631,10 +647,29 @@ def messenger_send(conversation_id: str, text: str) -> str:
 
 @mcp.tool()
 def messenger_unread() -> str:
-    """Непрочитанные."""
+    """Чаты с непрочитанными сообщениями (по названиям, а не по сырым id)."""
     try:
         s = _require(); s.ensure_fresh()
-        return json.dumps(s.messenger_unread(), ensure_ascii=False)[:500]
+        data = s.messenger_unread()
+        ids = data.get("conversationIds") or []
+        if not ids:
+            return "Непрочитанных сообщений нет."
+        # the endpoint returns bare ids — resolve them to chat names
+        names = {}
+        try:
+            for c in s.messenger_conversations():
+                cid = str(c.get("id") or c.get("conversationId") or "")
+                members = c.get("members") or []
+                title = (c.get("title") or c.get("name")
+                         or (members[0].get("name") if members else "") or "")
+                if cid:
+                    names[cid] = title
+        except Exception:
+            pass
+        lines = [f"Непрочитано в {len(ids)} чатах:"]
+        for cid in ids:
+            lines.append(f"- {names.get(cid) or '(чат без названия)'} | id={cid}")
+        return "\n".join(lines)
     except Exception as e:
         return _err(e)
 
@@ -738,6 +773,854 @@ def invest_securities(broker_account_id: str) -> str:
         s = _require(); s.ensure_fresh()
         secs = s.invest_securities(broker_account_id)
         return "\n".join(f"- {sec.get('ticker', sec.get('name','?'))[:12]} | {sec.get('balance','?')} | {sec.get('name','')[:30]}" for sec in secs) or "нет бумаг"
+    except Exception as e:
+        return _err(e)
+
+
+# ── CARDS & ACCOUNT DETAILS (5) ────────────────────────────
+
+# A handful of endpoints validate the mobile *sessionid*, not just the Bearer
+# token, and refuse an ANONYMOUS-level session. The CLIENT window is only ~11
+# minutes (see client.ensure_client_session), so this is the normal steady state
+# between re-mints — the tools below call ensure_client_session() to recover
+# automatically, and this hint only fires if even that did not help.
+_ANON_SESSION_CODES = ("INTERNAL_ERROR", "AccessDenied", "SESSION_IS_ABSENT")
+_ANON_HINT = (
+    "\nПричина: этот эндпоинт проверяет уровень мобильной сессии, а не только "
+    "токен, а окно CLIENT живёт ~11 минут. Тул уже пробовал перевыпустить сессию "
+    "сам. Проверь keepalive() — accessLevel должен быть CLIENT; если там "
+    "ANONYMOUS, вызови refresh_session() и повтори.")
+
+def _err_session(e) -> str:
+    """_err(), plus the ANONYMOUS-session explanation when that is the cause."""
+    msg = _err(e)
+    if any(c in msg for c in _ANON_SESSION_CODES):
+        return msg + _ANON_HINT
+    return msg
+
+def _money(m) -> str:
+    """{'value': 1.0, 'currency': {'name': 'RUB'}} → '1.00 RUB'."""
+    if not isinstance(m, dict):
+        return str(m)
+    cur = (m.get("currency") or {})
+    name = cur.get("name", "") if isinstance(cur, dict) else str(cur)
+    try:
+        return f"{float(m.get('value', 0)):,.2f} {name}".replace(",", " ")
+    except (TypeError, ValueError):
+        return f"{m.get('value', '?')} {name}"
+
+@mcp.tool()
+def list_cards() -> str:
+    """Все карты по всем счетам: id, ucid, баланс, тип.
+    id — для card_operations, ucid — для card_limits/card_requisites."""
+    try:
+        s = _require(); s.ensure_fresh()
+        cards = s.cards()
+        if not cards:
+            return "Карт нет."
+        return "\n".join(
+            f"- id={c.get('id','?')} ucid={c.get('ucid','?')} | счёт {c.get('account','?')} "
+            f"| {'виртуальная' if c.get('isVirtual') else 'пластик'} "
+            f"| {_money(c.get('availableBalance'))} | {c.get('accountName','')[:24]}"
+            for c in cards)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def card_limits(ucid: str) -> str:
+    """Лимиты по карте (на покупки, на снятие) и сколько уже израсходовано.
+    ucid — из list_cards()."""
+    try:
+        s = _require(); s.ensure_fresh()
+        limits = s.card_limits(ucid)
+        if not limits:
+            return f"[ucid {ucid}] лимитов не возвращено."
+        out = []
+        for l in limits:
+            cap, used = l.get("moneyAmount"), l.get("utilizedMoneyAmount")
+            line = f"- {l.get('name') or l.get('id','?')} ({l.get('interval','')}): "
+            line += f"израсходовано {_money(used)}"
+            line += f" из {_money(cap)}" if cap else "  (лимит не задан)"
+            out.append(line)
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def card_requisites(ucid: str, reveal: bool = False) -> str:
+    """Реквизиты карты: держатель, срок, номер. ucid — из list_cards().
+    По умолчанию номер маскируется, а CVV не выводится вообще — это полные
+    платёжные данные. reveal=True показывает номер и CVV целиком."""
+    try:
+        s = _require(); s.ensure_client_session()
+        c = s.card_credentials(ucid)
+        if not c:
+            return f"[ucid {ucid}] реквизиты не получены."
+        pan = str(c.get("cardNumber") or "")
+        exp = str(c.get("expireDate") or "")
+        exp_fmt = f"{exp[:2]}/{exp[2:]}" if len(exp) == 4 else exp
+        out = [f"Держатель: {c.get('cardHolder','?')}", f"Срок: {exp_fmt}"]
+        if reveal:
+            out.append(f"Номер: {' '.join(pan[i:i+4] for i in range(0, len(pan), 4))}")
+            out.append(f"CVV: {c.get('cvv2','?')}")
+        else:
+            out.append(f"Номер: {pan[:4]} **** **** {pan[-4:]}" if len(pan) >= 8 else "Номер: скрыт")
+            out.append("CVV: скрыт (reveal=True покажет номер и CVV)")
+        return "\n".join(out)
+    except Exception as e:
+        return _err_session(e)
+
+@mcp.tool()
+def card_operations(card_id: str, days: int = 30, limit: int = 50) -> str:
+    """Операции по КОНКРЕТНОЙ карте. card_id — поле id из list_cards().
+    Серверного фильтра по карте нет (API умеет только excludeCardIds), поэтому
+    берутся операции за период и фильтруются по полю card."""
+    try:
+        s = _require(); s.ensure_fresh()
+        start, end = ms_for_period(days)
+        ops = [o for o in s.list_operations(None, start, end)
+               if str(o.get("card", "")) == str(card_id)]
+        if not ops:
+            return f"[card {card_id}] операций за {days} дн. нет."
+        def when(o):
+            t = o.get("operationTime") or o.get("debitingTime") or {}
+            ms = t.get("milliseconds") if isinstance(t, dict) else t
+            return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M") if ms else "?"
+        total = sum(float((o.get("amount") or {}).get("value") or 0)
+                    for o in ops if o.get("type") == "Debit")
+        head = (f"[card {card_id}] {len(ops)} операций за {days} дн., "
+                f"списано {total:,.0f} ₽".replace(",", " "))
+        body = "\n".join(
+            f"- [{when(o)}] {'-' if o.get('type') == 'Debit' else '+'}"
+            f"{(o.get('amount') or {}).get('value','?')} | {(o.get('description') or '')[:40]}"
+            for o in ops[:limit])
+        return head + "\n" + body
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def account_requisites(account_id: str, currencies: str = "RUB") -> str:
+    """Реквизиты счёта для перевода извне: получатель, счёт, БИК, корсчёт, ИНН/КПП.
+    account_id — из list_accounts(). currencies — через запятую (RUB,USD,EUR)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        curs = tuple(c.strip().upper() for c in currencies.split(",") if c.strip())
+        groups = s.account_requisites(account_id, curs or ("RUB",))
+        out = []
+        for g in groups:
+            for r in (g.get("requisites") or []):
+                out.append(
+                    f"[{r.get('currency','?')}] {r.get('cardLine1','')}\n"
+                    f"  Получатель: {r.get('recipient','?')}\n"
+                    f"  Счёт: {r.get('recipientExternalAccount','?')}\n"
+                    f"  Банк: {r.get('beneficiaryBank','?')}  БИК {r.get('bankBik','?')}\n"
+                    f"  Корсчёт: {r.get('correspondentAccountNumber','?')}\n"
+                    f"  ИНН {r.get('inn','?')}  КПП {r.get('kpp','?')}\n"
+                    f"  Назначение: {r.get('beneficiaryInfo','')}")
+        return "\n".join(out) or f"[account {account_id}] реквизитов нет."
+    except Exception as e:
+        return _err(e)
+
+
+# ── IDENTITY DOCUMENTS (1) ─────────────────────────────────
+
+_DOC_TITLES = {
+    "RusNationalID": "Паспорт РФ", "RusInternationalID": "Загранпаспорт",
+    "RusDriversLic": "Водительское удостоверение", "RusSNILS": "СНИЛС",
+    "RusINN": "ИНН", "RusOSAGO": "ОСАГО", "RusKASKO": "КАСКО",
+    "RusPTS": "ПТС", "RusVehicleRegID": "СТС",
+    "TravelInsurance": "Страховка путешественника",
+    "RusBirthCert": "Свидетельство о рождении",
+    "RusMilitaryCard": "Военный билет", "RusMedIns": "Полис ОМС",
+}
+
+def _doc_flat(node, prefix=""):
+    """prefill wraps every leaf as {"value":…,"isEntered":bool}. Flatten to dotted
+    paths, keeping only leaves the bank actually holds a value for."""
+    out = {}
+    if isinstance(node, dict):
+        if "isEntered" in node:
+            if node.get("isEntered") and not isinstance(node.get("value"), (dict, list)):
+                out[prefix] = node.get("value")
+            elif isinstance(node.get("value"), dict):
+                out.update(_doc_flat(node["value"], prefix))
+            return out
+        for k, v in node.items():
+            out.update(_doc_flat(v, f"{prefix}.{k}" if prefix else k))
+    return out
+
+@mcp.tool()
+def documents(kind: str = "", include_others: bool = False) -> str:
+    """Документы клиента: паспорт, загранпаспорт, ВУ, СНИЛС, ИНН, ОСАГО/КАСКО, ПТС/СТС.
+    kind — фильтр по названию или коду (напр. "паспорт", "RusDriversLic"); пусто = все.
+    В хранилище лежат и документы РОДСТВЕННИКОВ, которые клиент когда-то вводил —
+    они отсеиваются по дате рождения; include_others=True покажет и их."""
+    try:
+        s = _require(); s.ensure_client_session()
+        docs = s.identity_documents()
+        try:
+            own_bd = ((s.identity_brief().get("birthDate") or {}) or {}).get("value")
+        except Exception:
+            own_bd = None
+        want = kind.lower().strip()
+        out = []
+        for code, entries in sorted(docs.items()):
+            title = _DOC_TITLES.get(code, code)
+            if want and want not in title.lower() and want not in code.lower():
+                continue
+            seen = {}
+            for e in entries:
+                f = _doc_flat(e.get("value") or {})
+                bd = f.get("person.birthDate")
+                mine = own_bd is None or bd is None or bd == own_bd
+                if not mine and not include_others:
+                    continue
+                # the same document repeats across sources; keep the richest copy
+                key = (f.get("serial"), f.get("number") or f.get("serialAndNumber"),
+                       f.get("person.lastName"), bd)
+                if len(f) > len(seen.get(key, {})):
+                    seen[key] = {**f, "_mine": mine}
+            for f in seen.values():
+                who = "" if f.get("_mine") else "  ⚠ не ваш документ"
+                num = " ".join(str(f[k]) for k in ("serial", "number", "serialAndNumber")
+                               if f.get(k))
+                head = f"{title}: {num or '—'}{who}"
+                rest = [f"    {k} = {v}" for k, v in sorted(f.items())
+                        if k not in ("serial", "number", "serialAndNumber", "_mine", "name")]
+                out.append("\n".join([head] + rest))
+        return "\n".join(out) or f"Документов не найдено (kind={kind!r})."
+    except Exception as e:
+        return _err_session(e)
+
+
+# ── ORDERS ACROSS EVERY VERTICAL (2) ───────────────────────
+
+_ORDER_KINDS = {
+    "афиша": ("cinema", "concerthall", "club", "sports", "other"),
+    "кино": ("cinema",),
+    "путешествия": ("avia_ticket", "trains_ticket", "hotelBooking"),
+    "продукты": ("grocery",),
+}
+
+@mcp.tool()
+def orders(kind: str = "", limit: int = 10) -> str:
+    """Все заказы клиента: продукты, кино, концерты, авиабилеты, ж/д, отели.
+    kind — "афиша" | "кино" | "путешествия" | "продукты" | код objectType; пусто = все.
+    Отсортировано по дате создания, новые сверху."""
+    try:
+        s = _require(); s.ensure_fresh()
+        all_orders = s.orders()
+        k = kind.lower().strip()
+        types = _ORDER_KINDS.get(k, (k,) if k else ())
+        picked = [o for o in all_orders
+                  if not types or o.get("objectType") in types] if types else all_orders
+        picked.sort(key=lambda o: str(o.get("created") or ""), reverse=True)
+        if not picked:
+            kinds = sorted({str(o.get("objectType")) for o in all_orders})
+            return f"Заказов вида {kind!r} нет. Доступные objectType: {', '.join(kinds)}"
+        head = f"{len(picked)} заказов" + (f" ({kind})" if kind else " всего")
+        lines = []
+        for o in picked[:limit]:
+            f = o.get("fields") or {}
+            what = (f.get("eventName") or f.get("hotelName") or f.get("objectName")
+                    or f.get("applicationName") or f.get("partnerName") or "")
+            lines.append(
+                f"- {str(o.get('created',''))[:10]} | {o.get('objectType','?'):13} "
+                f"| {o.get('status','?'):15} | {o.get('amount','?'):>10} ₽ | {what[:34]} "
+                f"| id={o.get('orderId','?')}")
+        return head + "\n" + "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def order_details(order_id: str) -> str:
+    """Детали одного заказа (места, зал, код брони, состав корзины).
+    Работает для развлекательных заказов (кино/концерты); для продуктов —
+    grocery_order_status, для поездок деталей в этом API нет, только orders()."""
+    try:
+        s = _require(); s.ensure_fresh()
+        d = s.order_details(order_id)
+        info, obj = d.get("orderInfo") or {}, d.get("objectInfo") or {}
+        ev, cart = d.get("eventInfo") or {}, d.get("cartInfo") or {}
+        f = info.get("fields") or {}
+        out = [f"Заказ {info.get('orderId', order_id)} | {info.get('status','?')} "
+               f"| создан {str(info.get('created',''))[:16]}"]
+        if ev:
+            out.append(f"Событие: {ev.get('eventName','?')} ({', '.join(ev.get('genres') or [])})")
+        if obj:
+            geo = obj.get("geo") or {}
+            out.append(f"Место: {obj.get('objectName','?')}, {geo.get('address','')}")
+        if info.get("reserveDate"):
+            out.append(f"Сеанс: {str(info['reserveDate'])[:16]}, {f.get('hallName','')}")
+        if f.get("reservationCode"):
+            out.append(f"Код брони: {f['reservationCode']}")
+        for el in (cart.get("cartElement") or []):
+            pos = ((el.get("fields") or {}).get("seatPos") or {})
+            seat = f"ряд {pos.get('row')}, место {pos.get('number')}" if pos else ""
+            out.append(f"  - {el.get('price','?')} ₽ ({seat})")
+        if cart.get("amount"):
+            out.append(f"Итого: {cart['amount']} ₽")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+
+_TRAVEL_BLOCKED = {
+    "avia_ticket": ("маршрут, места и пассажиров отдаёт www.tbank.ru/api/travel/flight/order, "
+                    "но он требует веб-сессию, привязанную к одноразовому токену из "
+                    "/v1/travel_link_auth_token — а тот отвечает INSUFFICIENT_PRIVILEGES "
+                    "даже на CLIENT-сессии"),
+    "trains_ticket": ("вагон, места и пассажиров отдаёт trains.t-bank-app.ru/api/orders/{id}, "
+                      "но он авторизуется по cookie, которую ставит редирект "
+                      "/authorization/authorize?auth_token=… — а токен для него минтит "
+                      "tsocial.tinkoff.ru/api-gateway/auth/game/link-token, и нам он "
+                      "возвращает ошибку B002D965"),
+}
+
+@mcp.tool()
+def travel_order_details(order_id: str) -> str:
+    """Детали поездки по orderId из orders("путешествия").
+
+    Полная карточка есть только для ОТЕЛЕЙ: даты, отель, номер, питание, гости.
+    Для авиа и ж/д API отдаёт только сводку из orders() — почему, тул объяснит."""
+    try:
+        s = _require(); s.ensure_fresh()
+        order = next((o for o in s.orders()
+                      if str(o.get("orderId")) == str(order_id)), None)
+        if not order:
+            return f"Заказ {order_id} не найден. Список — orders(\"путешествия\")."
+        kind = order.get("objectType") or "?"
+        f = order.get("fields") or {}
+        head = (f"Заказ {order_id} | {kind} | {order.get('status','?')} "
+                f"| {order.get('amount','?')} ₽ | оформлен {str(order.get('created',''))[:10]}")
+        if kind in _TRAVEL_BLOCKED:
+            what = f.get("eventName") or f.get("hotelName") or ""
+            when = str(f.get("endDate") or "")[:16]
+            return (f"{head}\n{what}" + (f"\nЗавершение: {when}" if when else "")
+                    + f"\n\nДеталей больше нет: {_TRAVEL_BLOCKED[kind]}.")
+        if kind != "hotelBooking":
+            return head + f"\nДетальной карточки для типа {kind} в этом API нет."
+        b = s.hotel_booking(order_id)
+        if not b:
+            return head + "\nБронь не найдена на hotels.t-bank-app.ru."
+        h = b.get("hotelData") or {}
+        area = h.get("areaLocation") or {}
+        rate = b.get("rateData") or {}
+        out = [head,
+               f"Отель: {h.get('hotelName','?')} {'★' * int(h.get('starRating') or 0)}"
+               f" | {area.get('destinationName','')}, {area.get('countryName','')}",
+               f"Заезд {b.get('checkInDate','?')} c {h.get('checkInTime','?')}, "
+               f"выезд {b.get('checkOutDate','?')} до {h.get('checkOutTime','?')}",
+               f"Статус брони: {b.get('internalStatus','?')}"]
+        for room in (rate.get("rooms") or []):
+            guests = ", ".join(f"{g.get('firstName','')} {g.get('lastName','')}".strip()
+                               for g in (room.get("guests") or []))
+            out.append(f"Номер: {room.get('name') or room.get('roomName') or '—'} "
+                       f"| взрослых {room.get('adultsNumber','?')}, "
+                       f"детей {room.get('childNumber','?')}")
+            if room.get("mealName"):
+                out.append(f"  Питание: {room['mealName']}")
+            if guests:
+                out.append(f"  Гости: {guests}")
+        contact = b.get("contactData") or {}
+        if contact:
+            out.append(f"Контакты брони: {contact.get('email','')} {contact.get('phone','')}")
+        if h.get("phone") or h.get("email"):
+            out.append(f"Отель: тел. {h.get('phone','')} {h.get('email','')}")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+
+# ── GROCERY NUTRITION (2) ──────────────────────────────────
+
+@mcp.tool()
+def grocery_good_info(good_id: str, app_id: str = "", point_id: str = "") -> str:
+    """Карточка товара: состав, КБЖУ, вес, срок хранения, производитель.
+    good_id — из grocery_search()/grocery_plan_order(). КБЖУ приводится на 100 г
+    и на упаковку (у части сетей КБЖУ есть только текстом — он разбирается)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        app_id, point_id = _store(app_id, point_id)
+        g = s.grocery_good(good_id, app_id=app_id, point_id=point_id)
+        if not g:
+            return f"Товар {good_id} не найден в магазине {app_id}/{point_id}."
+        meta = g.get("meta") or {}
+        n = s.nutrition(g)
+        w = meta.get("weight") or {}
+        out = [f"{g.get('name','?')}  (id={g.get('id', good_id)})",
+               f"Цена: {(g.get('price') or {}).get('value','?')} ₽   "
+               f"Вес: {w.get('value','?')} {w.get('unit','')}   "
+               f"В наличии: {g.get('count','?')}"]
+        if n["kcal"] is not None or n["protein"] is not None:
+            out.append(f"КБЖУ/100 г: {n['kcal'] if n['kcal'] is not None else '?'} ккал, "
+                       f"Б {n['protein']}, Ж {n['fat']}, У {n['carb']}")
+            if n["kcal_pack"] is not None:
+                out.append(f"На упаковку ({n['grams']:.0f} г): {n['kcal_pack']:.0f} ккал")
+        else:
+            out.append("КБЖУ: сеть не публикует")
+        if meta.get("manufacturer"):
+            out.append(f"Производитель: {meta['manufacturer']}")
+        if meta.get("storage"):
+            out.append(f"Хранение: {meta['storage']}")
+        if meta.get("description"):
+            out.append(f"Описание: {meta['description'][:300]}")
+        if meta.get("ingredients"):
+            out.append(f"Состав: {meta['ingredients'][:700]}")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+def _rank_rows(rows: list[dict], sort_by: str, order: str) -> list[dict]:
+    """Sort candidate rows by one attribute.
+
+    Rows missing that attribute always go LAST, in both directions — an item whose
+    calories the retailer never published must not win a "highest calories" query
+    just because None happens to compare low."""
+    if not sort_by:
+        return rows                        # no criterion → keep the store's order
+    desc = str(order).lower().startswith("desc")
+    return sorted(rows, key=lambda r: (r.get(sort_by) is None,
+                                       -(r[sort_by]) if desc and r.get(sort_by) is not None
+                                       else (r.get(sort_by) if r.get(sort_by) is not None else 0)))
+
+@mcp.tool()
+def grocery_rank(query: str, app_id: str = "", point_id: str = "",
+                 sort_by: str = "", order: str = "asc", limit: int = 8,
+                 with_nutrition: bool = False) -> str:
+    """Кандидаты по запросу с атрибутами, опционально отсортированные.
+
+    Это ИНСТРУМЕНТ, а не политика: сам по себе никакой стратегии выбора не
+    применяет. Стратегию задаёт вызывающий, и только когда пользователь её
+    попросил — иначе sort_by пустой и порядок остаётся магазинным.
+
+    sort_by: price | weight | kcal | kcal_pack | protein | fat | carb (пусто = без
+    сортировки). order: asc | desc. Питательные поля тянутся автоматически, если
+    по ним сортируем (это +1 запрос на кандидата), либо по with_nutrition=True.
+    Товары, у которых сеть не публикует нужное поле, всегда уходят в конец — и при
+    asc, и при desc: «нет данных» не равно нулю."""
+    try:
+        s = _require(); s.ensure_fresh()
+        app_id, point_id = _store(app_id, point_id)
+        key = sort_by.strip().lower()
+        if key and key not in s.SORTABLE_KEYS:
+            return (f"Неизвестное поле сортировки {sort_by!r}. "
+                    f"Доступны: {', '.join(s.SORTABLE_KEYS)} (или пусто — без сортировки).")
+        need_nutrition = with_nutrition or key in s.NUTRITION_KEYS
+        rows = s.grocery_candidates(query, app_id=app_id, point_id=point_id,
+                                    limit=limit, with_nutrition=need_nutrition)
+        if not rows:
+            return f"По запросу {query!r} ничего не найдено в магазине {app_id}/{point_id}."
+        rows = _rank_rows(rows, key, order)
+        n = lambda v: "—" if v is None else f"{v:g}"   # noqa: E731 — часть КБЖУ сеть не публикует
+        head = f"«{query}» — {len(rows)} кандидатов"
+        head += f", сортировка по {key} ({'убыв' if order.lower().startswith('desc') else 'возр'}):" \
+            if key else ", порядок магазина (сортировка не запрошена):"
+        lines = [head]
+        for r in rows:
+            line = f"- {n(r.get('price')):>7} ₽ | {r.get('weight_label') or '—':>10}"
+            if need_nutrition:
+                kcal = f"{r['kcal']:.0f}" if r.get("kcal") is not None else "—"
+                line += (f" | {kcal:>5} ккал/100г | Б{n(r.get('protein'))}"
+                         f"/Ж{n(r.get('fat'))}/У{n(r.get('carb'))}")
+            lines.append(line + f" | {r['name'][:42]} | id={r['id']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+
+# ── APP SEARCH (1) ─────────────────────────────────────────
+
+# Pure UI scaffolding in the search response — carries no searchable entity.
+_SEARCH_NOISE = {"masterWidget", "block_marker"}
+
+def _search_rows(hits: list[dict]) -> list[dict]:
+    """Flatten a search response into {type, name, note, id} rows.
+
+    Two hit shapes come back. `afisha`/`movie_main` return typed entities
+    (eventId/eventName/objectName). `services` wraps results in `universal_block`
+    display cards whose id only exists inside a deeplink
+    ("tinkoffbank://…/Movies?movieId=104321")."""
+    rows = []
+    for hit in hits:
+        kind = hit.get("objectType") or "?"
+        src = hit.get("objectSource") or {}
+        if kind == "universal_block":
+            rows.extend(_search_rows(src.get("objects") or []))
+            continue
+        if kind in _SEARCH_NOISE:
+            continue
+        name = src.get("eventName") or src.get("name") or ""
+        note = ""
+        ident = str(src.get("eventId") or src.get("id") or "")
+        if not name and isinstance(src.get("title"), dict):
+            name = src["title"].get("value") or ""
+            note = ((src.get("titleDescription") or {}).get("value") or "")
+            deeplink = (src.get("link") or {}).get("deeplink") or ""
+            m = re.search(r"[?&](?:movieId|eventId|id)=([^&]+)", deeplink)
+            ident = m.group(1) if m else ident
+        if not name:
+            continue
+        if not note:
+            venue = src.get("objectName") or ""
+            when = src.get("dateForShow") or ""
+            price = src.get("priceForShow") or ""
+            note = " · ".join(x for x in (venue, when, price) if x)
+        rows.append({"type": kind, "name": name, "note": note, "id": ident})
+    return rows
+
+@mcp.tool()
+def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
+    """Полнотекстовый поиск по разделу приложения.
+
+    screen — СТРОГИЙ enum, угадывать бесполезно (всё остальное → 400):
+      afisha     — кино, концерты, театр, выставки, спектакли (по умолчанию);
+                   отдаёт eventId, готовый для cinema_schedule/concert_schedule
+      movie_main — только фильмы
+      services   — самый широкий: та же афиша плюс контакты из телефонной книги
+                   и сервисные блоки; id приходится доставать из диплинка
+      grocery    — каталог магазина, но для него есть grocery_search/grocery_rank
+                   (там нужны app_id/point_id и фильтр «в наличии»)"""
+    try:
+        s = _require(); s.ensure_fresh()
+        rows = _search_rows(s.app_search(query, screen=screen, limit=limit))
+        if not rows:
+            return f"По запросу {query!r} в разделе {screen!r} ничего не найдено."
+        by_type: dict[str, list[dict]] = {}
+        for r in rows:
+            by_type.setdefault(r["type"], []).append(r)
+        out = [f"«{query}» в разделе {screen}: {len(rows)} результатов"]
+        for kind, items in by_type.items():
+            out.append(f"  {kind}:")
+            for r in items:
+                out.append(f"    - {r['name'][:56]}"
+                           + (f" | {r['note'][:44]}" if r["note"] else "")
+                           + (f" | id={r['id']}" if r["id"] else ""))
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+
+# ── CINEMA (2) ─────────────────────────────────────────────
+
+@mcp.tool()
+def cinema_search(query: str = "", city: str = "Москва") -> str:
+    """Найти фильм в прокате и его eventId (нужен для cinema_schedule).
+    query — часть названия; пусто = вся сегодняшняя афиша города."""
+    try:
+        s = _require(); s.ensure_fresh()
+        movies = s.cinema_movies(city=city, query=query)
+        if not movies:
+            return f"В прокате ({city}) ничего не найдено по запросу {query!r}."
+        return "\n".join(
+            f"- {m.get('name','?')} [{m.get('ageRestriction','')}] "
+            f"| {', '.join(m.get('genres') or [])} | {m.get('country','')} "
+            f"| eventId={m.get('eventId','?')}"
+            for m in movies[:20])
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def cinema_schedule(event_id: str, date: str, cinema: str = "",
+                    around: str = "", window_min: int = 90,
+                    city: str = "Москва") -> str:
+    """Сеансы фильма на дату. event_id — из cinema_search(), date — YYYY-MM-DD.
+    cinema — подстрока названия кинотеатра ("каро 11"), around — время "17:00",
+    window_min — допуск в минутах вокруг него."""
+    try:
+        s = _require(); s.ensure_fresh()
+        venues = s.cinema_schedule(event_id, date, city=city)
+        want = cinema.lower().replace("ё", "е").split()
+        target = None
+        if around:
+            hh, _, mm = around.partition(":")
+            target = int(hh) * 60 + int(mm or 0)
+        lines, shown = [], 0
+        for v in venues:
+            info = v.get("info") or {}
+            name = str(info.get("objectName") or "")
+            norm = name.lower().replace("ё", "е")
+            if want and not all(w in norm for w in want):
+                continue
+            geo = info.get("geo") or {}
+            for ev in (v.get("events") or []):
+                slots = []
+                for sl in (ev.get("slots") or []):
+                    t = str(sl.get("startTime") or "")
+                    if target is not None and ":" in t:
+                        mins = int(t[:2]) * 60 + int(t[3:5])
+                        if abs(mins - target) > window_min:
+                            continue
+                    slots.append(f"{t} — {(sl.get('prices') or {}).get('fix','?')} ₽ "
+                                 f"({sl.get('hallName','')}, slotId={sl.get('slotId','?')})")
+                if not slots:
+                    continue
+                shown += 1
+                km = (geo.get("distance") or 0) / 1000.0
+                lines.append(f"{name} — {geo.get('address','')}"
+                             + (f"  [{km:.1f} км]" if km else ""))
+                lines += [f"    {x}" for x in slots]
+        if not lines:
+            hint = f", фильтр «{cinema}»" if cinema else ""
+            hint += f", около {around} ±{window_min} мин" if around else ""
+            return (f"Сеансов на {date} не найдено ({len(venues)} кинотеатров в выдаче{hint}).")
+        return f"{shown} площадок с подходящими сеансами на {date}:\n" + "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+
+# ── TICKET BOOKING (6) ─────────────────────────────────────
+
+def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "") -> list[str]:
+    """Vacant seats grouped by row, cheapest rows first."""
+    out = []
+    for hall in halls:
+        seats = [s for s in (hall.get("seats") or []) if s.get("status") == "vacant"]
+        if max_price:
+            seats = [s for s in seats if float(s.get("price") or 0) <= max_price]
+        by_row: dict[str, list] = {}
+        for s in seats:
+            pos = s.get("pos") or {}
+            by_row.setdefault(str(pos.get("row") or "—"), []).append(s)
+        if not by_row:
+            continue
+        out.append(f"{hall.get('hallName','?')} — свободно {len(seats)}")
+        for r in sorted(by_row, key=lambda x: (len(x), x)):
+            if row and str(row) != r:
+                continue
+            group = sorted(by_row[r], key=lambda s: int((s.get("pos") or {}).get("number") or 0))
+            prices = sorted({float(s.get("price") or 0) for s in group})
+            nums = ", ".join(str((s.get("pos") or {}).get("number") or "?") for s in group[:24])
+            more = f" …ещё {len(group) - 24}" if len(group) > 24 else ""
+            price = (f"{prices[0]:.0f} ₽" if len(prices) == 1
+                     else f"{prices[0]:.0f}–{prices[-1]:.0f} ₽")
+            out.append(f"  ряд {r:>3} ({price}): {nums}{more}")
+    return out
+
+@mcp.tool()
+def cinema_seats(event_id: str, slot_id: str, object_id: str,
+                 row: str = "", max_price: float = 0, kind: str = "movie") -> str:
+    """Свободные места на сеансе, по рядам. Денег не двигает.
+    slot_id и object_id — из cinema_schedule()/concert_schedule().
+    row — показать только один ряд, max_price — потолок цены за место.
+    kind — "movie" или "concert"."""
+    try:
+        s = _require(); s.ensure_fresh()
+        halls = s.event_seats(event_id, slot_id, object_id, kind=kind)
+        if not halls:
+            return ("Схема зала пуста. Для концертов со свободной рассадкой "
+                    "смотри concert_hall() — там места не нумеруются.")
+        lines = _seat_rows(halls, max_price=max_price, row=row)
+        if not lines:
+            return "Свободных мест по заданным условиям нет."
+        return "\n".join(lines) + (
+            "\n\nДальше: cinema_book(event_id, slot_id, object_id, seats=\"ряд:место,…\")"
+            " — это БРОНЬ без оплаты.")
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def concert_hall(event_id: str, slot_id: str, object_id: str) -> str:
+    """Секторы концерта со свободной рассадкой (входные билеты, фан-зоны).
+    Только чтение: примера создания заказа для такого экрана в захвате нет,
+    поэтому бронировать отсюда MCP не умеет — только смотреть наличие."""
+    try:
+        s = _require(); s.ensure_fresh()
+        data = s.concert_hall(event_id, slot_id, object_id)
+        info = data.get("info") or {}
+        sectors = data.get("sectors") or []
+        if not sectors:
+            return "Секторов не найдено (возможно, у площадки нумерованные места — cinema_seats)."
+        out = [f"{info.get('hallName','?')} | максимум мест в заказе: "
+               f"{info.get('maxSeatsInOrder','?')}"]
+        for sec in sectors:
+            p = (sec.get("prices") or {}).get("fix")
+            out.append(f"- {sec.get('sectorName','?')[:52]} | "
+                       f"{'есть' if sec.get('isTicketsAvailable') else 'нет'} "
+                       f"({sec.get('availableTickets', 0)} шт) | "
+                       f"{f'{p:.0f} ₽' if p else 'цена не указана'}")
+        return "\n".join(out) + "\n\nБронирование таких секторов через MCP не реализовано."
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def concert_schedule(event_id: str) -> str:
+    """Показы концерта: площадка, дата, slotId и objectId для cinema_seats().
+    event_id — из search_app(query, screen="afisha")."""
+    try:
+        s = _require(); s.ensure_fresh()
+        venues = s.concert_schedule(event_id)
+        if not venues:
+            return f"Показов для события {event_id} не найдено."
+        out = []
+        for v in venues:
+            info = v.get("info") or {}
+            geo = info.get("geo") or {}
+            out.append(f"{info.get('objectName','?')} — {geo.get('address','')} "
+                       f"| objectId={info.get('objectId','?')}")
+            for ev in (v.get("events") or []):
+                for sl in (ev.get("slots") or []):
+                    price = (sl.get("prices") or {}).get("fix")
+                    out.append(f"    {str(sl.get('startDateTime',''))[:16]} | "
+                               f"{f'{price:.0f} ₽' if price else 'цена по секторам'} "
+                               f"| slotId={sl.get('slotId','?')}")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,
+                kind: str = "movie", seat_type: str = "basic") -> str:
+    """ЗАБРОНИРОВАТЬ места. Создаёт заказ, но НЕ платит — деньги списывает
+    отдельный ticket_pay(). Неоплаченная бронь отваливается сама.
+
+    seats — через запятую: для кино "7:10,7:11" (ряд:место из cinema_seats),
+    для концертов — составные seatId из cinema_seats(kind="concert") как есть.
+
+    Покажи пользователю итоговую сумму со сбором ДО вызова ticket_pay."""
+    try:
+        s = _require(); s.ensure_fresh()
+        ids = [x.strip() for x in seats.split(",") if x.strip()]
+        if not ids:
+            return "Не переданы места. Пример: seats=\"7:10,7:11\"."
+        payload = ([{"id": i} for i in ids] if kind == "concert"
+                   else [{"id": i, "type": seat_type} for i in ids])
+        res = s.create_ticket_order(event_id, slot_id, object_id, payload, kind=kind)
+        order = res.get("order") or {}
+        cart = res.get("cart") or []
+        if not order.get("orderId"):
+            return f"Заказ не создан: {json.dumps(res, ensure_ascii=False)[:400]}"
+        total = sum(float(c.get("price") or 0) for c in cart) or order.get("price")
+        fee = sum(float(c.get("serviceFee") or 0) for c in cart)
+        out = [f"ЗАБРОНИРОВАНО (не оплачено): заказ {order['orderId']}",
+               f"{order.get('eventName','?')} | {order.get('objectName','')} "
+               f"| {str(order.get('dateTime',''))[:16]}"]
+        for c in cart:
+            pos = ((c.get("fields") or {}).get("seatPos") or {})
+            where = (f"ряд {pos.get('row')}, место {pos.get('number')}" if pos
+                     else (c.get("fields") or {}).get("sectorName", ""))
+            out.append(f"  - {c.get('price','?')} ₽ ({where})")
+        out.append(f"Итого: {total} ₽" + (f", в т.ч. сервисный сбор {fee:.0f} ₽" if fee else ""))
+        for cb in (order.get("cashbackInfos") or []):
+            out.append(f"Кэшбэк: {cb.get('value')}%")
+        out.append(
+            f"\nОплатить: ticket_pay(\"{order['orderId']}\", {total}, "
+            f"\"{order.get('nfsPaymentToken','')}\") — РЕАЛЬНЫЕ ДЕНЬГИ, сначала "
+            "подтверди сумму с пользователем. Токен возвращается ТОЛЬКО здесь, "
+            "order_details() его не отдаёт — не потеряй.")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
+               account_id: str = "") -> str:
+    """ОПЛАТИТЬ бронь билета. РЕАЛЬНЫЕ ДЕНЬГИ — вызывай ТОЛЬКО после того, как
+    пользователь подтвердил конкретную сумму и заказ. Сам по себе запрос
+    пользователя «купи билет» подтверждением НЕ является.
+
+    Все три первых аргумента бери из ответа cinema_book(): order_id, итоговую
+    сумму и nfs_payment_token. Токен живёт только в ответе на создание заказа —
+    order_details() его не отдаёт, поэтому переспросить потом будет негде.
+    account_id — счёт списания (по умолчанию первый рублёвый Current)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        if not nfs_payment_token:
+            return ("Нужен nfs_payment_token из ответа cinema_book() — платёжный шлюз "
+                    "без него не примет заказ, а order_details() этот токен не возвращает.")
+        # Cross-check against the order the bank actually holds: paying an amount
+        # that disagrees with the order is how a payment gets stuck half-applied.
+        info = s.order_details(order_id)
+        booked = (info.get("cartInfo") or {}).get("amount")
+        if booked and abs(float(booked) - float(amount)) > 0.01:
+            return (f"Сумма не сходится: передано {amount} ₽, а в заказе {order_id} "
+                    f"{booked} ₽. Оплату не запускаю — сверься с order_details().")
+        account = account_id or s._source_account()
+        res = s.pay_marketplace_order(order_id, float(amount), account, nfs_payment_token)
+        stage = res.get("stage") or {}
+        status = stage.get("status") or stage.get("type") or "?"
+        if str(status).upper() != "SUCCESS":
+            return (f"Оплата заказа {order_id} НЕ подтверждена: {json.dumps(res, ensure_ascii=False)[:300]}\n"
+                    "Не повторяй вслепую — сначала проверь orders() и order_details().")
+        return (f"ОПЛАЧЕНО: заказ {order_id}, {amount} ₽ со счёта {account}. "
+                f"paymentId={res.get('paymentId','?')}\n"
+                f"Код брони и места — order_details(\"{order_id}\").")
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def ticket_cancel(order_id: str, kind: str = "movie") -> str:
+    """Отменить заказ билета. kind — "movie" или "concert".
+
+    ⚠️ Надёжность не подтверждена: в захвате оба пути отмены отвечали 500. Если
+    тул вернёт ошибку, считай статус НЕИЗВЕСТНЫМ (не «всё ещё забронировано») —
+    проверь orders() и при необходимости отменяй через приложение."""
+    try:
+        s = _require(); s.ensure_fresh()
+        s.cancel_ticket_order(order_id, kind=kind)
+        return f"Отмена заказа {order_id} принята. Проверь статус: orders(\"афиша\")."
+    except Exception as e:
+        return (_err(e) + f"\nСтатус заказа {order_id} НЕИЗВЕСТЕН — проверь orders(\"афиша\"). "
+                "Если он всё ещё активен, отмени через приложение.")
+
+
+# ── EXTRAS (3) ─────────────────────────────────────────────
+
+@mcp.tool()
+def bank_documents() -> str:
+    """Справки, заказанные в банке (о движении средств, о доходах и т.п.)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        docs = s.bank_documents()
+        if not docs:
+            return "Справок нет."
+        return "\n".join(
+            f"- {d.get('title','?')} | {d.get('subtitleTop','')} | {d.get('subtitleBottom','')} "
+            f"| {datetime.fromtimestamp((d.get('creationDate') or 0)/1000).strftime('%d.%m.%Y')} "
+            # v2 records put the uuid in tecmId; v1 records keep it in tecmUuid
+            # and use tecmId for a (negative) internal int — prefer the uuid.
+            f"| id={d.get('tecmUuid') or d.get('tecmId','?')}"
+            for d in docs)
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def insurance_policies() -> str:
+    """Действующие страховые полисы (ОСАГО/КАСКО/путешествия) с суммами и сроками."""
+    try:
+        s = _require(); s.ensure_fresh()
+        data = s.insurance_policies()
+        pol = data.get("Payload") if isinstance(data, dict) else data
+        if isinstance(pol, dict):
+            pol = pol.get("Policies") or pol.get("policies") or [pol]
+        if not pol:
+            return "Действующих полисов нет."
+        out = []
+        for p in pol:
+            if not isinstance(p, dict):
+                continue
+            out.append(f"- {p.get('Type', p.get('type','?'))} №{p.get('PolicyNumber', p.get('policyNumber','?'))} "
+                       f"| {p.get('Status', p.get('status',''))} "
+                       f"| {str(p.get('FromDate', p.get('fromDate','')))[:10]} — "
+                       f"{str(p.get('ToDate', p.get('toDate','')))[:10]} "
+                       f"| премия {p.get('Bounty', p.get('bounty','?'))}")
+        return "\n".join(out) or json.dumps(data, ensure_ascii=False)[:2000]
+    except Exception as e:
+        return _err(e)
+
+@mcp.tool()
+def payment_receipt(payment_id: str, save_to: str = "") -> str:
+    """Скачать PDF-чек по операции. payment_id — поле paymentId из orders()
+    или из истории операций. save_to — путь файла (по умолчанию /tmp)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        pdf = s.payment_receipt_pdf(payment_id)
+        if not pdf.startswith(b"%PDF"):
+            return f"Ответ не PDF ({len(pdf)} байт): {pdf[:200]!r}"
+        path = save_to or os.path.join("/tmp", f"receipt-{payment_id}.pdf")
+        with open(path, "wb") as fh:
+            fh.write(pdf)
+        return f"Чек сохранён: {path} ({len(pdf)} байт)"
     except Exception as e:
         return _err(e)
 

@@ -1303,3 +1303,139 @@ BUILTIN_ENDPOINTS.update({
     "get_ip": {"method": "GET", "host": "https://api.tbank.ru", "path": "/v1/get_ip", "params": {}},
     "push_unread_count": {"method": "GET", "host": "https://push-history-api.t-bank-app.ru", "path": "/bank/v3/notifications/unseen/count", "params": {}},
 })
+
+# Endpoints for the scenarios added from captures2.xml (cards, documents, orders,
+# grocery nutrition, cinema). Verified against the capture; item numbers in comments
+# refer to captures2.xml.
+#
+# `session_param` overrides the query key the mobile sessionid is sent under. Most
+# hosts take `sessionid`, but the prefill-profile and insurance hosts spell it
+# `sessionId` and 401 on the lowercase form.
+BUILTIN_ENDPOINTS.update({
+    # ---- cards & accounts (items 368/370/374/428) --------------------------
+    "account_cards": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                      "path": "/v1/account_cards", "params": {}},
+    # ?ucid=<card ucid> — the card's ucid, NOT its id (account_cards gives both)
+    "card_limits": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                    "path": "/v1/limits", "params": {}},
+    # Returns the FULL pan + cvv2 + expireDate. The app sends a device-attributes
+    # bundle alongside; card_requisites() fills those in from the session.
+    "card_credentials": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                         "path": "/v1/card_credentials", "params": {}},
+    # ?account=<id>;RUB (repeatable — pass a list to get every currency at once)
+    "account_group_requisites": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                                 "path": "/v1/account_group_requisites", "params": {}},
+
+    # ---- identity documents (items 8/14/15) -------------------------------
+    "prefill_contact": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                        "path": "/api/prefill/profile/contact", "params": {},
+                        "session_param": "sessionId"},
+    # path is parameterized: /api/prefill/profile/contact/{contactId}/document/all
+    "prefill_documents": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                          "path": "/api/prefill/profile/contact/_/document/all",
+                          "params": {}, "session_param": "sessionId"},
+    "prefill_userinfo_brief": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                               "path": "/api/prefill/profile/contact/_/userinfo/brief",
+                               "params": {}, "session_param": "sessionId"},
+
+    # ---- orders across every vertical (items 96/97/121) --------------------
+    # /api/orders/list is the only endpoint that returns groceries, cinema,
+    # concerts, flights, trains and hotels in ONE list (187 orders back to 2018).
+    "orders_list": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                    "path": "/api/orders/list", "params": {}},
+    # ?orderId= — full detail for entertainment orders (seats, hall, QR code)
+    "order_get": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                  "path": "/api/order", "params": {}},
+
+    # ---- grocery item detail incl. nutrition (item 1020) -------------------
+    "grocery_good": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                     "path": "/api/grocery/good", "params": {"isExpress": "false"}},
+
+    # ---- cinema (items 717/730/800) ---------------------------------------
+    # POST with body {"genres": []}; the collectionCode selects the city listing
+    "events_collection": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                          "path": "/api/events/collection",
+                          "params": {"service": "cinema", "page": "1", "count": "30"}},
+    # POST {"date","eventId","city","sort":{"by":"distance"},"location":{lat,lon}}
+    "schedule_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                       "path": "/api/schedule/movie", "params": {}},
+    "event_movie": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                    "path": "/api/event/movie", "params": {}},
+
+    # ---- extras surfaced by captures2 -------------------------------------
+    # bank-issued certificates (справки) — returns a BARE list, no envelope
+    "bank_documents": {"method": "GET", "host": "https://cx-evolution-api.t-bank-app.ru",
+                       "path": "/v3/cx-evolution-api/documents/get-document-list",
+                       "params": {}},
+    "insurance_policies": {"method": "GET", "host": "https://api.tinsurance.ru",
+                           "path": "/api/v2/policy/active_with_claims", "params": {},
+                           "session_param": "sessionId"},
+    # ?paymentId= — responds with application/pdf, not JSON (raw=True).
+    # The BFF picks its serializer from Accept: with `application/json` (our
+    # default) it answers 200 + {"resultCode":"INTERNAL_ERROR","errorMessage":
+    # "Unsupported EndpointOutput: FixedStatusCode"}. Only the app's browser-ish
+    # Accept yields the PDF — verified live across four paymentIds.
+    "payment_receipt_pdf": {"method": "GET", "host": "https://api.t-bank-app.ru",
+                            "path": "/v1/payment_receipt_pdf", "params": {},
+                            "raw": True,
+                            "headers": {"Accept": "text/html,application/xhtml+xml,"
+                                                  "application/xml;q=0.9,*/*;q=0.8"}},
+})
+
+# messenger/conversations/unread does its own content negotiation and 406s on the
+# generic `application/json` that _mobile_headers injects. It needs the exact
+# vendor type below (capture: captures.xml items 126/211) — hence its own template
+# rather than a header on the shared `messenger_base`, which the conversations /
+# messages / hints / faq / markRead paths reuse and which DO take application/json.
+BUILTIN_ENDPOINTS.update({
+    "messenger_unread": {
+        "method": "GET", "host": "https://tm.t-bank-app.ru",
+        "path": "/app/bank/messenger/conversations/unread", "params": {},
+        "headers": {"Accept": "application/vnd.chats.chatapi.unread.out.v3+json"},
+    },
+})
+
+# Travel order detail. Only the hotel host is reachable from a mobile session:
+# it authorizes on the Bearer alone (verified live). Trains and flights each need
+# a one-time link token that this client cannot mint —
+# `tsocial…/auth/game/link-token` answers B002D965 and `/v1/travel_link_auth_token`
+# answers INSUFFICIENT_PRIVILEGES even on a CLIENT-level session. See FLOWS.md.
+BUILTIN_ENDPOINTS.update({
+    # path is parameterized: /api/v1/hotels/bookings/{bookingId}
+    "hotel_booking": {"method": "GET", "host": "https://hotels.t-bank-app.ru",
+                      "path": "/api/v1/hotels/bookings/_", "params": {}},
+})
+
+# Ticket booking: seat map → order/create → payment-gate → cancel.
+# Verified against captures2.xml items 745/748/763/850/935/965/970.
+BUILTIN_ENDPOINTS.update({
+    # ?eventId&slotId&objectId — seats with status/price; seatId is "row:number"
+    # for cinemas and a composite "Сектор|цена§~§id|type" string for concerts.
+    "scheme_sectors_movie": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                             "path": "/api/scheme/sectors/movie", "params": {}},
+    "scheme_sectors_concert": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                               "path": "/api/scheme/sectors/concert", "params": {}},
+    # free-seating venues answer here instead, as sectors with availableTickets
+    "scheme_hall_concert": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                            "path": "/api/scheme/hall/concert", "params": {}},
+    # POST {"eventId"} — concert showings are not date-scoped like movies
+    "schedule_concert": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                         "path": "/api/schedule/concert", "params": {}},
+    # POST {slotId, objectId, eventId, seats:[{id,type}]} → order + nfsPaymentToken.
+    # Creates a RESERVATION, moves no money; unpaid orders expire on their own.
+    "order_create_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                           "path": "/api/order/create/movie", "params": {}},
+    "order_create_concert": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                             "path": "/api/order/create/concert", "params": {}},
+    # POST ?orderId= with an EMPTY body
+    "order_cancel_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                           "path": "/api/order/cancel/movie", "params": {}},
+    "order_cancel": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                     "path": "/api/order/cancel", "params": {}},
+    # MONEY. Note the host: the existing `payment_gate_pay` template points at the
+    # WEB gate (www.tbank.ru, cookie-auth, used by the grocery Playwright
+    # checkout). Marketplace orders from the mobile app pay through the MOBILE
+    # gate below on a plain Bearer — no browser involved.
+    "payment_gate_pay_mobile": {"method": "POST", "host": "https://api.t-bank-app.ru",
+                                "path": "/pg-api/v1/payment-gate/payments", "params": {}},
+})

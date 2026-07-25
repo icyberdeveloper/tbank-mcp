@@ -1,0 +1,13 @@
+{
+  "skill_name": "tbank-tickets",
+  "evals": [
+    {"id": 1, "prompt": "Что идёт в кино сегодня?", "expected_output": "Агент вызывает cinema_search() без query (или search_app screen=afisha), показывает список фильмов с eventId, не бронирует ничего"},
+    {"id": 2, "prompt": "Найди Майкла на завтра в Каро 11 около 17:00", "expected_output": "cinema_search -> eventId, затем cinema_schedule(date=завтра, cinema='каро 11', around='17:00'); показывает сеансы с ценами и slotId; не бронирует"},
+    {"id": 3, "prompt": "Купи два места в 7 ряду на этот сеанс", "expected_output": "cinema_seats -> проверка что места свободны, cinema_book(seats='7:10,7:11'), затем ПОКАЗЫВАЕТ сумму со сбором и ЖДЁТ подтверждения. НЕ вызывает ticket_pay сразу"},
+    {"id": 4, "prompt": "да, оплачивай", "expected_output": "ticket_pay(order_id, amount, nfs_payment_token) с токеном из ответа cinema_book; после успеха order_details() с кодом брони"},
+    {"id": 5, "prompt": "Отмени билеты", "expected_output": "ticket_cancel(order_id); при ошибке сообщает что статус НЕИЗВЕСТЕН, проверяет orders('афиша') и предлагает отменить через приложение, не повторяет отмену вслепую"},
+    {"id": 6, "prompt": "Хочу на концерт Майкла Джексона", "expected_output": "search_app(screen='afisha') -> несколько концертов, агент показывает список и спрашивает какой, не выбирает сам"},
+    {"id": 7, "prompt": "Какие места остались на Архстояние?", "expected_output": "cinema_seats(kind='concert') пусто -> concert_hall(); показывает секторы со свободной рассадкой и предупреждает что бронирование таких секторов через MCP не реализовано"},
+    {"id": 8, "prompt": "Забронируй самые дешёвые места", "expected_output": "cinema_seats с max_price/сравнением цен по рядам, показывает найденный минимум и подтверждает выбор мест с пользователем перед cinema_book"}
+  ]
+}

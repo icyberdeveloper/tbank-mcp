@@ -4,7 +4,7 @@ Ordered tool-call sequences for common tasks. The session self-refreshes
 (`ensure_fresh` → silent re-login, no OTP) on the first call of each flow, so you
 don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 
-> **Tool names:** the **32 MCP tools** are the authoritative interface (see TOOLS.md
+> **Tool names:** the **48 MCP tools** are the authoritative interface (see TOOLS.md
 > and the skills). Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -135,6 +135,56 @@ You normally just call a read tool; the above runs under the hood. Call
 3. `credit_rating()` / `credit_recommendations()` → rating + advice.
 4. `full_debt_amount()` / `account_details()` → debt + account detail.
 5. `statements()` / `statement_exist()` → statements.
+
+## 8. Cards, account details, identity documents
+
+> **Session LEVEL matters here.** These endpoints validate the mobile *sessionid*,
+> not just the Bearer token, and refuse an ANONYMOUS-level session. The CLIENT
+> window is only ~11 minutes (`/v1/ping` → `portalSessionExpiresInSeconds` ≈ 659)
+> while `ensure_fresh` tracks the ~2h access_token — so between re-mints the
+> session lapses and only these few tools notice. They call
+> `ensure_client_session()`, which pings and re-mints when the window has closed.
+> Both grants (refresh_token and authorization_code) mint an equally privileged
+> session — the grant type is NOT the variable, the window is.
+
+1. `list_cards()` → every card with **both** ids. `id` is what an operation's
+   `card` field holds; `ucid` is what limits/credentials key off. Do not swap them.
+2. `card_limits(ucid)` → monthly purchase + daily cash limits, and what is used up.
+3. `card_requisites(ucid)` → holder, expiry, PAN. Masked by default; `reveal=True`
+   returns the full number and CVV.
+4. `card_operations(card_id, days)` → operations on ONE card. The API has no
+   include-by-card filter (only `excludeCardIds`), so this filters client-side.
+5. `account_requisites(account_id)` → recipient/account/BIC/corr/INN for inbound
+   transfers. `currencies="RUB,USD"` returns one block per currency.
+6. `documents(kind)` → passport, international passport, driver's licence, SNILS,
+   INN, OSAGO/KASKO, PTS/STS. The store also holds RELATIVES' documents the client
+   once entered; they are filtered out by birthDate unless `include_others=True`.
+
+## 9. Orders across every vertical
+
+`orders(kind)` is one call over `/api/orders/list` and covers groceries, cinema,
+concerts, flights, trains and hotels together (188 orders back to 2018).
+`kind` = "афиша" | "кино" | "путешествия" | "продукты" or a raw `objectType`.
+`order_details(order_id)` adds hall/seats/booking code for entertainment orders;
+groceries have their own `grocery_order_status`, and travel orders carry no extra
+detail on this host.
+
+## 10. Grocery nutrition / lowest-calorie shopping
+
+1. `grocery_search(query, app_id, point_id)` → candidate goods.
+2. `grocery_good_info(good_id, …)` → ingredients, storage, and КБЖУ per 100 g and
+   per package. Nutrition comes in two shapes: some retailers fill the structured
+   protein/fat/carb/energy fields, ВкусВилл leaves them empty and publishes only
+   free text ("белки 3,3 г, жиры 3 г, углеводы 18,4 г; 113,8 ккал") — both parsed.
+3. `grocery_pick_lightest(query, …)` → the same search, ranked by kcal/100 g.
+   Goods whose nutrition the retailer does not publish sort LAST, not zero.
+
+## 11. Cinema
+
+1. `cinema_search(query, city)` → eventId (city-independent).
+2. `cinema_schedule(event_id, date, cinema="каро 11", around="17:00")` → showtimes
+   per venue, filtered by venue-name substring and a time window (`window_min`).
+   Returns `slotId` per showing — the handle a future booking flow would need.
 
 ## Notes
 

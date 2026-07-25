@@ -187,6 +187,10 @@ class MobileSession:
         # fingerprint blob (no capture needed). login()/confirm_otp() populate
         # the SSO_SESSION + session from a real phone+OTP login.
         import uuid as _uuid
+        # Persistence hook, set by the owner (server._require). Every re-mint
+        # rotates the refresh_token, so a re-mint that is not written to disk
+        # burns the token for the NEXT process — see _persist().
+        self._on_persist = None
         # If _minted_at is 0 (loaded from legacy session without timestamp),
         # don't set it to now — that would make an old token look fresh.
         # Leave it 0 — ensure_fresh will refresh before first use.
@@ -241,6 +245,24 @@ class MobileSession:
 
     # -- headless refresh ----------------------------------------------------
 
+    def _persist(self) -> None:
+        """Write the session out after a re-mint, if the owner installed a hook.
+
+        This is not an optimisation — it is required for correctness. `refresh()`
+        rotates the refresh_token, so a process that re-mints and exits without
+        saving leaves the NEXT process holding a spent token; that one then has to
+        fall back to the slower silent_relogin, and if the SSO cookie has also
+        lapsed it fails outright and every tool starts answering SESSION EXPIRED.
+        """
+        hook = getattr(self, "_on_persist", None)
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:
+            # Persisting is best-effort: a read-only HOME must not break reads.
+            pass
+
     def _refresh_body(self) -> dict:
         # EXACT fields of the refresh grant (10 fields). client_id is
         # in the Basic header, not the body. No client_assertion, no redirect_uri.
@@ -289,6 +311,7 @@ class MobileSession:
         self.mobile_sessionid = mobile.get("sessionid", self.mobile_sessionid)
         self.cipher_key = mobile.get("cipher_key", self.cipher_key)
         self._minted_at = time.time()
+        self._persist()          # the refresh_token just rotated — never lose it
         return tok
 
     def _basic_auth(self) -> str:
@@ -296,20 +319,54 @@ class MobileSession:
 
     def ensure_fresh(self, max_age_s: int = 6000) -> None:
         """Re-mint the session before the access_token expires (~2h).
-        Prefers silent_relogin (gives a session valid for BOTH reads and the
-        messenger tmsg); falls back to refresh() if no SSO_SESSION.
-        _minted_at == 0 means unknown age (legacy session) → always refresh."""
+
+        Prefers refresh() — the refresh_token grant — simply because it is ONE
+        request, against silent_relogin's authorize → step → token dance plus a 3 s
+        propagation sleep. silent_relogin stays as the fallback for a dead or
+        rotated refresh_token.
+
+        Both grants mint an equally privileged sessionid (measured: CLIENT with
+        portalSessionExpiresInSeconds 659 vs 656). An earlier version of this
+        comment claimed only refresh() yielded CLIENT — that was a misreading of
+        ensure_client_session's ~11-minute window, see there.
+
+        This only tracks the ~2h access_token. Tools that need a CLIENT-level
+        SESSION must call ensure_client_session() instead — that window is ~11
+        minutes and lapses long before the token does.
+        _minted_at == 0 means unknown age (legacy session) → always re-mint."""
         if self._minted_at == 0 or time.time() - self._minted_at > min(max_age_s, max(60, self.expires_in - 600)):
-            if self.sso_login_cookie and self.auth_step_fingerprint:
-                try:
-                    self.silent_relogin()
-                except Exception:
-                    # SSO silent re-login failed (e.g. SSO_SESSION dead server-side):
-                    # the refresh_token grant can still mint a read-capable session,
-                    # so fall back instead of failing every read.
-                    self.refresh()
-            else:
+            try:
                 self.refresh()
+            except Exception:
+                if not (self.sso_login_cookie and self.auth_step_fingerprint):
+                    raise
+                self.silent_relogin()
+
+    def ensure_client_session(self) -> str:
+        """Guarantee a CLIENT-level sessionid, for the few endpoints that check it.
+
+        The sessionid's CLIENT window is MUCH shorter than the access_token that
+        ensure_fresh() tracks: /v1/ping reports `portalSessionExpiresInSeconds`
+        ≈ 659 right after a re-mint — about 11 minutes — against the token's ~2h.
+        Once it lapses the same sessionid reads back as accessLevel ANONYMOUS /
+        userId 1111, and only the handful of session-validating endpoints notice
+        (card_credentials, prefill/profile documents, session_status); everything
+        else keeps working on the Bearer, which is why the lapse looks like a
+        random failure rather than an expiry.
+
+        So: ping, and re-mint if the window has closed. Costs one extra request,
+        and only the tools that actually need CLIENT should call it."""
+        self.ensure_fresh()
+        def level():
+            try:
+                return (self.keepalive() or {}).get("accessLevel")
+            except TbankApiError:
+                return None
+        current = level()
+        if current == "CLIENT":
+            return current
+        self.refresh()
+        return level() or "UNKNOWN"
 
     # -- reads (template-driven, cookie + Bearer, no signing) -----------------
 
@@ -368,7 +425,9 @@ class MobileSession:
         tpl = self._tpl(template_key)
         params = {k: v for k, v in tpl.get("params", {}).items()
                   if k not in _LIVE_QUERY}
-        params["sessionid"] = self.mobile_sessionid
+        # Most hosts read the mobile sessionid from `sessionid`; the prefill-profile
+        # and insurance hosts spell it `sessionId` and reject the lowercase form.
+        params[tpl.get("session_param") or "sessionid"] = self.mobile_sessionid
         params["deviceId"] = self.device_id
         params["oldDeviceId"] = self.old_device_id or self.device_id
         params["wuid"] = self.device_id
@@ -433,6 +492,11 @@ class MobileSession:
             r = self._http.put(url, params=params, headers=headers, timeout=30)
         else:
             r = self._http.get(url, params=params, headers=headers, timeout=30)
+        if tpl.get("raw"):
+            # A few endpoints answer with bytes, not JSON (payment_receipt_pdf →
+            # application/pdf). _unwrap would raise HTTP_200 on the undecodable body.
+            r.raise_for_status()
+            return r.content
         return self._unwrap(r)
 
     # ---- signed requests (v\d/(pay|group_pay) — x-api-signature) ----------
@@ -628,6 +692,7 @@ class MobileSession:
         # accept it (else INSUFFICIENT_PRIVILEGES). silent_relogin runs ~every 2h,
         # so this sleep is negligible.
         time.sleep(3.0)
+        self._persist()          # same reason as in refresh(): the token rotated
         return tok
 
     # -- login (self-bootstrap: phone + SMS OTP -> SSO_SESSION + session) ----
@@ -764,8 +829,11 @@ class MobileSession:
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/faq"))
 
     def messenger_unread(self) -> dict:
-        return self._call_read("messenger_base",
-            path_override="/app/bank/messenger/conversations/unread")
+        """Conversations with unread messages. Uses its OWN template, not
+        messenger_base: this path content-negotiates and 406s on the generic
+        `application/json` header. Returns {groups, conversationIds, screens}."""
+        data = self._call_read("messenger_unread")
+        return data if isinstance(data, dict) else {}
 
     def messenger_send_message(self, conversation_id: str, body: dict | None = None) -> dict:
         """POST a message to a conversation (WRITE). Replays the request body or override."""
@@ -1711,6 +1779,58 @@ class MobileSession:
         "рагу", "жюльен", "тартар", "карпаччо", "чипс", "снек",
     )
 
+    # `screen` is a strict server-side enum, not a free-form hint: anything else
+    # answers 400 Bad Request (probed ~35 plausible names live — main, search,
+    # cinema, concert_main, feed … all rejected).
+    #   services   — widest: cinema, concert, concerthall, theatre, exhibition,
+    #                spectacle, movie, movie_collection
+    #   afisha     — the same entertainment set, slightly narrower
+    #   movie_main — movies only
+    #   grocery    — store catalog (needs applicationId + pointId)
+    SEARCH_SCREENS = ("services", "afisha", "movie_main", "grocery")
+
+    def _search_params(self, screen: str, **extra) -> dict:
+        """Common query string for the search host."""
+        params = {
+            "screen": screen, "appName": self.app_name,
+            "appVersion": self.app_version, "platform": self.platform,
+            "origin": self.origin, "deviceId": self.device_id,
+            "oldDeviceId": self.old_device_id, "ccc": self.ccc,
+            "cpswc": self.cpswc, "connectionType": self.connection_type,
+            "inache": self.inache,
+        }
+        params.update({k: v for k, v in extra.items() if v not in (None, "")})
+        return params
+
+    def _search_post(self, params: dict, body: dict) -> dict:
+        r = self._http.post("https://search.t-bank-app.ru/search/fulltext",
+                            params=params, json=body,
+                            headers={"Accept": "application/json",
+                                     "User-Agent": "okhttp/4.12.0",
+                                     "Authorization": "Bearer " + self.access_token},
+                            timeout=30)
+        try:
+            return r.json().get("payload") or {}
+        except ValueError:
+            return {}
+
+    def app_search(self, text: str, screen: str = "services",
+                   limit: int = 20) -> list[dict]:
+        """Full-text search across an app section. Returns the raw hits
+        (objectType + objectSource) — the caller decides how to render them.
+
+        The body is minimal on purpose: the real app also sends a `toggles` map of
+        ~12 feature flags, but the endpoint answers identically without it
+        (verified live), so there is nothing to keep in sync."""
+        if screen not in self.SEARCH_SCREENS:
+            raise TbankApiError("BAD_SEARCH_SCREEN",
+                f"unknown screen {screen!r}; valid: {', '.join(self.SEARCH_SCREENS)}")
+        payload = self._search_post(
+            self._search_params(screen),
+            {"text": text, "maxObjectsCount": max(1, limit), "screenContext": {}})
+        hits = payload.get("sortedByScoreObjects") or []
+        return [h for h in hits if isinstance(h, dict)][:limit]
+
     def grocery_search(self, query: str, app_id: str = "", point_id: str = "") -> list[dict]:
         """Global grocery search via search/fulltext — searches the ENTIRE store
         catalog (not just one category). Uses inStockFilter (only available
@@ -1728,15 +1848,8 @@ class MobileSession:
             "sortTypes": [{"type": "grocery_goods", "name": "default"}],
             "text": query.replace("ё", "е"),
         }
-        params = {
-            "screen": "grocery", "context": "api", "applicationId": app_id,
-            "pointId": point_id, "appName": self.app_name,
-            "appVersion": self.app_version, "platform": self.platform,
-            "origin": self.origin, "deviceId": self.device_id,
-            "oldDeviceId": self.old_device_id, "ccc": self.ccc,
-            "cpswc": self.cpswc, "connectionType": self.connection_type,
-            "inache": self.inache,
-        }
+        params = self._search_params("grocery", context="api",
+                                     applicationId=app_id, pointId=point_id)
         r = self._http.post("https://search.t-bank-app.ru/search/fulltext",
                            params=params, json=search_body,
                            headers={**base, "Authorization": "Bearer " + self.access_token},
@@ -2058,6 +2171,359 @@ class MobileSession:
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
         return self.pay(body)
 
+
+    # ---- cards, limits, requisites ---------------------------------------
+
+    def account_cards(self, account_id: str) -> list[dict]:
+        """Cards issued on one account. Each card carries BOTH an `id` and a
+        `ucid` — /v1/limits and /v1/card_credentials key off the **ucid**, while
+        an operation's `card` field holds the **id**. Mixing them up silently
+        returns another card's data."""
+        data = self._call_read("account_cards", overrides={"id": str(account_id)})
+        return data if isinstance(data, list) else []
+
+    def cards(self) -> list[dict]:
+        """Every card across every account, annotated with its account.
+        Accounts that carry no cards (deposits, credit, invest) just 400 — skipped."""
+        out: list[dict] = []
+        for acc in self.list_accounts():
+            aid = str(acc.get("id") or "")
+            if not aid:
+                continue
+            try:
+                found = self.account_cards(aid)
+            except TbankApiError:
+                continue
+            for c in found:
+                if not isinstance(c, dict):
+                    continue
+                c = dict(c)
+                c["account"] = aid
+                c["accountName"] = acc.get("name") or ""
+                out.append(c)
+        return out
+
+    def card_limits(self, ucid: str) -> list[dict]:
+        data = self._call_read("card_limits", overrides={"ucid": str(ucid)})
+        return data if isinstance(data, list) else []
+
+    def _credentials_fingerprint(self) -> str:
+        """The device blob /v1/card_credentials expects — the ###-delimited UA
+        form (NOT the JSON fingerprint used at auth/step)."""
+        ua = self._mobile_ua() or "iPhone/iOS/TCSMB"
+        return f"{ua}###1170x2532x32###-180###false###false###"
+
+    def card_credentials(self, ucid: str) -> dict:
+        """Full card number + CVV + expiry for one card. Sensitive: the caller
+        decides whether to show or mask it."""
+        ov = {
+            "ucid": str(ucid),
+            "fingerprint": self._credentials_fingerprint(),
+            "fingerprint_change_date": "0",
+            "mobile_device_os": self.platform or "ios",
+            "mobile_device_os_version": _IOS_VERSION,
+            "mobile_device_model": "iPhone",
+        }
+        data = self._call_read("card_credentials", overrides=ov)
+        return data if isinstance(data, dict) else {}
+
+    def account_requisites(self, account_id: str,
+                           currencies: tuple = ("RUB",)) -> list[dict]:
+        """Bank details for an account. The `account` param repeats once per
+        currency (`<id>;RUB`) — a list value becomes repeated query params."""
+        accounts = [f"{account_id};{c}" for c in currencies]
+        data = self._call_read("account_group_requisites",
+                               overrides={"account": accounts})
+        return data if isinstance(data, list) else []
+
+    # ---- identity documents ----------------------------------------------
+
+    def prefill_contact_id(self) -> str:
+        data = self._call_read("prefill_contact")
+        contacts = (data or {}).get("contacts") or []
+        if not contacts:
+            raise TbankApiError("NO_CONTACT", "prefill profile returned no contact")
+        return str(contacts[0].get("id") or "")
+
+    def identity_documents(self) -> dict:
+        """Every document the bank holds, grouped by kind (RusNationalID,
+        RusDriversLic, RusInternationalID, RusSNILS, RusINN, RusOSAGO, …).
+
+        Includes RELATIVES' documents the client once entered, so the caller must
+        separate them — see documents() in server.py, which matches on birthDate."""
+        cid = self.prefill_contact_id()
+        data = self._call_read(
+            "prefill_documents",
+            path_override=f"/api/prefill/profile/contact/{cid}/document/all")
+        return (data or {}).get("documents") or {}
+
+    def identity_brief(self) -> dict:
+        """The account holder's own birthDate/sex — the key that tells their
+        documents apart from a relative's."""
+        cid = self.prefill_contact_id()
+        data = self._call_read(
+            "prefill_userinfo_brief",
+            path_override=f"/api/prefill/profile/contact/{cid}/userinfo/brief")
+        return (data or {}).get("brief") or {}
+
+    # ---- orders (every vertical) -----------------------------------------
+
+    def orders(self) -> list[dict]:
+        """All orders across groceries, cinema, concerts, flights, trains and
+        hotels — the app's single "Заказы" feed. Newest first is NOT guaranteed;
+        sort on `created`."""
+        data = self._call_read("orders_list")
+        lst = (data or {}).get("list") if isinstance(data, dict) else data
+        return lst if isinstance(lst, list) else []
+
+    def order_details(self, order_id: str) -> dict:
+        """Full detail for one entertainment order (hall, seats, QR, cast)."""
+        data = self._call_read("order_get", overrides={"orderId": str(order_id)})
+        return data if isinstance(data, dict) else {}
+
+    def hotel_booking(self, booking_id: str) -> dict:
+        """Full detail for a hotel booking: dates, hotel, room, guests, meals.
+
+        Unlike the flight and rail hosts, this one accepts the plain mobile Bearer
+        — no per-service link token — so it works straight from a mobile session."""
+        data = self._call_read(
+            "hotel_booking",
+            path_override=f"/api/v1/hotels/bookings/{booking_id}")
+        return data if isinstance(data, dict) else {}
+
+    # ---- grocery item detail + nutrition ---------------------------------
+
+    def grocery_good(self, good_id: str, app_id: str = "", point_id: str = "") -> dict:
+        app_id, point_id = _need_store(app_id, point_id)
+        data = self._call_read("grocery_good", overrides={
+            "appId": str(app_id), "pointId": str(point_id), "goodId": str(good_id)})
+        return (data or {}).get("good") or {}
+
+    @staticmethod
+    def nutrition(good: dict) -> dict:
+        """КБЖУ per 100 g, plus per-package totals.
+
+        Two shapes in the wild and only one is structured: Самокат (appId 695)
+        fills meta.nutritionalValue.{protein,fat,carbohydrate,energy}; ВкусВилл
+        (204) leaves all four empty and puts everything in the free-text `value`
+        ("белки 3,3 г, жиры 3 г, углеводы 18,4 г; 113,8 ккал"). Parse the text
+        whenever a structured field is missing, else half the catalog reads as
+        "no data"."""
+        meta = (good or {}).get("meta") or {}
+        nv = meta.get("nutritionalValue") or {}
+        text = str(nv.get("value") or "")
+
+        def num(x):
+            try:
+                return float(str(x).replace(",", ".").split()[0])
+            except (ValueError, IndexError, AttributeError):
+                return None
+
+        out = {"protein": num(nv.get("protein")), "fat": num(nv.get("fat")),
+               "carb": num(nv.get("carbohydrate")), "kcal": num(nv.get("energy"))}
+        if text:
+            low = text.lower().replace(",", ".")
+            for key, stem in (("protein", "белк"), ("fat", "жир"), ("carb", "углевод")):
+                if out[key] is None:
+                    m = re.search(stem + r"\w*\D{0,4}?([\d.]+)", low)
+                    if m:
+                        out[key] = num(m.group(1))
+            if out["kcal"] is None:
+                m = re.search(r"([\d.]+)\s*ккал", low)
+                if m:
+                    out["kcal"] = num(m.group(1))
+        weight = meta.get("weight") or {}
+        grams = weight.get("value") if str(weight.get("unit", "")).upper() == "GRM" else None
+        out["grams"] = grams
+        # kcal figures are per 100 g by convention; scale to the actual package
+        out["kcal_pack"] = (out["kcal"] * grams / 100.0
+                            if out["kcal"] is not None and grams else None)
+        out["raw"] = text
+        return out
+
+    # Attributes grocery_candidates can annotate and grocery_rank can sort on.
+    # `price` and `weight` come free with the search; the rest cost one extra
+    # request per candidate, so they are opt-in.
+    NUTRITION_KEYS = ("kcal", "kcal_pack", "protein", "fat", "carb")
+    SORTABLE_KEYS = ("price", "weight") + NUTRITION_KEYS
+
+    def grocery_candidates(self, query: str, app_id: str = "", point_id: str = "",
+                           limit: int = 8, with_nutrition: bool = False) -> list[dict]:
+        """Search `query` and return the candidates as plain attribute rows.
+
+        This deliberately applies NO selection policy — it is the capability, not
+        the strategy. Ranking ("cheapest", "lowest calorie", "most protein") is the
+        caller's decision; see grocery_rank in server.py and the grocery skill.
+
+        with_nutrition costs one extra /api/grocery/good request per candidate, so
+        it is off unless the caller actually needs those fields. A good whose
+        nutrition the retailer does not publish keeps None — "not published" is a
+        different fact from zero and must not be flattened into one."""
+        found = self.grocery_search(query, app_id=app_id, point_id=point_id)
+        rows = []
+        for item in found[:max(1, limit)]:
+            row = dict(item)
+            # search returns weight as a display string ("160.0 GRM"); keep that
+            # for output and add a numeric grams field to sort on. _grams reports
+            # 0.0 for "no weight given" — keep that as None so an unknown weight
+            # sorts as unknown rather than as the lightest item.
+            row["weight_label"] = item.get("weight") or ""
+            row["weight"] = self._grams(item) or None
+            if with_nutrition:
+                try:
+                    good = self.grocery_good(item["id"], app_id=app_id, point_id=point_id)
+                    n = self.nutrition(good)
+                except TbankApiError:
+                    n = {k: None for k in ("kcal", "kcal_pack", "protein", "fat",
+                                           "carb", "grams")}
+                row.update({k: n.get(k) for k in self.NUTRITION_KEYS})
+                if n.get("grams"):
+                    row["weight"] = n["grams"]
+            rows.append(row)
+        return rows
+
+    # ---- cinema ----------------------------------------------------------
+
+    _TRANSLIT = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya", " ": "_",
+        "-": "-",
+    }
+
+    @classmethod
+    def _translit(cls, s: str) -> str:
+        out = "".join(cls._TRANSLIT.get(ch, cls._TRANSLIT.get(ch.lower(), ch))
+                      if not ch.isascii() else ch for ch in s)
+        # each word capitalised, separators kept: Москва→Moskva,
+        # Санкт-Петербург→Sankt-Peterburg, Нижний Новгород→Nizhniy_Novgorod
+        return re.sub(r"(^|[_\-])([a-z])",
+                      lambda m: m.group(1) + m.group(2).upper(), out)
+
+    def cinema_movies(self, city: str = "Москва", query: str = "",
+                      max_pages: int = 4) -> list[dict]:
+        """Movies playing today in `city`. The collection code is city-derived
+        ("Segodnya-v_kino_Moskva"); it is only a way to reach an eventId, which
+        is itself city-independent and is what the schedule endpoint wants."""
+        code = "Segodnya-v_kino_" + self._translit(city)
+        out: list[dict] = []
+        total = 0
+        for page in range(1, max(1, max_pages) + 1):
+            data = self._call_read("events_collection", body={"genres": []},
+                                   overrides={"collectionCode": code,
+                                              "page": str(page), "count": "30"})
+            coll = (data or {}).get("collection") or {}
+            events = coll.get("events") or []
+            total = int(coll.get("amount") or 0)
+            out.extend(e for e in events if isinstance(e, dict))
+            if not events or len(out) >= total:
+                break
+        if query:
+            q = query.lower().replace("ё", "е")
+            out = [e for e in out
+                   if q in str(e.get("name", "")).lower().replace("ё", "е")]
+        return out
+
+    def cinema_schedule(self, event_id: str, date: str, city: str = "Москва",
+                        latitude: float = 55.7558,
+                        longitude: float = 37.6173) -> list[dict]:
+        """Showtimes for one movie on one date (YYYY-MM-DD), one entry per cinema.
+        The location only sorts by distance — the whole city is returned either way."""
+        body = {"date": date, "eventId": str(event_id), "city": city,
+                "sort": {"by": "distance"},
+                "location": {"latitude": latitude, "longitude": longitude}}
+        data = self._call_read("schedule_movie", body=body)
+        lst = (data or {}).get("list") if isinstance(data, dict) else data
+        return lst if isinstance(lst, list) else []
+
+    # ---- ticket booking (cinema + concerts) ------------------------------
+
+    def event_seats(self, event_id: str, slot_id: str, object_id: str,
+                    kind: str = "movie") -> list[dict]:
+        """Hall layout for one showing: every seat with status and price.
+
+        Cinemas key seats as "row:number". Concerts use a composite string
+        ("Фанзона|5000§~§54093386|default") that must be passed back to
+        order/create verbatim — it encodes sector, price and ticket id."""
+        key = "scheme_sectors_concert" if kind == "concert" else "scheme_sectors_movie"
+        data = self._call_read(key, overrides={
+            "eventId": str(event_id), "slotId": str(slot_id),
+            "objectId": str(object_id)})
+        lst = (data or {}).get("list") if isinstance(data, dict) else data
+        return lst if isinstance(lst, list) else []
+
+    def concert_hall(self, event_id: str, slot_id: str, object_id: str) -> dict:
+        """Free-seating concert venues answer here instead of /sectors: sectors
+        with `freeSeating: true` and a ticket count rather than a seat grid.
+
+        READ ONLY on purpose — the capture has no order/create example for this
+        purchase screen, so the request body for it is unknown and this client
+        will not invent one."""
+        data = self._call_read("scheme_hall_concert", overrides={
+            "eventId": str(event_id), "slotId": str(slot_id),
+            "objectId": str(object_id)})
+        return data if isinstance(data, dict) else {}
+
+    def concert_schedule(self, event_id: str) -> list[dict]:
+        """Showings of one concert. Unlike movies these are not date-scoped."""
+        data = self._call_read("schedule_concert", body={"eventId": str(event_id)})
+        lst = (data or {}).get("list") if isinstance(data, dict) else data
+        return lst if isinstance(lst, list) else []
+
+    def create_ticket_order(self, event_id: str, slot_id: str, object_id: str,
+                            seats: list[dict], kind: str = "movie") -> dict:
+        """Reserve seats. Creates an order and moves NO money — payment is a
+        separate call. An order left unpaid expires by itself.
+
+        seats: [{"id": "7:10", "type": "basic"}] for cinemas; concerts take the
+        composite seatId and no type."""
+        key = "order_create_concert" if kind == "concert" else "order_create_movie"
+        body = {"eventId": str(event_id), "slotId": str(slot_id),
+                "objectId": str(object_id), "seats": seats}
+        data = self._call_read(key, body=body)
+        return data if isinstance(data, dict) else {}
+
+    def pay_marketplace_order(self, order_id: str, amount: float,
+                              account: str, nfs_payment_token: str) -> dict:
+        """MONEY OPERATION. Pay for a marketplace order (cinema/concert ticket).
+
+        Cookie/Bearer only — no HMAC signature, unlike /v1/pay. `nfs_payment_token`
+        and the amount both come from the create_ticket_order response; passing an
+        amount that disagrees with the order is how you get a stuck payment."""
+        body = {
+            "amount": {"amount": amount, "type": "simple", "currencyCode": "643"},
+            "paymentMethod": {"type": "agreement", "agreement": str(account)},
+            "flow": {"orderId": str(order_id), "type": "marketplace",
+                     "nfsPaymentToken": str(nfs_payment_token)},
+        }
+        data = self._call_read("payment_gate_pay_mobile", body=body)
+        return data if isinstance(data, dict) else {}
+
+    def cancel_ticket_order(self, order_id: str, kind: str = "movie") -> Any:
+        """Cancel a ticket order. The capture shows this answering 500
+        ("Сервис временно недоступен") for both the movie-specific and the generic
+        path, so treat a failure as "unknown, check the app", not "still booked"."""
+        key = "order_cancel_movie" if kind == "movie" else "order_cancel"
+        return self._call_read(key, overrides={"orderId": str(order_id)}, body={})
+
+    # ---- extras ----------------------------------------------------------
+
+    def bank_documents(self) -> list[dict]:
+        """Bank-issued certificates (справки). Answers with a BARE list."""
+        data = self._call_read("bank_documents")
+        return data if isinstance(data, list) else []
+
+    def insurance_policies(self) -> Any:
+        """Active insurance policies. This host capitalises its envelope
+        (`Payload`/`ResultCode`), so _unwrap passes the whole body through."""
+        return self._call_read("insurance_policies")
+
+    def payment_receipt_pdf(self, payment_id: str) -> bytes:
+        data = self._call_read("payment_receipt_pdf",
+                               overrides={"paymentId": str(payment_id)})
+        return data if isinstance(data, bytes) else bytes(data or b"")
 
     def get_data(self, section: str) -> Any:
         """Unified getter for banking data. section = one of:

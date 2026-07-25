@@ -1,5 +1,7 @@
 # user secrets — NEVER ship
 captures.xml
+captures2.xml
+captures*.xml
 captures.jsonl
 refresh_captures.xml
 refresh_captures.jsonl
