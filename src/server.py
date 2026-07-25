@@ -573,8 +573,26 @@ def messenger_conversations() -> str:
     try:
         s = _require(); s.ensure_fresh()
         convs = s.messenger_conversations()
-        return "\n".join(f"- {c.get('title','?')[:25]} id={c.get('conversationId','')[:24]}…"
-            for c in convs if isinstance(c, dict))
+        lines = []
+        for c in convs:
+            if not isinstance(c, dict):
+                continue
+            # the id MUST be complete — it is the argument to messenger_messages,
+            # and it used to be cut to 24 chars with an ellipsis, so the listing
+            # could not be acted on at all. Bot chats carry no title; their name is
+            # the member's.
+            members = c.get("members") or []
+            name = (c.get("title")
+                    or (members[0].get("name") if members and isinstance(members[0], dict) else "")
+                    or (c.get("botInfo") or {}).get("login") or "?")
+            unread = c.get("unreadMessagesCount") or 0
+            last = ((c.get("message") or {}).get("content") or {}).get("text") or ""
+            lines.append(
+                f"- {name} | id={c.get('conversationId','')}"
+                f"{f' | непрочитано: {unread}' if unread else ''}"
+                f" | {(c.get('updatedAt') or '')[:16]}"
+                f"{' | ' + ' '.join(last.split())[:60] if last else ''}")
+        return "\n".join(lines)
     except Exception as e:
         return _err(e)
 
@@ -584,7 +602,20 @@ def messenger_messages(conversation_id: str) -> str:
     try:
         s = _require(); s.ensure_fresh()
         msgs = s.messenger_messages(conversation_id)
-        return "\n".join(f"- {((m.get('content') or {}).get('text',''))[:60]}" for m in msgs[:20])
+        # oldest→newest, and keep the author and time: a bare list of 60-char text
+        # fragments loses who said what, which is most of the meaning in a chat.
+        msgs = sorted((m for m in msgs if isinstance(m, dict)),
+                      key=lambda m: m.get("timestamp") or "")
+        out = []
+        for m in msgs[-20:]:
+            a = m.get("author") or {}
+            who = a.get("name") or ("Вы" if a.get("role") == "client" else "?")
+            text = " ".join(((m.get("content") or {}).get("text") or "").split())
+            if not text:
+                text = f"[{m.get('messageType') or 'вложение'}]"
+            out.append(f"- [{(m.get('timestamp') or '')[:16].replace('T', ' ')}] "
+                       f"{who}: {text[:400]}")
+        return "\n".join(out) or "Сообщений нет."
     except Exception as e:
         return _err(e)
 
