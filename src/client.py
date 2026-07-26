@@ -3454,6 +3454,14 @@ class MobileSession:
     _SECTION_ARG = {"providers": "ids", "requisites": "pointer",
                     "statements": "account"}
 
+    # Sections whose endpoint validates the SESSIONID, not just the Bearer. The
+    # sessionid's CLIENT window is ~11 minutes, so these fail long before the token
+    # expires — and they fail with a privileges/subscriber error that reads like an
+    # empty result. Found live: a real unpaid bill was invisible through get_data
+    # while the same call succeeded right after session_status() raised the level.
+    _SECTION_NEEDS_CLIENT = {"invoices", "subscription_bills", "subscriptions",
+                             "templates", "autopayments", "sbp"}
+
     def get_data(self, section: str, arg: str = "") -> Any:
         """Unified getter for banking data.
 
@@ -3489,6 +3497,14 @@ class MobileSession:
             # /userinfo/userinfo needs client_id=gorod-app + no mobile-BFF params —
             # route through _call_userinfo, not the generic _call_read (which 401s).
             return self._call_userinfo()
+        if section.lower() in self._SECTION_NEEDS_CLIENT:
+            # These validate the sessionid, not just the Bearer, and its CLIENT
+            # window is ~11 minutes against the token's ~2h. Without this they
+            # answer INSUFFICIENT_PRIVILEGES / «Невозможно определить подписчика»
+            # once the window lapses — which reads to an agent as "you have no
+            # bills", not as "the session needs raising". Costs one ping, and only
+            # for the sections that actually check.
+            self.ensure_client_session()
         key = _SECTIONS.get(section.lower(), section)
         arg_key = self._SECTION_ARG.get(section.lower())
         if arg_key:

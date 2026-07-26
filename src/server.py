@@ -575,11 +575,20 @@ def operations_histogram(account_id: str = "", days: int = 30,
 
 @mcp.tool()
 def get_data(section: str, arg: str = "") -> str:
-    """Универсальный getter. section = subscriptions | credit_schedule | credit_rating |
+    """Универсальный getter. section = subscriptions | subscription_bills |
+    credit_schedule | credit_rating |
     statements | invoices | templates | contacts | cards | loans | autopayments |
     sbp | offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
     cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
     invest_offers | invest_yield | pension | broker_margin | shared | appointments.
+
+    ⚠️ Счета к оплате лежат в ДВУХ разных местах, и «пусто» в одном не значит, что
+    счетов нет:
+      invoices           — выставленные счета (e-invoicing). Часто пусто.
+      subscription_bills — счета по подпискам на ЖКХ и прочие услуги. Именно здесь
+                           обычно и лежит неоплаченная квитанция, вместе с
+                           paymentFields, которые нужны pay_bill().
+    Проверяй ОБА, прежде чем сказать «неоплаченных счетов нет».
 
     ТРЁМ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
       providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
@@ -1542,8 +1551,9 @@ def payment_providers(group: str = "", query: str = "", page: int = 1,
     которой значение проверяется. Это единственный источник формы платежа —
     угадывать имена полей нельзя.
 
-    Что с этим делать дальше: посчитать комиссию через payment_commission(). Сам
-    платёж по счёту через MCP пока не реализован — см. docstring pay_bill()."""
+    Что с этим делать дальше: pay_bill(provider_id, fields, amount) — он сам
+    проверит поля по регулярке и посчитает комиссию. Уже выставленный счёт вместе
+    с готовыми полями обычно лежит в get_data("subscription_bills")."""
     try:
         s = _require(); s.ensure_fresh()
         if not group and not provider_id:

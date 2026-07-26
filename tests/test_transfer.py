@@ -431,6 +431,48 @@ def test_the_reported_commission_is_the_commission():
     print("  commission: the fee is reported, not the amount it was charged on")
 
 
+def test_bill_sections_raise_the_session_level_before_asking():
+    """A real unpaid bill was invisible through get_data while the identical call
+    succeeded moments later — because session_status() had raised the session level
+    in between.
+
+    These endpoints validate the SESSIONID, whose CLIENT window is ~11 minutes,
+    not the Bearer, which lasts ~2h. Past the window they answer
+    INSUFFICIENT_PRIVILEGES / «Невозможно определить подписчика» — errors an agent
+    reads as "you have no bills to pay". Verified live against the bank."""
+    class Sec(MobileSession):
+        def __init__(self):
+            self.raised = 0
+            self.seen = []
+
+        def ensure_client_session(self):
+            self.raised += 1
+            return "CLIENT"
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            self.seen.append(key)
+            return {"payload": []}
+
+    for section in ("invoices", "subscription_bills", "subscriptions",
+                    "templates", "autopayments", "sbp"):
+        s = Sec()
+        s.get_data(section)
+        check(s.raised == 1,
+              f"get_data({section!r}) must raise the session to CLIENT first "
+              f"(raised {s.raised}×) — otherwise a lapsed sessionid reads as "
+              f"'nothing to pay'")
+
+    # And it must NOT pay that extra ping on sections that never needed it.
+    s2 = Sec()
+    s2.get_data("cars")
+    check(s2.raised == 0,
+          "a section that works on the Bearer alone must not cost an extra ping")
+    print("  get_data: bill sections raise the session level, the others do not")
+
+
 def test_filter_sections_refuse_to_pretend():
     """get_data("providers") hits /providers/compatible/filter, which the app calls
     with ?ids=fns-rf,… — with no ids it is a filter with no filter and returns
@@ -724,6 +766,7 @@ def main():
     test_a_lost_transfer_blocks_the_next_identical_one()
     test_the_result_carries_what_the_agent_needs_next()
     test_the_reported_commission_is_the_commission()
+    test_bill_sections_raise_the_session_level_before_asking()
     test_filter_sections_refuse_to_pretend()
     test_payment_commission_rejects_a_body_it_cannot_use()
     test_a_refusal_is_not_reported_as_a_possible_charge()
