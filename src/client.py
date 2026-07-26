@@ -206,6 +206,69 @@ _IOS_VERSION = "26.5.2"
 _LEGACY_QUERY = os.environ.get("TBANK_QUERY_PROFILE", "").lower() == "legacy"
 
 
+# The Accept the app really sends, per host class — capture-verified.
+#
+# `_NATIVE_ACCEPT` is not a choice the app made: it is the Apple URL-loading
+# default that appears when no Accept is set, which is why it is identical across
+# every native host (api, api-invest*, my-home, ms-loyalty, shortcuts, …). Where
+# the app's own SDKs DO set one — the lifestyle Город/Афиша module, search, id —
+# it is application/json. WKWebView-originated calls send */*.
+#
+# The code sent application/json to all of them. That works today, and the captures
+# say why it is safe either way: of the 128 templates present in the captures with
+# both sides recorded, every response is application/json regardless of what was
+# asked for. The two exceptions are already handled by template-level headers
+# (payment_receipt_pdf → application/pdf) or parse fine anyway (/v1/ping answers
+# Content-Type: text/html with a JSON body, and _unwrap never looks at the header).
+#
+# So this is fidelity, not a bug fix — and the direction is toward a header ending
+# in */*;q=0.8, a strict superset of application/json. It is OFF by default all the
+# same: 63 templates live on the one host that changes, there is no staging
+# environment, and the only endpoint whose Content-Type demonstrably moves is the
+# free one (`keepalive`) — start the rollout there.
+#
+#   TBANK_ACCEPT_PROFILE unset | "json"  → today's behaviour, byte-for-byte
+#                        "auto"          → the captured profile everywhere
+#                        "host,host,…"   → the captured profile on those hosts only
+_NATIVE_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+_JSON_ACCEPT = "application/json"
+
+_HOST_ACCEPT = {
+    "lifestyle.t-bank-app.ru": _JSON_ACCEPT,
+    "id.t-bank-app.ru": _JSON_ACCEPT,
+    "www.tbank.ru": "*/*",
+    "webview.t-bank-app.ru": "*/*",
+}
+# Paths whose host says one thing and whose own capture says another: the lifestyle
+# superapp shelf is served by the same host as Город but answers the native default.
+_PATH_ACCEPT = {
+    ("lifestyle.t-bank-app.ru", "/api/orders/list"): _NATIVE_ACCEPT,
+    ("lifestyle.t-bank-app.ru", "/api/order"): _NATIVE_ACCEPT,
+    ("lifestyle.t-bank-app.ru", "/api/event/movie"): _NATIVE_ACCEPT,
+}
+
+
+def _accept_profile_hosts() -> set[str] | None:
+    """None ⇒ profile off (send json, as before). Empty set ⇒ on everywhere."""
+    raw = os.environ.get("TBANK_ACCEPT_PROFILE", "").strip().lower()
+    if not raw or raw == "json":
+        return None
+    if raw == "auto":
+        return set()
+    return {h.strip() for h in raw.split(",") if h.strip()}
+
+
+def _accept_for(hostname: str, path: str = "") -> str:
+    """The Accept for this host+path. Always returns a value, so the session-level
+    default (set on requests.Session at construction) never fills the gap — changing
+    only this function would otherwise be a no-op."""
+    enabled = _accept_profile_hosts()
+    if enabled is None or (enabled and hostname not in enabled):
+        return _JSON_ACCEPT
+    hit = _PATH_ACCEPT.get((hostname, str(path or "")))
+    return hit or _HOST_ACCEPT.get(hostname, _NATIVE_ACCEPT)
+
+
 def _wants_wuid(host: str, path: str) -> bool:
     """Does the real app send `wuid` to this host+path?
 
@@ -569,7 +632,7 @@ class MobileSession:
             return ""
         return f"iPhone/iOS({_IOS_VERSION})/TCSMB/{self.app_version}({build})"
 
-    def _mobile_headers(self, host_url: str = "") -> dict:
+    def _mobile_headers(self, host_url: str = "", path: str = "") -> dict:
         """Mobile-client headers the real app sends, derived from session attrs.
         ``X-Lang``/``Accept-Language``/``Accept``/mobile ``User-Agent`` are sent on
         basically every API host → injected always. But ``X-App-Name``/``Version``/
@@ -580,7 +643,7 @@ class MobileSession:
         from urllib.parse import urlparse
         hn = (urlparse(host_url).hostname or host_url or "").lower()
         h: dict[str, str] = {"X-Lang": "ru", "Accept-Language": "ru",
-                             "Accept": "application/json"}
+                             "Accept": _accept_for(hn, path)}
         if hn in _STRICT_XAPP_HOSTS:
             if self.app_name:
                 h["X-App-Name"] = self.app_name
@@ -652,7 +715,7 @@ class MobileSession:
         # on _STRICT_XAPP_HOSTS (elsewhere the app sends just x-lang — injecting
         # X-App-* there breaks the lifestyle grocery cart). setdefault ⇒ an explicit
         # template header or Authorization/Cookie below still wins.
-        for k, v in self._mobile_headers(host).items():
+        for k, v in self._mobile_headers(host, path).items():
             headers.setdefault(k, v)
         headers["Authorization"] = "Bearer " + self.access_token
         # messenger (tm.t-bank-app.ru) uses ONLY the tmsgSessionID cookie, minted
@@ -823,12 +886,12 @@ class MobileSession:
         # from the requests.Session default and said `okhttp/4.12.0`: an Android
         # HTTP client posting an iPhone's anti-fraud block. The captured native
         # /v1/pay sends the mobile UA together with X-Lang and this Accept.
-        for k, v in self._mobile_headers(host).items():
+        for k, v in self._mobile_headers(host, path).items():
             headers.setdefault(k, v)
-        # _mobile_headers defaults Accept to application/json, which is right for the
-        # read endpoints. The captured pay asks for html — overridden, not defaulted.
-        headers["Accept"] = ("text/html,application/xhtml+xml,application/xml;"
-                             "q=0.9,*/*;q=0.8")
+        # The captured pay asks for the native default. Set explicitly rather than
+        # left to _accept_for, because this one is verified against the capture and
+        # must not follow the profile switch in either direction.
+        headers["Accept"] = _NATIVE_ACCEPT
         headers["Authorization"] = "Bearer " + self.access_token
         headers["x-api-signature"] = sig
         if self.cookie_str:

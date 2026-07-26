@@ -348,8 +348,59 @@ def test_web_only_query_identifiers_stay_on_the_web_host():
           "legacy switch honoured")
 
 
+def test_the_accept_profile_is_off_by_default_and_correct_when_on():
+    """The app does not send application/json to its native hosts — that string is
+    the Apple URL-loading default appearing where no Accept is set, and it is
+    identical across every native host for that reason.
+
+    The captures also show the change is safe: of the templates present with both
+    sides recorded, every response is application/json whatever was asked for. But
+    63 templates live on the one host that changes and there is no staging
+    environment, so the profile ships OFF. What is pinned here is that the default
+    really is byte-for-byte the old behaviour, and that turning it on produces the
+    captured values — including the lifestyle paths whose host says json and whose
+    own capture says otherwise."""
+    import importlib
+
+    from src import client as C
+
+    check(C._accept_for("api.t-bank-app.ru") == "application/json",
+          "the default must stay application/json until the rollout is driven live")
+    check(C._accept_for("lifestyle.t-bank-app.ru") == "application/json",
+          "the default must be uniform, whatever the host")
+
+    for value, expected in (
+        ("auto", {("api.t-bank-app.ru", ""): C._NATIVE_ACCEPT,
+                  ("lifestyle.t-bank-app.ru", "/api/grocery/cart"): "application/json",
+                  ("lifestyle.t-bank-app.ru", "/api/orders/list"): C._NATIVE_ACCEPT,
+                  ("www.tbank.ru", ""): "*/*",
+                  ("id.t-bank-app.ru", ""): "application/json"}),
+        # A host list opts in one host at a time — the staged rollout.
+        ("api-invest.t-bank-app.ru", {("api-invest.t-bank-app.ru", ""): C._NATIVE_ACCEPT,
+                                      ("api.t-bank-app.ru", ""): "application/json"}),
+    ):
+        os.environ["TBANK_ACCEPT_PROFILE"] = value
+        try:
+            importlib.reload(C)
+            for (host, path), want in expected.items():
+                got = C._accept_for(host, path)
+                check(got == want,
+                      f"TBANK_ACCEPT_PROFILE={value}, {host}{path}: got {got!r}, "
+                      f"capture says {want!r}")
+        finally:
+            os.environ.pop("TBANK_ACCEPT_PROFILE", None)
+            importlib.reload(C)
+
+    # The signed pay path is verified against the capture and must not follow the
+    # switch in either direction.
+    check(C._NATIVE_ACCEPT.endswith("*/*;q=0.8"),
+          "the native Accept must stay a superset of application/json")
+    print("  Accept profile: off by default, captured values per host/path when on")
+
+
 def main():
     print("transport:")
+    test_the_accept_profile_is_off_by_default_and_correct_when_on()
     test_web_only_query_identifiers_stay_on_the_web_host()
     test_mark_read_is_a_put_with_its_own_vendor_types()
     test_the_messenger_user_agent_is_built_from_the_session()

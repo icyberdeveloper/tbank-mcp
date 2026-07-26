@@ -252,9 +252,30 @@ present the tests additionally check the fixtures have not drifted from it.
   the report groups by that line. The `debug_report` tool reads it. On by default;
   `TBANK_TRACE=0` disables it, `TBANK_TRACE_FILE` moves it, and it rotates at 5 MB.
 - **Device profile.** Payments carry a 3DS/anti-fraud block whose device facts —
-  screen size, locale, timezone — default to the device the traffic was captured
-  from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` / `TBANK_DEVICE_LANGUAGE` /
-  `TBANK_DEVICE_TIMEZONE` so your payments do not describe someone else's phone.
+  screen size, locale, timezone, hardware model — default to the device the traffic
+  was captured from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` /
+  `TBANK_DEVICE_LANGUAGE` / `TBANK_DEVICE_TIMEZONE` / `TBANK_DEVICE_MODEL` so your
+  payments do not describe someone else's phone.
+- **Request-shape switches.** Two divergences from the captured app are corrected
+  behind env vars, so a rollback is one variable and no re-login (neither touches
+  `session.json`):
+  - `TBANK_QUERY_PROFILE=legacy` — restores sending `wuid` to every host and
+    injecting `vendor`/`client_version` on every read. The app sends `wuid` only to
+    `www.tbank.ru` under `/api/common/`, and the other two only on the OIDC
+    authorize call, so the default is now the scoped form.
+  - `TBANK_ACCEPT_PROFILE` — `json` (default, and today's behaviour byte-for-byte)
+    | `auto` | a comma-separated host list. The app does not send
+    `application/json` to its native hosts; that string is the Apple URL-loading
+    default that appears when no Accept is set. The captured responses are
+    `application/json` either way, so this is fidelity rather than a fix — but 63
+    templates share the busiest host and there is no staging environment, so it is
+    OFF until driven live. Roll it out one host class at a time, cheapest first:
+    `webview`/`shortcuts`/`my-home` (unreachable or trivial reads) → `api-invest*`
+    (`invest_accounts`, `invest_portfolio`) → `api.t-bank-app.ru` starting with
+    `keepalive`, whose Content-Type demonstrably becomes `text/html` while its body
+    stays JSON → `www.tbank.ru` → the three lifestyle shelf paths. A regression has
+    one signature: `_unwrap` raising `HTTP_200` because the body no longer parses.
+    Compare `debug_report()` before and after each step.
 - Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) require confirmation of a
   specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
