@@ -1131,12 +1131,19 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile"
   }
  },
+ # The WEB payment gate (the grocery Playwright checkout). Pg-Api-System names the
+ # calling system and the gate receives it on EVERY captured call — the comment on
+ # the mobile sibling below has always said so and named this exact value, but the
+ # header was never actually set here.
  "payment_gate_pay": {
   "method": "POST",
   "host": "https://www.tbank.ru",
   "path": "/api/common/pg-api/v1/payment-gate/payments",
   "params": {
    "origin": "web,ib5,platform"
+  },
+  "headers": {
+   "Pg-Api-System": "t-grocery-ib"
   }
  },
  "payment_commission": {
@@ -1280,8 +1287,12 @@ BUILTIN_ENDPOINTS = {
   "params": {},
   "headers": {
    "Content-Type": "application/vnd.chats.chatapi.text.message.in.v1+json",
-   "Accept": "application/vnd.chats.chatapi.text.message.out.v1+json",
-   "Tmsg-User-Agent": "com.idamob.tinkoff.android:7.31.6; tmsg-sdk-iOS:1.0.0; iOS:17.5.1"
+   "Accept": "application/vnd.chats.chatapi.text.message.out.v1+json"
+   # Tmsg-User-Agent is NOT pinned here: it carries the app version, the iOS
+   # version and the device model, all of which the session already knows.
+   # Frozen as a literal it said iOS:17.5.1 — the exact stale value removed from
+   # the main User-Agent — and omitted the `device:` segment every captured
+   # request carries. Built in client._mobile_headers instead.
   }
  }
 }
@@ -1399,6 +1410,18 @@ BUILTIN_ENDPOINTS.update({
         "path": "/app/bank/messenger/conversations/unread", "params": {},
         "headers": {"Accept": "application/vnd.chats.chatapi.unread.out.v3+json"},
     },
+    # markRead is a PUT with its own vendor types and an empty body. It used to be
+    # sent through messenger_base, i.e. as a GET asking for application/json —
+    # neither the method nor the content types the app uses. The path is supplied
+    # per call via path_override.
+    "messenger_mark_read": {
+        "method": "PUT", "host": "https://tm.t-bank-app.ru",
+        "path": "/app/bank/messenger/conversations/unread", "params": {},
+        "headers": {
+            "Content-Type": "application/vnd.chats.chatapi.markread.in.v1+json",
+            "Accept": "application/vnd.chats.chatapi.markread.out.v1+json",
+        },
+    },
 })
 
 # Travel order detail. Only the hotel host is reachable from a mobile session:
@@ -1436,10 +1459,15 @@ BUILTIN_ENDPOINTS.update({
     # POST ?orderId=&paymentId= with an EMPTY body. BOTH ids or nothing happens:
     # orderId alone still answers 200 {"status":"Success"} and leaves the order
     # active — see cancel_ticket_order().
+    # Empty body with Content-Type: application/json — same as the grocery flavour
+    # below. The client must pass body=None; body={} would put a literal `{}` on the
+    # wire, which no captured cancel sends.
     "order_cancel_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
-                           "path": "/api/order/cancel/movie", "params": {}},
+                           "path": "/api/order/cancel/movie", "params": {},
+                           "headers": {"Content-Type": "application/json"}},
     "order_cancel": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
-                     "path": "/api/order/cancel", "params": {}},
+                     "path": "/api/order/cancel", "params": {},
+                     "headers": {"Content-Type": "application/json"}},
     # The GROCERY flavour of the same path (cancel-grossary.xml): ONLY orderId in
     # the query — no paymentId, unlike tickets above — and a genuinely EMPTY body
     # that the app still stamps Content-Type: application/json. The verdict is

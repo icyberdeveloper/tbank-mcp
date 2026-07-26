@@ -256,8 +256,60 @@ def test_bank_documents_asks_for_the_v2_record_shape():
     print("  bank_documents: X-Api-Version v2 + X-App-* as the app sends them")
 
 
+def test_mark_read_is_a_put_with_its_own_vendor_types():
+    """markRead was sent through messenger_base — a GET template asking for
+    application/json. The captured request is a PUT with markRead's own vendor
+    Content-Type and Accept, and this host is exactly where the wrong Accept has
+    already cost a 406 (messenger_unread)."""
+    s = session({"ok": True})
+    s.messenger_mark_read("c-1", "m-1")
+    sent = last(s)
+    check(str(sent["method"]).upper() == "PUT",
+          f"markRead is a PUT in the capture, we sent {sent['method']}")
+    check(sent["url"].endswith("/messages/m-1/markRead"),
+          f"the per-message path must survive the template swap: {sent['url']}")
+    check("markread.in" in (sent["headers"].get("Content-Type") or ""),
+          f"markRead's vendor Content-Type is missing: {sorted(sent['headers'])}")
+    check("markread.out" in (sent["headers"].get("Accept") or ""),
+          f"markRead's vendor Accept is missing: {sent['headers'].get('Accept')!r}")
+    print("  markRead: PUT with its own vendor types, not a GET asking for json")
+
+
+def test_the_messenger_user_agent_is_built_from_the_session():
+    """Tmsg-User-Agent was a frozen template literal announcing iOS 17.5.1 — the
+    exact stale version removed from the main User-Agent — with no `device:`
+    segment, which every captured request to this host carries."""
+    from src.client import _IOS_VERSION
+    s = session({"ok": True})
+    s.messenger_send("c-1", "привет")
+    ua = last(s)["headers"].get("Tmsg-User-Agent") or ""
+    check(f"iOS:{_IOS_VERSION}" in ua,
+          f"the messenger UA must follow _IOS_VERSION, got {ua!r}")
+    check("17.5.1" not in ua, f"the stale iOS version is back: {ua!r}")
+    check("device:" in ua, f"the capture carries a device segment: {ua!r}")
+    check(f":{s.app_version};" in ua,
+          f"the app version must come from the session: {ua!r}")
+    print("  messenger UA: iOS version, app version and device model from the session")
+
+
+def test_the_web_payment_gate_names_its_calling_system():
+    """The gate receives Pg-Api-System on every captured call and the comment on the
+    mobile sibling has always named the web value — the header was simply never set,
+    so the grocery checkout's payment was the one call that did not identify itself."""
+    check(BUILTIN_ENDPOINTS["payment_gate_pay"]["headers"]["Pg-Api-System"]
+          == "t-grocery-ib",
+          "the web gate must announce t-grocery-ib, like the captured checkout")
+    check(BUILTIN_ENDPOINTS["payment_gate_pay_mobile"]["headers"]["Pg-Api-System"]
+          == "t-entertainment-mb",
+          "the mobile gate's system must not have changed")
+    print("  payment gates: web says t-grocery-ib, mobile says t-entertainment-mb")
+
+
 def main():
     print("transport:")
+    test_mark_read_is_a_put_with_its_own_vendor_types()
+    test_the_messenger_user_agent_is_built_from_the_session()
+    test_the_web_payment_gate_names_its_calling_system()
     test_operations_never_asks_for_suspicious_only()
     test_x_app_headers_only_where_the_app_sends_them()
     test_the_session_key_spelling_is_per_endpoint()

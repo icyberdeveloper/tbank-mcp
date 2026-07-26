@@ -182,7 +182,20 @@ def test_body_matches_the_real_pay_request():
           f"the real pay carries deviceId + oldDeviceId: {sorted(query)}")
     check("wuid" not in query,
           "wuid is a web identifier and is not sent on the mobile /v1/pay")
-    print("  body: matches the captured /v1/pay — keys, anti-fraud block, no paymentType")
+
+    # EXTRA keys, not just missing ones. The loops above only prove the captured keys
+    # are present, so anything added to PAY_DEVICE_PROFILE — which is spread into
+    # both the query and the form — rode along invisibly. That happened: a device
+    # `model` added for card_credentials silently appeared in the pay body, on the
+    # one request the bank fraud-scores, and this test stayed green.
+    extra_form = set(form) - set(fx["form_keys"])
+    extra_query = set(query) - set(fx["query_keys"])
+    check(not extra_form,
+          f"the pay FORM carries keys the app does not send: {sorted(extra_form)}")
+    check(not extra_query,
+          f"the pay QUERY carries keys the app does not send: {sorted(extra_query)}")
+    print("  body: matches the captured /v1/pay — keys, anti-fraud block, "
+          "no paymentType, nothing extra")
 
 
 def test_the_pay_request_looks_like_the_device_it_claims_to_be():

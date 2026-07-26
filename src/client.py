@@ -348,6 +348,7 @@ class MobileSession:
                 ("device_screen_width", os.environ.get("TBANK_DEVICE_SCREEN_WIDTH")),
                 ("language", os.environ.get("TBANK_DEVICE_LANGUAGE")),
                 ("timezone", os.environ.get("TBANK_DEVICE_TIMEZONE")),
+                ("model", os.environ.get("TBANK_DEVICE_MODEL")),
             ) if v}
         if not self.device_id:
             self.device_id = str(_uuid.uuid4()).upper()
@@ -572,6 +573,14 @@ class MobileSession:
         ua = self._mobile_ua()
         if ua:
             h["User-Agent"] = ua
+        # The messenger host has its own UA header, and it is NOT the same string:
+        # bundle:appVersion; sdk; iOS:version; device:model. Derived here so it
+        # cannot drift from _IOS_VERSION the way the frozen template literal did
+        # (it claimed iOS 17.5.1 and carried no device segment at all).
+        if hn == "tm.t-bank-app.ru" and self.app_version:
+            h["Tmsg-User-Agent"] = (
+                f"com.idamob.tinkoff.android:{self.app_version}; "
+                f"tmsg-sdk-iOS:1.0.0; iOS:{_IOS_VERSION}; device:{self.device_model}")
         return h
 
     def _call_read(self, template_key: str, *, overrides: dict | None = None,
@@ -717,14 +726,29 @@ class MobileSession:
         "timezone": "180",
     }
 
+    # The hardware identifier. Deliberately NOT in PAY_DEVICE_DEFAULTS: that dict is
+    # spread wholesale into the /v1/pay query AND form (see _signed_parts), and no
+    # captured pay request carries a `model` key — putting it there would fix
+    # card_credentials by adding a new divergence to the money path.
+    DEVICE_MODEL = "iPhone18,4"
+
+    @property
+    def device_model(self) -> str:
+        """Hardware identifier for the endpoints that ask for one (card_credentials,
+        the messenger's Tmsg-User-Agent). TBANK_DEVICE_MODEL overrides it."""
+        return str((getattr(self, "device_profile", None) or {}).get("model")
+                   or self.DEVICE_MODEL)
+
     @property
     def PAY_DEVICE_PROFILE(self) -> dict:
         """The full block: constants + this session's device facts."""
         # getattr, not self.device_profile: __post_init__ sets it, and the test
         # sessions build the object without running it.
         override = getattr(self, "device_profile", None) or {}
+        # `model` is filtered out on purpose — it belongs to the device, not to the
+        # payment block, and no captured /v1/pay carries it.
         return {**self.PAY_DEVICE_CONSTANTS, **self.PAY_DEVICE_DEFAULTS,
-                **{k: str(v) for k, v in override.items() if v}}
+                **{k: str(v) for k, v in override.items() if v and k != "model"}}
 
     def _call_signed(self, template_key: str, body_str: str,
                      extra_query: dict | None = None) -> Any:
@@ -753,7 +777,11 @@ class MobileSession:
         params.update(self.PAY_DEVICE_PROFILE)
         if extra_query:
             params.update(extra_query)
-        query = urllib.parse.urlencode(params, safe="%/,")
+        # `:` is safe too: both captured /v1/pay requests send the notificationUrl's
+        # scheme separator literally in the QUERY (`https://…`), while the copy in
+        # the form body is percent-encoded — the app really does differ between the
+        # two. The signature covers whatever we send, so this is fidelity, not a fix.
+        query = urllib.parse.urlencode(params, safe="%/,:")
         host = tpl.get("host") or self.base_url
         path = tpl["path"]
         url = f"{host.rstrip('/')}/{path.lstrip('/')}?{query}"
@@ -1099,7 +1127,11 @@ class MobileSession:
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
     def messenger_mark_read(self, conversation_id: str, message_id: str) -> Any:
-        return self._call_read("messenger_base",
+        """Mark one message read. Its own template, not messenger_base: the captured
+        request is a PUT with markRead's own vendor content types, while
+        messenger_base is a GET that would send `application/json` — the same
+        content-negotiation mistake that made messenger_unread answer 406."""
+        return self._call_read("messenger_mark_read",
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages/{message_id}/markRead")
 
     # ---- extended read tools (Tier-1, template-driven, unsigned) ----------
@@ -2597,11 +2629,12 @@ class MobileSession:
           NOT to pay — no real pay body carries it.
         between own accounts (provider='transfer-inner'): to_account = target account;
           providerFields = {'bankContract': to_account}.
-        by details (provider='transfer-legal'): NOT supported. It needs explicit
-          providerFields (bankBik/bankAcnt/inn/kpp/...) and no capture shows the
-          shape, so there is nothing to replay. There is no lower-level tool to
-          fall back to either — the MCP exposes no raw pay(); this path belongs to
-          the app.
+        by details (provider='transfer-legal'): NOT supported for the PAYMENT. The
+          providerFields shape IS known — four captured payment_commission bodies
+          carry all nine keys (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/
+          inn/kpp/comment/nds) — but no captured /v1/pay exists for this provider,
+          and pay is not commission-with-extra-fields (see the pay/commission key
+          split above). Commission preview works; the payment belongs to the app.
 
         `account` = the payer account id (from list_accounts). Empty falls back to the
         first Current RUB with a positive balance — which is a GUESS, and was
@@ -2622,12 +2655,24 @@ class MobileSession:
         if provider == "transfer-inner":
             pf = {"bankContract": to_account}
         elif provider == "transfer-legal":
+            # The refusal stands, but its stated reason was false: four captured
+            # payment_commission requests carry the full 9-key providerFields shape
+            # (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/inn/kpp/comment/nds).
+            # What is genuinely missing is a captured /v1/pay for this provider — and
+            # the two pay bodies that DO exist show pay is not commission-plus-fields
+            # (it drops paymentType, adds userPaymentId/cellularService/frontCamera,
+            # and one of them drops isTransferStatus/isUrgentTransfer too). So the
+            # fields could be filled and the envelope would still be a guess, on a
+            # payment to an arbitrary legal entity.
             raise TbankApiError("NOT_SUPPORTED",
                 "Перевод по банковским реквизитам (БИК/счёт/ИНН) через MCP не "
-                "реализован: нужны providerFields (bankBik/bankAcnt/inn/kpp/…), "
-                "формы которых нет ни в одном захвате, а угадывать тело платежа "
-                "нельзя. Низкоуровневого тула для этого тоже нет — отправь "
-                "пользователя платить в приложение.")
+                "реализован. Набор полей известен из захватов комиссии "
+                "(bankBik/bankAcnt/bankCorrAcnt/bankName/addressee/inn/kpp/comment/nds), "
+                "но захваченного тела САМОЙ оплаты для этого провайдера нет, а "
+                "конверт /v1/pay отличается от конверта комиссии — угадывать его на "
+                "платеже юрлицу нельзя. Посчитать комиссию можно: "
+                "payment_commission(...) с provider='transfer-legal'. Сам платёж — "
+                "в приложении.")
         else:  # p2p-anybank (phone / SBP)
             # The caller's CHOICE is the two ids. maskedFIO is a display name the
             # bank echoes back, not part of the routing — and requiring it here meant
@@ -2744,9 +2789,21 @@ class MobileSession:
 
     def _credentials_fingerprint(self) -> str:
         """The device blob /v1/card_credentials expects — the ###-delimited UA
-        form (NOT the JSON fingerprint used at auth/step)."""
+        form (NOT the JSON fingerprint used at auth/step).
+
+        The screen and timezone come from PAY_DEVICE_PROFILE, the same source the
+        /v1/pay anti-fraud block uses, so TBANK_DEVICE_SCREEN_* reaches both. They
+        were hardcoded here as 1170x2532 while all five captured card_credentials
+        requests send 1260x2736 — the value already sitting in PAY_DEVICE_DEFAULTS
+        a few hundred lines up. One session claiming two different screens is
+        exactly the inconsistency the note above PAY_DEVICE_CONSTANTS warns about,
+        and this is the endpoint that returns a PAN and a CVV."""
         ua = self._mobile_ua() or "iPhone/iOS/TCSMB"
-        return f"{ua}###1170x2532x32###-180###false###false###"
+        p = self.PAY_DEVICE_PROFILE
+        w = p.get("device_screen_width", "1260")
+        h = p.get("device_screen_height", "2736")
+        tz = str(p.get("timezone", "180")).lstrip("+-")
+        return f"{ua}###{w}x{h}x32###-{tz}###false###false###"
 
     def card_credentials(self, ucid: str) -> dict:
         """Full card number + CVV + expiry for one card. Sensitive: the caller
@@ -2757,7 +2814,7 @@ class MobileSession:
             "fingerprint_change_date": "0",
             "mobile_device_os": self.platform or "ios",
             "mobile_device_os_version": _IOS_VERSION,
-            "mobile_device_model": "iPhone",
+            "mobile_device_model": self.device_model,
         }
         data = self._call_read("card_credentials", overrides=ov)
         return data if isinstance(data, dict) else {}
@@ -3127,7 +3184,10 @@ class MobileSession:
         params = {"orderId": str(order_id)}
         if payment_id:
             params["paymentId"] = str(payment_id)
-        return self._call_read(key, overrides=params, body={})
+        # body=None, not {}: `json={}` puts a literal two-byte body on the wire and
+        # both captured cancels send Content-Length: 0. The grocery flavour already
+        # gets this right (grocery_order_cancel) — this one never got the same fix.
+        return self._call_read(key, overrides=params)
 
     def cancel_grocery_order(self, order_id: str) -> dict:
         """Cancel a grocery (Город) order — paid or not. The app's request

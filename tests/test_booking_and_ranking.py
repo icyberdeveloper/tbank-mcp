@@ -313,7 +313,10 @@ def check_cancel_carries_both_ids():
           f"orderId missing from the query: {s.sent_overrides}")
     check(s.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
           f"paymentId missing from the query: {s.sent_overrides}")
-    check(s.sent_body == {}, f"the body must stay empty, got {s.sent_body!r}")
+    # No body at all. This used to assert `== {}`, which pinned the divergence
+    # rather than the capture: body={} makes _call_read post a literal two-byte
+    # `{}`, while both captured cancels send Content-Length: 0.
+    check(s.sent_body is None, f"the body must be absent, got {s.sent_body!r}")
 
     concert = ReplaySession()
     concert.cancel_ticket_order(CANCEL_ORDER, kind="concert",
