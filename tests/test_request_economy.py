@@ -27,6 +27,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src import server  # noqa: E402
 from src.client import MobileSession, TbankApiError  # noqa: E402
 
 failures = []
@@ -418,6 +419,49 @@ def test_cart_can_shrink_not_only_grow():
     print("  cart: remove, set-absolute, add-new and clear all rewrite the full list")
 
 
+def test_messenger_unread_name_resolution_is_capped():
+    """messenger_unread resolves chat names page by page and stops the moment every
+    unread id has a name — one page in the common case, never more than 3."""
+    target = "want-this-chat"
+
+    def make(unread_on_page):
+        # 3 pages of 10 chats; the unread id sits on page `unread_on_page`
+        # (0-based), or on none of them when None.
+        def page_for(ov):
+            off = int((ov or {}).get("offset") or 0)
+            i = off // 10
+            if i >= 3:
+                return []
+            page = [{"conversationId": f"c{i}-{j}", "title": f"Чат {i}-{j}"}
+                    for j in range(10)]
+            if unread_on_page == i:
+                page[5] = {"conversationId": target, "title": "Нужный чат"}
+            return page
+        return CountingSession({
+            "messenger_unread": {"conversationIds": [target]},
+            "messenger_base": page_for,
+        })
+
+    saved = server._require
+    try:
+        for where, expected in ((0, 1), (1, 2), (None, 3)):
+            s = make(where)
+            server._require = lambda cur=s: cur
+            out = server.messenger_unread()
+            check(s.count("messenger_base") == expected,
+                  f"unread id on page {where}: expected {expected} page reads, "
+                  f"got {s.count('messenger_base')}")
+            if where is None:
+                check("(чат без названия)" in out,
+                      f"an unresolvable chat must degrade visibly: {out!r}")
+            else:
+                check("Нужный чат" in out,
+                      f"the resolved name must be printed: {out!r}")
+    finally:
+        server._require = saved
+    print("  messenger_unread: name walk stops at the resolving page, hard cap 3")
+
+
 def test_distance_sort_is_not_anchored_to_moscow_by_accident():
     class SchedSession(CountingSession):
         def __init__(self):
@@ -525,6 +569,7 @@ def main():
     test_a_named_film_search_sees_every_page()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()
+    test_messenger_unread_name_resolution_is_capped()
     test_distance_sort_is_not_anchored_to_moscow_by_accident()
     if failures:
         print("\nFAILED:")

@@ -159,11 +159,15 @@ You normally just call a read tool; the above runs under the hood. Call
 ## 5. Messenger / support chat  (read + send)
 
 1. `messenger_unread()` → how many unread, and in which chats (by name).
-2. `messenger_conversations()` → list chats (find the support chat
-   `conversationId`, e.g. title "Поддержка").
-3. `messenger_messages(conversation_id)` → the chat history, oldest first, with
-   author and time. It takes the id and nothing else: there is no paging argument,
-   so what it returns is the whole window the bank gives.
+2. `messenger_conversations(archived, offset)` → one page of chats (find the
+   support chat `conversationId`, e.g. title "Поддержка"). The header names the
+   `offset` for the next page; `archived=True` lists archived chats.
+3. `messenger_messages(conversation_id, limit, offset, max_chars)` → the chat
+   history, oldest first, with author and time. The bank returns one page; the
+   arguments window it LOCALLY: `limit` (0 = the whole page), `offset` skips the
+   newest and walks older, `max_chars` caps one message's text (0 = whole text —
+   use it to read a long bank message in full; a cut is always marked and names
+   the full length).
 4. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
    real support agent — not money, but not undoable either; say what you are
    about to send before sending it.

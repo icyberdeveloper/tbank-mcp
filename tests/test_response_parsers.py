@@ -169,6 +169,39 @@ def test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat():
     print("  messenger: a retired token is re-minted once, never shown as a chat")
 
 
+def test_messenger_paging_arguments_reach_the_client():
+    """messenger_conversations(offset=, archived=) must reach the wire as the same
+    query params the app sends on every call today (offset / use_is_archived), and
+    messenger_messages must stay the app's exact request — no invented params."""
+    seen = []
+
+    class Wire(MobileSession):
+        def __init__(self):
+            self.tmsg_session_id = "tok"
+            self._memo = {}
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            seen.append((path_override, dict(overrides or {})))
+            return []
+
+    w = Wire()
+    w.messenger_conversations(archived=True, offset=30)
+    path, ov = seen[-1]
+    check(path.endswith("/conversations/mobile"),
+          f"the chat list must keep its capture path: {path!r}")
+    check(ov.get("offset") == "30", f"offset must ride the request: {ov}")
+    check(ov.get("use_is_archived") == "true",
+          f"archived must ride as use_is_archived: {ov}")
+
+    w.messenger_messages("c-9")
+    path2, ov2 = seen[-1]
+    check(path2.endswith("/conversations/c-9/messages"),
+          f"the history must keep its capture path: {path2!r}")
+    check(ov2.get("direction") == "before" and "messageId" not in ov2,
+          f"history is paged locally — no unconfirmed params on the wire: {ov2}")
+    print("  messenger paging: offset/use_is_archived reach the wire, nothing invented")
+
+
 def test_the_cart_prints_the_ids_it_must_be_edited_by():
     """grocery_set_cart addresses goods BY ID and replaces the whole cart, and
     grocery_cart is the only tool that says what is in it. Printing names alone left
@@ -490,6 +523,7 @@ def main():
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
+    test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
     test_delivery_speed_is_read_from_both_slot_shapes()
     test_the_store_list_shows_and_sorts_by_delivery_speed()

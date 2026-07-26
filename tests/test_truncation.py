@@ -298,6 +298,59 @@ ROW_TOOLS = [
 ]
 
 
+def test_messenger_messages_window_is_honest():
+    """The chat history is paged LOCALLY over the one page the bank returns: the
+    header states page size and window, offset walks toward older messages, and a
+    long message is cut WITH a marker naming max_chars=0 — this is the exact spot
+    that used to swallow the tail of long bank messages silently (text[:400])."""
+    long_text = "Важное сообщение банка " + "х" * 1000
+    msgs = [{"timestamp": f"2026-07-01T10:{i:02d}:00Z",
+             "author": {"name": "Банк"},
+             "content": {"text": long_text if i == 59 else f"Сообщение {i}"}}
+            for i in range(60)]
+    calls = []
+    session = AnySession()
+    session.messenger_messages = lambda *a, **kw: (calls.append(a), msgs)[1]
+
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out = server.messenger_messages("c-1")
+        head = out.splitlines()[0]
+        rows = [ln for ln in out.splitlines() if ln.startswith("- ")]
+        check("60 сообщений" in head and "показано 20" in head,
+              f"the header must state page and window: {head!r}")
+        check(len(rows) == 20, f"default window must hold 20 rows, got {len(rows)}")
+        check("Сообщение 40" in out, "the default window must hold the NEWEST messages")
+        check("offset=20" in head, f"the header must say how to go older: {head!r}")
+        check(long_text not in out, "a long message must not print whole by default")
+        check(f"всего {len(long_text)} симв." in out and "max_chars=0" in out,
+              "a cut message must name its full length and the way to get it")
+
+        older = server.messenger_messages("c-1", 20, 20)
+        orows = [ln for ln in older.splitlines() if ln.startswith("- ")]
+        check(len(orows) == 20 and "Сообщение 39" in older and "Сообщение 20" in older,
+              f"offset=20 must show the next-older window: {older.splitlines()[0]!r}")
+        check("Сообщение 40" not in older and "Сообщение 19" not in older,
+              "the offset window must not leak neighbours")
+        check("offset=40" in older.splitlines()[0],
+              "the header must chain to the next window")
+
+        every = server.messenger_messages("c-1", 0)
+        check(len([ln for ln in every.splitlines() if ln.startswith("- ")]) == 60,
+              "limit=0 must render the whole page")
+
+        full = server.messenger_messages("c-1", 20, 0, 0)
+        check(long_text in full, "max_chars=0 must print the message whole")
+        check("обрезано" not in full, "an uncut message must carry no cut marker")
+
+        check(len(calls) == 4,
+              f"each call must cost exactly one page fetch, got {len(calls)}")
+    finally:
+        server._require = saved
+    print("  messenger_messages: honest local window over the bank's page, marked cuts")
+
+
 def test_every_json_tool_trims_by_records_not_by_characters():
     saved = server._require
     try:
@@ -387,6 +440,7 @@ def main():
     test_list_tools_report_the_total_they_are_hiding()
     test_list_operations_end_to_end()
     test_limit_zero_means_everything_in_every_list_tool()
+    test_messenger_messages_window_is_honest()
     test_every_json_tool_trims_by_records_not_by_characters()
     test_every_row_tool_reports_what_it_hides()
     test_real_capture_payload_survives()

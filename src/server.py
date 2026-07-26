@@ -1157,11 +1157,14 @@ def debug_report(runs: int = 0, top: int = 6) -> str:
 # ── MESSENGER ───────────────────────────────────────────────
 
 @mcp.tool()
-def messenger_conversations() -> str:
-    """Список чатов."""
+def messenger_conversations(archived: bool = False, offset: int = 0) -> str:
+    """Список чатов (одна страница банка).
+
+    offset — с какого чата начать (следующая страница: offset из подсказки в
+    шапке ответа). archived=True — архивные чаты."""
     try:
         s = _require(); s.ensure_fresh()
-        convs = s.messenger_conversations()
+        convs = s.messenger_conversations(archived=archived, offset=offset)
         lines = []
         for c in convs:
             if not isinstance(c, dict):
@@ -1180,16 +1183,29 @@ def messenger_conversations() -> str:
                 f"- {name} | id={c.get('conversationId','')}"
                 f"{f' | непрочитано: {unread}' if unread else ''}"
                 f" | {(c.get('updatedAt') or '')[:16]}"
-                f"{' | ' + ' '.join(last.split())[:60] if last else ''}")
+                f"{' | ' + _cut(' '.join(last.split()), 60) if last else ''}")
         if not lines:
+            if offset > 0:
+                return f"Больше чатов нет (offset={offset})."
             return "Чатов нет. Это не ошибка — мессенджер ответил пустым списком."
-        return "\n".join(lines)
+        # The header must not contain «id=» — the listing promises exactly one id
+        # per chat row, and tooling greps them out by that marker.
+        head = (f"Чаты: {len(lines)} (offset={offset}). Нет нужного — "
+                f"offset={offset + len(lines)}; архивные — archived=True.")
+        return "\n".join([head] + lines)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def messenger_messages(conversation_id: str) -> str:
-    """История чата."""
+def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
+                       max_chars: int = 400) -> str:
+    """История чата, старые сверху.
+
+    Банк отдаёт одну страницу истории; параметры листают её ЛОКАЛЬНО:
+      limit     — сколько сообщений показать (0 = вся страница);
+      offset    — сколько САМЫХ НОВЫХ пропустить (окно старее: offset=20, 40, …);
+      max_chars — кап текста одного сообщения (0 = целиком). Обрезка всегда
+                  помечена и называет полную длину."""
     try:
         s = _require(); s.ensure_fresh()
         msgs = s.messenger_messages(conversation_id)
@@ -1197,16 +1213,36 @@ def messenger_messages(conversation_id: str) -> str:
         # fragments loses who said what, which is most of the meaning in a chat.
         msgs = sorted((m for m in msgs if isinstance(m, dict)),
                       key=lambda m: m.get("timestamp") or "")
-        out = []
-        for m in msgs[-20:]:
+        if not msgs:
+            return "Сообщений нет."
+        end = max(0, len(msgs) - max(0, offset))
+        start = 0 if limit <= 0 else max(0, end - limit)
+        window = msgs[start:end]
+        head = (f"Чат {conversation_id}: {len(msgs)} сообщений на странице банка, "
+                f"показано {len(window)} (старые выше).")
+        if start > 0:
+            head += f" Старее: offset={offset + len(window)}; limit=0 — вся страница."
+        elif offset > 0:
+            head += " Это самые старые сообщения, которые отдал банк."
+        if not window:
+            return head
+        out = [head]
+        for m in window:
             a = m.get("author") or {}
             who = a.get("name") or ("Вы" if a.get("role") == "client" else "?")
             text = " ".join(((m.get("content") or {}).get("text") or "").split())
             if not text:
                 text = f"[{m.get('messageType') or 'вложение'}]"
+            elif max_chars > 0 and len(text) > max_chars:
+                # Not _cut: a chat message deserves more than a bare «…» — say how
+                # much is missing and how to get it. This is the exact spot that
+                # used to swallow the tail of long bank messages silently.
+                text = (text[:max_chars]
+                        + f"…[обрезано, всего {len(text)} симв.; "
+                          f"max_chars=0 покажет целиком]")
             out.append(f"- [{(m.get('timestamp') or '')[:16].replace('T', ' ')}] "
-                       f"{who}: {text[:400]}")
-        return "\n".join(out) or "Сообщений нет."
+                       f"{who}: {text}")
+        return "\n".join(out)
     except Exception as e:
         return _err(e)
 
@@ -1241,16 +1277,29 @@ def messenger_unread() -> str:
         ids = data.get("conversationIds") or []
         if not ids:
             return "Непрочитанных сообщений нет."
-        # the endpoint returns bare ids — resolve them to chat names
+        # the endpoint returns bare ids — resolve them to chat names. An unread
+        # chat outside the first page used to print «(чат без названия)»; walk up
+        # to 3 pages, stopping as soon as every id has a name (request economy:
+        # one page resolves everything in the common case).
         names = {}
         try:
-            for c in s.messenger_conversations():
-                cid = str(c.get("id") or c.get("conversationId") or "")
-                members = c.get("members") or []
-                title = (c.get("title") or c.get("name")
-                         or (members[0].get("name") if members else "") or "")
-                if cid:
-                    names[cid] = title
+            off = 0
+            for _ in range(3):
+                page = s.messenger_conversations(offset=off)
+                if not page:
+                    break
+                for c in page:
+                    if not isinstance(c, dict):
+                        continue
+                    cid = str(c.get("id") or c.get("conversationId") or "")
+                    members = c.get("members") or []
+                    title = (c.get("title") or c.get("name")
+                             or (members[0].get("name") if members else "") or "")
+                    if cid:
+                        names[cid] = title
+                off += len(page)
+                if all(str(i) in names for i in ids):
+                    break
         except Exception:
             pass
         lines = [f"Непрочитано в {len(ids)} чатах:"]
