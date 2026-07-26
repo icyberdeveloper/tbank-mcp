@@ -147,13 +147,20 @@ def _safe_record(attempt_id, step, status, **fields):
 
 def checkout(session, app_id: str = "", point_id: str = "",
              client_email: str = "", sum_val: float = 0,
-             account: str = "", attempt_id: str | None = None) -> dict:
+             account: str = "", attempt_id: str | None = None,
+             expected_sum: float = 0) -> dict:
     """Run the grocery checkout via headless browser. `session` is a MobileSession
     with a valid access_token + cookies (from login/silent_relogin).
 
+    `expected_sum` is the amount the USER approved. The sum actually charged is
+    decided by the backend twice after that approval (the web cart, then
+    deliveries' cartPrice), so without this the user confirms one number and a
+    different one is paid. Non-zero ⇒ a divergence over 0.01 ₽ refuses BEFORE the
+    order exists. Same guard, same tolerance as ticket_pay.
+
     Contract verified against captures.xml (2026-07-24):
-      - agreement   = accountId from GET /api/supreme/lifestyle/api/user/payment/account/last
-                      (the `account` arg is only a fallback if that fetch is empty)
+      - agreement   = `account` when the caller names one, else accountId from GET
+                      /api/supreme/lifestyle/api/user/payment/account/last
       - clientEmail = email from GET /mybank/api/shopping/mobile/v1/checkout/get-customer-information
                       (the `client_email` arg is only a fallback)
       - order/create body = {appId, clientEmail, sum}
@@ -310,6 +317,16 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if len(post_goods) < pre_count:
                 # items dropped after recalculation (out of stock?) — surface it
                 _log(f"[checkout] WARN: item count changed {pre_count} → {len(post_goods)} after delivery")
+
+            # actual_sum is final here, and it was decided by the backend — twice —
+            # AFTER the user approved a number. Refuse now, while refusing is still
+            # free: nothing has been posted, so this stays a CheckoutError (safe to
+            # retry) rather than the UNKNOWN that anything past order/create becomes.
+            if expected_sum and abs(float(actual_sum) - float(expected_sum)) > 0.01:
+                raise CheckoutError(
+                    f"сумма изменилась после подтверждения: подтверждено "
+                    f"{expected_sum} ₽, к оплате {actual_sum} ₽. Заказ НЕ создан. "
+                    f"Покажи корзину заново (grocery_cart) и подтверди новую сумму.")
             _safe_record(attempt_id, "delivery", "delivery_ready", amount=actual_sum)
 
             # 5. resolve the payment agreement + customer email from the capture-
@@ -321,7 +338,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
             """), {"qs": GROCERY_WEB_QS, "ms": FETCH_TIMEOUT_MS})
             agr_body = agr_res.get("body", {}) if isinstance(agr_res, dict) else {}
             agr_payload = agr_body.get("payload", {}) if isinstance(agr_body, dict) else {}
-            agreement = (agr_payload.get("accountId") if isinstance(agr_payload, dict) else "") or account
+            # The caller's choice wins. The other way round (bank first, `account` as
+            # fallback) meant an explicitly requested account was silently ignored
+            # whenever this endpoint answered — which is always, in practice.
+            agreement = account or (agr_payload.get("accountId")
+                                    if isinstance(agr_payload, dict) else "")
             obs.emit("payment_account", attempt_id=attempt_id, http_status=agr_res.get("status"),
                      agreement_present=bool(agreement), blame=obs.blame_of(agr_res.get("status")))
             if not agreement:
@@ -416,7 +437,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 _safe_record(attempt_id, "payment", "paid",
                              order_id=order_id, payment_id=payment_id)
                 return {"order_id": order_id, "payment_id": payment_id,
-                        "status": status, "sum": actual_sum}
+                        "status": status, "sum": actual_sum, "account": agreement}
 
             # Payment did not report SUCCESS — but that is not the same as "not paid".
             # A timed-out or dropped payment fetch (status 0) is exactly the case where
@@ -448,6 +469,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
                      f"{order_id} reads back as {order_state} — treating as paid")
                 return {"order_id": order_id, "payment_id": payment_id,
                         "status": order_state or "PAID", "sum": actual_sum,
+                        "account": agreement,
                         "note": "confirmed by order lookup, not by the payment response"}
 
             # Still unresolved. Retrying would create a duplicate order; the unpaid one

@@ -19,6 +19,7 @@
 
     python3 tests/test_audit_regressions.py
 """
+import json
 import os
 import sys
 import time
@@ -282,6 +283,10 @@ class FakePage:
     def __init__(self, routes):
         self.routes = routes
         self.log = []
+        # What was SENT, per route key — the request bodies the real code builds and
+        # hands to the page. Without these a test can only assert that a step ran,
+        # never that it carried the right numbers.
+        self.bodies = {}
 
     def goto(self, url, **kw):
         self.log.append("goto")
@@ -291,6 +296,8 @@ class FakePage:
             if key not in js:
                 continue
             self.log.append(key)
+            if isinstance(arg, dict) and "body" in arg:
+                self.bodies.setdefault(key, []).append(arg["body"])
             r = responses.pop(0) if len(responses) > 1 else responses[0]
             return r
         raise AssertionError(f"unrouted in-page request: {js[:200]}")
@@ -382,8 +389,9 @@ def test_the_cart_readiness_poll_uses_a_real_clock():
     print("  checkout poll: wall-clock deadline, result reused, errors are not-ready")
 
 
-def run_checkout(routes):
-    """Drive the REAL checkout() against a fake browser. Returns (result, exc, page, stdout)."""
+def run_checkout(routes, **kw):
+    """Drive the REAL checkout() against a fake browser. Returns (result, exc, page, stdout).
+    Extra kwargs go straight to checkout() (expected_sum, account, ...)."""
     import contextlib
     import io
     import types
@@ -406,7 +414,7 @@ def run_checkout(routes):
     result, exc = None, None
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            result = co.checkout(S(), app_id="204", point_id="700", sum_val=100.0)
+            result = co.checkout(S(), app_id="204", point_id="700", sum_val=100.0, **kw)
     except Exception as e:                                  # noqa: BLE001
         exc = e
     finally:
@@ -492,6 +500,68 @@ def test_lost_payment_answer_is_reconciled_not_declared_unknown():
     print("  checkout: lost answer reconciled by lookup, real failures still UNKNOWN")
 
 
+def test_the_sum_the_user_approved_is_the_sum_that_gets_paid():
+    """The user confirms a cart total, and the backend then revises it TWICE before
+    anything is charged: the web cart replaces the mobile sum, and deliveries'
+    cartPrice replaces that (weight items recompute — the fixtures here are the real
+    1630.00 → 1600.20). Both revisions were applied silently, logged to stderr only,
+    so a checkout could charge a number the user never saw.
+
+    ticket_pay has had this guard all along (server.py, 0.01 ₽ tolerance). This is
+    the same guard on the other money path, and it must refuse in the window where
+    refusing is still free — before order/create, so the attempt stays a retryable
+    CheckoutError rather than the UNKNOWN that blocks the cart afterwards."""
+    from src.checkout import CheckoutError
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+
+    # Approving the pre-delivery number does NOT authorise the post-delivery one.
+    res, exc, page, _ = run_checkout(routes(paid), expected_sum=1630.0)
+    check(isinstance(exc, CheckoutError),
+          f"a 29.80 ₽ divergence must refuse, got {res} / {exc!r}")
+    check("1600.2" in str(exc) and "1630" in str(exc),
+          f"the refusal must name both numbers so the agent can re-confirm: {exc}")
+    check("order/create" not in page.log,
+          f"the refusal came too late — an order was created: {page.log}")
+    check("payment-gate/payments" not in page.log,
+          f"money moved despite the divergence: {page.log}")
+
+    # Approving the real number goes through, and the tolerance is not zero.
+    res2, exc2, _, _ = run_checkout(routes(paid), expected_sum=1600.2)
+    check(exc2 is None and res2 and res2["sum"] == 1600.2,
+          f"the approved sum must pay: {res2} / {exc2!r}")
+    res3, exc3, _, _ = run_checkout(routes(paid), expected_sum=1600.21)
+    check(exc3 is None, f"a 0.01 ₽ rounding difference must not block a checkout: {exc3!r}")
+
+    # Omitted ⇒ the old behaviour, so an existing caller is never broken by the guard.
+    res4, exc4, _, _ = run_checkout(routes(paid))
+    check(exc4 is None and res4 and res4["sum"] == 1600.2,
+          f"without expected_sum the checkout must behave as before: {res4} / {exc4!r}")
+    print("  checkout: pays only the sum the user approved, refuses before the order exists")
+
+
+def test_the_caller_can_choose_which_account_pays():
+    """The tool's docstring promised «первый Current RUB с балансом» and the code did
+    something else entirely — it used whatever account the bank remembered from the
+    user's last in-app grocery payment. The plumbing to override it existed at every
+    layer and was wired at none, and `X or account` meant an explicit choice lost to
+    the bank's memory whenever that endpoint answered, which is always."""
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+
+    res, exc, page, _ = run_checkout(routes(paid), account="0000000000")
+    check(exc is None, f"an explicit account must not break the checkout: {exc!r}")
+    body = json.loads(page.bodies["payment-gate/payments"][-1])
+    check(body["paymentMethod"]["agreement"] == "0000000000",
+          f"the caller's account must win over the bank's last-used one: {body}")
+    check(res and res["account"] == "0000000000",
+          f"the result must name the debited account so the tool can report it: {res}")
+
+    # Default unchanged: the bank's last-used account, and it is still reported.
+    res2, _, _, _ = run_checkout(routes(paid))
+    check(res2 and res2["account"] == AGREEMENT_OK["body"]["payload"]["accountId"],
+          f"without a choice the bank's account is used and named: {res2}")
+    print("  checkout: the caller picks the account, and the answer says which paid")
+
+
 def test_payment_gate_problem_json_reaches_the_user():
     """A 4xx from the payment gate arrives as problem+json, and its title/detail is
     the only actionable cause ("Недостаточно средств"). It used to land in
@@ -528,6 +598,7 @@ def test_payment_gate_problem_json_reaches_the_user():
     check(bool(pay_events), f"no payment event was emitted: {events}")
     check(pay_events[-1].get("app_code") == "payment-gate/balance-otb-is-spent",
           f"diagnostics must carry the problem type as app_code: {pay_events[-1]}")
+    print("  checkout: the gateway's problem+json reaches the user and diagnostics")
 
 
 def test_cart_readiness_distinguishes_not_up_from_empty():
@@ -562,14 +633,32 @@ def test_cart_readiness_distinguishes_not_up_from_empty():
 
 def main():
     print("audit regressions (2026-07-25):")
-    test_spending_categories_walks_the_interval_tree()
-    test_err_redacts_the_sessionid()
-    test_cinema_schedule_emits_objectid()
-    test_in_page_fetch_gives_up_instead_of_hanging()
-    test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout()
-    test_lost_payment_answer_is_reconciled_not_declared_unknown()
-    test_cart_readiness_distinguishes_not_up_from_empty()
-    test_the_cart_readiness_poll_uses_a_real_clock()
+    cases = [
+        test_spending_categories_walks_the_interval_tree,
+        test_err_redacts_the_sessionid,
+        test_cinema_schedule_emits_objectid,
+        test_in_page_fetch_gives_up_instead_of_hanging,
+        test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout,
+        test_lost_payment_answer_is_reconciled_not_declared_unknown,
+        test_the_sum_the_user_approved_is_the_sum_that_gets_paid,
+        test_the_caller_can_choose_which_account_pays,
+        test_payment_gate_problem_json_reaches_the_user,
+        test_cart_readiness_distinguishes_not_up_from_empty,
+        test_the_cart_readiness_poll_uses_a_real_clock,
+    ]
+    # A test defined and never called is worse than no test: the suite reports green
+    # and the reader believes the behaviour is pinned. It has happened here —
+    # test_payment_gate_problem_json_reaches_the_user shipped unregistered and never
+    # ran once. The list above stays explicit (order is readable and deliberate);
+    # this makes forgetting it impossible.
+    registered = {f.__name__ for f in cases}
+    defined = {n for n, v in list(globals().items())
+               if n.startswith("test_") and callable(v)}
+    for name in sorted(defined - registered):
+        failures.append(f"{name} is defined but never called by main() — it has never run")
+
+    for case in cases:
+        case()
     if failures:
         print("\nFAILED:")
         for f in failures:

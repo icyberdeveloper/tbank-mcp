@@ -228,6 +228,46 @@ def _count_out(count: float):
     return int(count) if float(count) == int(count) else round(float(count), 3)
 
 
+def _reject_unkeyed(items: Any) -> None:
+    """Refuse a cart write whose entries carry no ``id``, BEFORE anything is posted.
+
+    The cart loops skipped such an entry silently. cart/set then replaced the cart
+    with the unchanged goods list and answered 200 with a goodsSum, so the server
+    layer reported success and counted the caller's INPUT — "OK: 3 новых позиций"
+    for zero items added. Nothing about that told the caller its key name was wrong.
+    Refusing here costs nothing: no request has been made yet."""
+    if not isinstance(items, list):
+        raise TbankApiError("BAD_ITEMS",
+            f"items должен быть списком объектов [{{\"id\": \"123\", \"count\": 1}}], "
+            f"а пришло {type(items).__name__}.")
+    bad = [it for it in items
+           if not isinstance(it, dict) or not str(it.get("id", "") or "").strip()]
+    if bad:
+        keys = sorted({k for it in bad if isinstance(it, dict) for k in it})
+        raise TbankApiError("BAD_ITEMS",
+            f"{len(bad)} из {len(items)} позиций без ключа \"id\" — они были бы "
+            f"молча пропущены, а корзина осталась бы прежней. "
+            f"Нужно [{{\"id\": \"123\", \"count\": 1}}]"
+            + (f"; пришли ключи: {', '.join(keys)}." if keys else ".")
+            + " id товара берётся из grocery_search / grocery_rank.")
+
+
+def _next_step_hint(resp: dict) -> str:
+    """What the caller must do next, from the `step` the bank names in an
+    /auth/step response. Shared by login() and confirm_step() — the latter used to
+    dump the raw JSON instead, so the normal otp → password hop surfaced to the
+    agent as «API error (NO_CODE): {…}» with the answer inside the blob."""
+    step = str((resp or {}).get("step", "") or "")
+    tool = {"otp": "confirm_otp(<код из СМС>)",
+            "password": "confirm_password(<пароль от аккаунта>)",
+            "pin": "confirm_pin(<PIN приложения>)"}.get(step)
+    if tool:
+        return f"Следующий шаг — {step}. Вызови {tool}."
+    return (f"Следующий шаг — '{step or 'неизвестен'}'. Подходящий тул: confirm_otp / "
+            f"confirm_password / confirm_pin. Ответ: "
+            f"{json.dumps(resp, ensure_ascii=False)[:200]}")
+
+
 def _normalize_phone(phone: str) -> str:
     """Normalize a RU mobile number to the SBP `pointer` format ``+7XXXXXXXXXX``
     (the form the real app sends). Accepts +7 / 8 / 7 / bare-9… forms."""
@@ -917,16 +957,7 @@ class MobileSession:
                             timeout=30)
         r2j = self._unwrap(r2)
         self._login_token = r2j.get("token", "") or ""
-        next_step = r2j.get("step", "")
-        if next_step == "otp":
-            return ("SMS OTP sent. Call confirm_otp(<code>) with the code from the SMS.")
-        if next_step == "password":
-            return ("Password step. Call confirm_password(<your account password>).")
-        if next_step == "pin":
-            return ("PIN step. Call confirm_pin(<your app PIN>).")
-        # unknown step — return it so the user can pick the right confirm_*
-        return (f"Next step: '{next_step}'. Call confirm_otp / confirm_password / "
-                f"confirm_pin accordingly. (cid stored.) resp: {json.dumps(r2j)[:200]}")
+        return _next_step_hint(r2j)
 
     def confirm_step(self, kind: str, value: str) -> dict:
         """Finish the login: submit the OTP (kind='otp') or PIN (kind='pin') or
@@ -957,8 +988,12 @@ class MobileSession:
                                 json.dumps(rj, ensure_ascii=False)[:300])
         code = rj.get("code")
         if not code:
-            # not finished yet — another step (e.g. otp -> password)
-            raise TbankApiError("NO_CODE", json.dumps(rj, ensure_ascii=False)[:300])
+            # Not an error: the login is alive and the bank named the NEXT step in
+            # the response. This used to dump the raw JSON under "NO_CODE", so the
+            # ordinary first-device flow (otp → password) read to the agent as a
+            # failure, with the tool it needed to call next sitting unread in the
+            # blob. login() has parsed the same field all along.
+            raise TbankApiError("NEXT_STEP", _next_step_hint(rj))
         # exchange the code for the mobile session
         tb = (f"device_id={self.device_id}&client_version={self.client_version}"
               f"&grant_type=authorization_code&appVersion={self.app_version or '7.31.6'}"
@@ -2301,8 +2336,15 @@ class MobileSession:
     def grocery_add_to_cart(self, items: list[dict], app_id: str = "", point_id: str = "") -> dict:
         """Add items to cart. items = [{"id": "123", "count": 1}, ...].
         Resolves the delivery block (address + areaId) and merges with what is
-        already in the cart."""
+        already in the cart.
+
+        An entry whose key is not exactly ``id`` is refused, not skipped: the old
+        loop dropped it silently, the cart came back with an unchanged goodsSum, and
+        the tool reported "OK, N new items" for zero items added. `goodId`,
+        `good_id` and `product_id` are all plausible guesses for a caller reading
+        goods ids out of a search result."""
         _need_store(app_id, point_id)
+        _reject_unkeyed(items)
         try:
             cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
         except TbankApiError:
@@ -2386,8 +2428,12 @@ class MobileSession:
         their current count. `clear=True` empties the cart and ignores `items`.
 
         The counterpart of grocery_add_to_cart, which is relative (+N). Without this
-        the cart could only ever grow: re-adding a good to "correct" it added again."""
+        the cart could only ever grow: re-adding a good to "correct" it added again.
+
+        Entries without an ``id`` key are refused — see grocery_add_to_cart."""
         _need_store(app_id, point_id)
+        if not clear:
+            _reject_unkeyed(items)
         try:
             cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
         except TbankApiError as e:
@@ -2437,16 +2483,20 @@ class MobileSession:
 
     def grocery_checkout(self, app_id: str = "", point_id: str = "",
                          client_email: str = "", account: str = "",
-                         sum_val: float = 0, attempt_id: str | None = None) -> dict:
+                         sum_val: float = 0, attempt_id: str | None = None,
+                         expected_sum: float = 0) -> dict:
         """Full grocery checkout (web flow): deliveries → order/create → payment_gate_pay.
-        `app_id`/`point_id` scope the store; the payment agreement is resolved
-        inside checkout from user/payment/account/last; `sum_val` is a mobile-cart
-        fallback sum (the post-delivery WEB sum is used inside); `attempt_id` records
-        progress in the journal. Raises checkout.CheckoutError (safe to retry) or
+        `app_id`/`point_id` scope the store; `account` names the account to debit and
+        wins over the bank's last-used one when given; `sum_val` is a mobile-cart
+        fallback sum (the post-delivery WEB sum is used inside); `expected_sum` is the
+        amount the user approved and refuses the checkout, before the order exists, if
+        the backend's final number diverges; `attempt_id` records progress in the
+        journal. Raises checkout.CheckoutError (safe to retry) or
         checkout.CheckoutUnknown (order may exist — retry must be blocked)."""
         from .checkout import checkout as _checkout
         return _checkout(self, app_id=app_id, point_id=point_id, client_email=client_email,
-                         sum_val=sum_val, account=account, attempt_id=attempt_id)
+                         sum_val=sum_val, account=account, attempt_id=attempt_id,
+                         expected_sum=expected_sum)
 
     def messenger_send(self, conversation_id: str, text: str) -> dict:
         """Send a text message to a conversation. Encapsulates the vendor
@@ -2477,8 +2527,13 @@ class MobileSession:
                 continue
             if a.get("id"):
                 return str(a["id"])
+        # Names the way out. This is a guess the caller can always override, and the
+        # override is documented on the tools but was absent from the one message the
+        # agent actually reads when the guess fails.
         raise TbankApiError("NO_SOURCE_ACCOUNT",
-            "no Current RUB account with a positive balance to use as transfer source")
+            "не нашёл рублёвый счёт Current с положительным балансом для списания. "
+            "Посмотри list_accounts() и укажи счёт явно: "
+            "transfer(..., from_account=\"…\") или ticket_pay(..., account_id=\"…\").")
 
     def resolve_sbp_recipient(self, phone: str) -> list[dict]:
         """Resolve a phone to its SBP recipient banks (GET /v1/get_requisites,

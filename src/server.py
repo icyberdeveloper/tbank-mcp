@@ -703,7 +703,12 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
-        r = s.grocery_add_to_cart(json.loads(items), app_id=app_id, point_id=point_id)
+        try:
+            wanted = json.loads(items)
+        except json.JSONDecodeError as e:
+            return (f"[store appId={app_id} pointId={point_id}] items — это JSON-строка "
+                    f"вида [{{\"id\": \"123\", \"count\": 1}}], разобрать не удалось: {e}")
+        r = s.grocery_add_to_cart(wanted, app_id=app_id, point_id=point_id)
         pl = r if isinstance(r, dict) else {}
         # Every successful cart/set in the capture returns payload.goodsSum. Its
         # absence means the backend did not accept the cart, so do NOT report OK —
@@ -718,8 +723,15 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
         reset = ("\n⚠️ Корзины ДРУГИХ магазинов при этом очищены — бэкенд не даёт "
                  "держать две сразу. Если там что-то лежало, оно потеряно."
                  if pl.get("otherCartsReset") else "")
+        # Report what the CART holds, not what the caller sent — the two used to be
+        # assumed equal, so a write that stored nothing still printed the input count.
+        try:
+            in_cart = len(s.grocery_cart_goods(app_id=app_id, point_id=point_id))
+            held = f"в корзине {in_cart} позиций"
+        except Exception:                                   # noqa: BLE001
+            held = f"добавлено {len(wanted)} позиций"
         return (f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl['goodsSum']}"
-                f" (в корзине {len(json.loads(items))} новых позиций){reset}")
+                f" ({held}){reset}")
     except Exception as e:
         return _err(e)
 
@@ -799,10 +811,21 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         return _err(e)
 
 @mcp.tool()
-async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False) -> str:
+async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False,
+                           account_id: str = "", expected_sum: float = 0) -> str:
     """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
-    Счёт оплаты выбирается автоматически (первый Current RUB с балансом).
+
+    СЧЁТ СПИСАНИЯ по умолчанию — тот, которым пользователь последний раз платил
+    за продукты В ПРИЛОЖЕНИИ (банк отдаёт его сам), а НЕ первый счёт с балансом.
+    Хочешь другой — передай account_id из list_accounts(). Списанный счёт печатается
+    в ответе.
+
+    expected_sum — сумма, которую подтвердил пользователь. Передавай её ВСЕГДА:
+    после подтверждения банк дважды пересчитывает корзину (веб-корзина, затем
+    доставка — весовые товары меняются), и без этого параметра оплатится новая
+    сумма молча. Расхождение больше 0.01 ₽ отменяет чекаут ДО создания заказа.
+
     При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
     сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
     пользователь ЯВНО подтвердил, что прошлого заказа нет. Всегда показывай состав и
@@ -813,13 +836,15 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
     FastMCP крутит sync-тулы именно в loop. Если тул падает с Playwright-ошибкой —
     проверь `python -m playwright install chromium` (в окружении MCP)."""
     try:
-        return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force)
+        return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force,
+                                       account_id, expected_sum)
     except Exception as e:
         # errors before an attempt was created (NO_SESSION, NO_STORE_CONTEXT, etc.)
         return _err(e)
 
 
-def _do_grocery_checkout(app_id: str, point_id: str, force: bool) -> str:
+def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
+                         account_id: str = "", expected_sum: float = 0) -> str:
     """Sync checkout body — runs in a worker thread (no running event loop there, so
     Playwright's sync API works; calling it directly in FastMCP's loop raises
     "It looks like you are using Playwright Sync API inside the asyncio loop")."""
@@ -853,9 +878,15 @@ def _do_grocery_checkout(app_id: str, point_id: str, force: bool) -> str:
                  point_id=point_id, amount=amount, item_count=len(goods))
         try:
             r = s.grocery_checkout(app_id=app_id, point_id=point_id,
-                                   sum_val=amount, attempt_id=attempt_id)
+                                   sum_val=amount, attempt_id=attempt_id,
+                                   account=account_id, expected_sum=expected_sum)
+            # Name the debited account, like ticket_pay does — "PAID" without saying
+            # from where is the one fact the user cannot check afterwards from here.
+            paid_from = r.get("account") or account_id
             return (f"[store appId={app_id} pointId={point_id}] ✓ ORDER {r['order_id']} PAID. "
-                    f"sum={r['sum']}₽ (attempt {attempt_id})")
+                    f"sum={r['sum']}₽"
+                    + (f" со счёта {paid_from}" if paid_from else "")
+                    + f" (attempt {attempt_id})")
         except CheckoutUnknown as e:
             return (f"[store appId={app_id} pointId={point_id}] UNKNOWN RESULT (attempt {attempt_id}): {e} "
                     f"Повтор ЗАБЛОКИРОВАН — заказ мог создаться. Проверь grocery_attempts() / grocery_order_status() и заказ в приложении.")
@@ -2170,13 +2201,39 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
 
 # ── TICKET BOOKING ──────────────────────────────────────────
 
-def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "") -> list[str]:
-    """Vacant seats grouped by row, cheapest rows first."""
+def _seat_id_of(seat: dict) -> str:
+    """The value order/create wants back for this seat, verbatim."""
+    return str(seat.get("id") or seat.get("seatId") or "")
+
+
+def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
+               kind: str = "movie") -> list[str]:
+    """Vacant seats grouped by row, cheapest rows first.
+
+    Concerts are printed differently, and must be: cinema_book needs the seat's own
+    composite id ("Сектор|цена§~§ticketId|type") passed back verbatim, and this
+    renderer only ever printed row and number — so the argument the tool demands was
+    obtainable from no tool at all. Concert seats also frequently carry no `pos`, so
+    grouping them by row collapsed the whole hall into a single «ряд —»."""
     out = []
     for hall in halls:
         seats = [s for s in (hall.get("seats") or []) if s.get("status") == "vacant"]
         if max_price:
             seats = [s for s in seats if float(s.get("price") or 0) <= max_price]
+        if kind == "concert":
+            if not seats:
+                continue
+            out.append(f"{hall.get('hallName','?')} — свободно {len(seats)}")
+            for s in sorted(seats, key=lambda x: float(x.get("price") or 0))[:40]:
+                pos = s.get("pos") or {}
+                where = (f"ряд {pos.get('row')} место {pos.get('number')}"
+                         if pos.get("row") or pos.get("number") else "без нумерации")
+                sid = _seat_id_of(s)
+                out.append(f"  {float(s.get('price') or 0):.0f} ₽ | {where} | "
+                           + (f"seatId={sid}" if sid else "seatId=НЕТ В ОТВЕТЕ"))
+            if len(seats) > 40:
+                out.append(f"  …ещё {len(seats) - 40} мест")
+            continue
         by_row: dict[str, list] = {}
         for s in seats:
             pos = s.get("pos") or {}
@@ -2209,12 +2266,16 @@ def cinema_seats(event_id: str, slot_id: str, object_id: str,
         if not halls:
             return ("Схема зала пуста. Для концертов со свободной рассадкой "
                     "смотри concert_hall() — там места не нумеруются.")
-        lines = _seat_rows(halls, max_price=max_price, row=row)
+        lines = _seat_rows(halls, max_price=max_price, row=row, kind=kind)
         if not lines:
             return "Свободных мест по заданным условиям нет."
-        return "\n".join(lines) + (
-            "\n\nДальше: cinema_book(event_id, slot_id, object_id, seats=\"ряд:место,…\")"
-            " — это БРОНЬ без оплаты.")
+        nxt = ("\n\nДальше: cinema_book(event_id, slot_id, object_id, "
+               "seats=\"<seatId>,<seatId>\", kind=\"concert\") — передавай seatId "
+               "ЦЕЛИКОМ, как напечатано выше. Это БРОНЬ без оплаты."
+               if kind == "concert" else
+               "\n\nДальше: cinema_book(event_id, slot_id, object_id, seats=\"ряд:место,…\")"
+               " — это БРОНЬ без оплаты.")
+        return "\n".join(lines) + nxt
     except Exception as e:
         return _err(e)
 

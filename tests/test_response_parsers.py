@@ -394,8 +394,99 @@ def test_money_formatting_is_unambiguous():
     print("  _money: bare numbers, bank dicts, grouping, and 'absent' vs zero")
 
 
+def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
+    """The cart loops skipped any entry without an exact `id` key. cart/set then
+    replaced the cart with the unchanged goods list, answered 200 with a goodsSum,
+    and the tool printed «OK: … N новых позиций» — counting the caller's INPUT. So
+    `goodId`, `good_id`, `product_id` (all plausible for an agent reading a search
+    result) added nothing and reported success.
+
+    Refusing happens in the client, before any request: nothing has been posted, so
+    it is a clean pre-write refusal."""
+    from src.client import TbankApiError
+
+    posted = []
+
+    class CartStub(Stub):
+        def grocery_cart_get(self, **kw):
+            return {"cart": {"goods": [{"id": "111", "count": 1}], "goodsSum": 100.0}}
+
+        def _grocery_delivery(self, *a, **kw):
+            return {}
+
+        def _grocery_cart_write(self, goods, app_id, delivery):
+            posted.append(goods)
+            return {"goodsSum": 100.0}
+
+    out = run(server.grocery_add_to_cart, CartStub(),
+              '[{"goodId": "222", "count": 1}]', "204", "5980")
+    check(not posted, f"a refused write must not reach the backend at all: {posted}")
+    check("id" in out and ("BAD_ITEMS" in out or "без ключа" in out),
+          f"the refusal must name the missing key, got: {out!r}")
+    check("OK" not in out, f"a write that stored nothing must not say OK: {out!r}")
+    check("goodId" in out, f"the refusal should show what key WAS sent: {out!r}")
+
+    # The good path still works, and the count comes from the CART, not the input.
+    class GoodStub(CartStub):
+        def grocery_cart_goods(self, **kw):
+            return [{"id": "111"}, {"id": "222"}]
+
+    ok = run(server.grocery_add_to_cart, GoodStub(),
+             '[{"id": "222", "count": 1}]', "204", "5980")
+    check("OK" in ok and "2 позиций" in ok,
+          f"the reported count must come from the cart, not the request: {ok!r}")
+
+    # set_cart refuses the same way, but clear=True still needs no items.
+    cleared = run(server.grocery_set_cart, GoodStub(), "[]", "204", "5980", True)
+    check("ОШИБКА" not in cleared and "BAD_ITEMS" not in cleared,
+          f"clear=True must not be blocked by the item check: {cleared!r}")
+    try:
+        CartStub().grocery_set_cart([{"good_id": "1", "count": 2}],
+                                    app_id="204", point_id="5980")
+        failures.append("grocery_set_cart accepted an entry with no id key")
+    except TbankApiError as e:
+        check(e.result_code == "BAD_ITEMS", f"unexpected refusal code: {e.result_code}")
+    print("  cart: a wrong key name is refused before the write, not counted as added")
+
+
+def test_concert_seats_print_the_id_the_booking_tool_demands():
+    """cinema_book wants the concert seat's composite id back verbatim, and its
+    docstring plus the tickets skill both say to take it from cinema_seats — which
+    printed only row and number. The required argument was obtainable from no tool.
+    Concert seats also often carry no `pos`, so row-grouping put the whole hall in
+    one «ряд —» bucket."""
+    hall = {"hallName": "Стадион", "seats": [
+        {"status": "vacant", "price": 5000,
+         "id": "Фанзона|5000§~§54093386|default"},
+        {"status": "vacant", "price": 3000, "pos": {"row": 2, "number": 7},
+         "id": "Партер|3000§~§54093387|default"},
+        {"status": "occupied", "price": 1000, "id": "Партер|1000§~§54093388|default"},
+    ]}
+    out = run(server.cinema_seats, Stub(event_seats=[hall]),
+              "e1", "s1", "o1", "", 0, "concert")
+    check("Фанзона|5000§~§54093386|default" in out,
+          f"the composite seatId must be printed verbatim: {out!r}")
+    check("54093388" not in out, f"an occupied seat must not be offered: {out!r}")
+    check("kind=\"concert\"" in out,
+          f"the next-step hint must tell the agent to pass kind: {out!r}")
+    check("ряд:место" not in out,
+          f"the cinema seat format must not be suggested for a concert: {out!r}")
+    check("без нумерации" in out,
+          f"a seat with no pos must say so rather than land in a «ряд —» bucket: {out!r}")
+
+    # Cinemas are unchanged: rows, numbers, and the row:number booking format.
+    movie_hall = {"hallName": "ЗАЛ 1", "seats": [
+        {"status": "vacant", "price": 400, "pos": {"row": 5, "number": 3}}]}
+    mv = run(server.cinema_seats, Stub(event_seats=[movie_hall]), "e1", "s1", "o1")
+    check("ряд" in mv and "ряд:место" in mv,
+          f"the cinema rendering must not have changed: {mv!r}")
+    print("  seats: concerts print the composite seatId, cinemas keep rows")
+
+
 def main():
     print("response parsers:")
+    test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
+    test_concert_seats_print_the_id_the_booking_tool_demands()
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
