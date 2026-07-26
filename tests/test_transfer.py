@@ -647,11 +647,18 @@ MOSENERGO = {
 
 class BillSession(CaptureSession):
     """A payer whose catalogue and commission are canned, so the validation and the
-    refusals can be driven without touching the bank."""
+    refusals can be driven without touching the bank.
+
+    payment_commission is deliberately NOT stubbed: the real method runs and only
+    the network hop under it is canned. The old stub took any `body` and never
+    touched it, which is how server.pay_bill shipped a JSON *string* where the
+    client wants a dict — the real method's first `.get()` raised AttributeError
+    on every live bill payment while this suite stayed green."""
 
     def __init__(self, commission=None):
         super().__init__()
         self.commission_calls = 0
+        self.commission_body = None
         self._commission = commission if commission is not None else {
             "value": {"value": 0}, "total": {"value": 100},
             "minAmount": 0.01, "maxAmount": 200000000.0}
@@ -659,8 +666,12 @@ class BillSession(CaptureSession):
     def find_provider(self, provider_id, group=""):
         return dict(MOSENERGO) if provider_id == MOSENERGO["id"] else {}
 
-    def payment_commission(self, body):
+    def _call_read(self, template_key, *, overrides=None, body=None,
+                   path_override=None):
+        if template_key != "payment_commission":
+            raise AssertionError(f"unexpected read call in a bill test: {template_key}")
         self.commission_calls += 1
+        self.commission_body = body
         return self._commission
 
 
@@ -726,6 +737,39 @@ def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
     print("  pay_bill: wrong fields refused before sending, valid one priced then paid")
 
 
+def test_pricing_a_bill_runs_the_real_commission_contract():
+    """server.pay_bill prices through client.payment_commission, and that method
+    takes a DICT. It used to be handed json.dumps(...) — a string — so every live
+    bill payment died with `AttributeError: 'str' object has no attribute 'get'`
+    before any money moved (2026-07-26, found on a real капремонт bill). The old
+    BillSession stub swallowed the string, so the suite stayed green. Here the
+    real method runs and only the network hop is canned: a type regression on
+    this argument fails this test instead of the next live payment."""
+    from src import server
+
+    saved = server._require
+    try:
+        s = BillSession()
+        server._require = lambda: s
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        out = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
+                              group="ЖКХ", from_account="0000000000")
+        check("AttributeError" not in out,
+              f"pay_bill fed payment_commission something it cannot read: {out!r}")
+        check("Оплачено" in out, f"a priced, valid payment must go through: {out!r}")
+        pp = (s.commission_body or {}).get("payParameters") or {}
+        check(pp.get("provider") == MOSENERGO["id"],
+              f"the commission body lost the provider: {s.commission_body!r}")
+        check(pp.get("providerFields") == {"account": "1234567890"},
+              f"the commission body must price the validated fields: {pp!r}")
+        check(pp.get("paymentType") == "Payment",
+              f"the commission body carries paymentType=Payment: {pp!r}")
+    finally:
+        server._require = saved
+    print("  pay_bill: prices through the REAL payment_commission — the dict "
+          "contract is executed, not assumed")
+
+
 def test_a_bill_payment_respects_the_provider_limits():
     """The commission preview returns the provider's own min/max. Sending an amount
     outside them is a rejection the bank would make anyway — better made here, where
@@ -756,6 +800,7 @@ def test_a_bill_payment_respects_the_provider_limits():
 def main():
     print("transfer money path:")
     test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
+    test_pricing_a_bill_runs_the_real_commission_contract()
     test_a_bill_payment_respects_the_provider_limits()
     test_the_fixture_still_matches_the_capture()
     test_body_matches_the_real_pay_request()

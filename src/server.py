@@ -1433,11 +1433,8 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
     итоговая сумма показывается. Показывай её пользователю и жди явного «да»
     ИМЕННО НА ЭТУ СУММУ — «оплати» без суммы подтверждением не считается.
 
-    ⚠️ Конверт /v1/pay для счётных провайдеров НЕ сверен с захватом: в захвате
-    есть оплата штрафа, но через веб-хост, а на мобильном хосте захвачены только
-    переводы. Проверено живьём, что мобильный хост принимает счётного провайдера
-    на расчёте комиссии. Первый боевой платёж сделай МАЛЕНЬКИМ и проверь
-    list_operations().
+    После оплаты проверь list_operations() — исход подтверждают операции,
+    а не ответ этого тула.
 
     Неверный номер лицевого счёта оплачивает чужую квитанцию, и вернуть это
     сложнее, чем перевод. force=True — только если пользователь подтвердил, что
@@ -1473,10 +1470,10 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
         # The commission preview is both a courtesy and the bank's own validation of
         # the body — it is the step that proved this envelope is understood for bill
         # providers at all. A refusal here means the payment would have been refused.
-        quote = s.payment_commission(json.dumps({"payParameters": {
+        quote = s.payment_commission({"payParameters": {
             "account": src, "moneyAmount": float(amount), "currency": "RUB",
             "paymentType": "Payment", "provider": str(provider_id),
-            "providerFields": vals}}, ensure_ascii=False))
+            "providerFields": vals}})
         q = quote if isinstance(quote, dict) else {}
         fee = ((q.get("value") or {}).get("value")
                if isinstance(q.get("value"), dict) else q.get("value"))
@@ -2704,9 +2701,9 @@ def insurance_policies() -> str:
 def payment_receipt(payment_id: str, save_to: str = "") -> str:
     """Скачать PDF-чек по платежу. save_to — путь файла (по умолчанию /tmp).
 
-    payment_id берётся ровно из четырёх мест, других производителей нет:
+    payment_id берётся ровно из пяти мест, других производителей нет:
     orders() (поле paymentId в строке заказа), grocery_order_status(),
-    и ответы transfer() и ticket_pay(). В list_operations() его НЕТ —
+    и ответы transfer(), pay_bill() и ticket_pay(). В list_operations() его НЕТ —
     операция и платёж нумеруются по-разному."""
     try:
         s = _require(); s.ensure_fresh()
