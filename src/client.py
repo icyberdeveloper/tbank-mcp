@@ -199,6 +199,24 @@ _IOS_VERSION = "26.5.2"
 # x-lang. Injecting X-App-* on those hosts diverges from the app and BREAKS the
 # grocery cart (lifestyle segments carts by client context → set "OK" but the
 # goods land in a different bucket → cart reads empty). Keep this list capture-tight.
+# Rollback switch for the query scoping below. TBANK_QUERY_PROFILE=legacy restores
+# the previous behaviour byte-for-byte (wuid everywhere, vendor/client_version
+# injected wherever the session has them) without touching session.json, so
+# reverting needs no re-login.
+_LEGACY_QUERY = os.environ.get("TBANK_QUERY_PROFILE", "").lower() == "legacy"
+
+
+def _wants_wuid(host: str, path: str) -> bool:
+    """Does the real app send `wuid` to this host+path?
+
+    Only www.tbank.ru, and only under /api/common/. It is absent from all 410
+    captured api.t-bank-app.ru requests and all 235 lifestyle ones, and from the
+    /api/supreme/lifestyle/* checkout paths on www.tbank.ru itself."""
+    from urllib.parse import urlparse
+    hn = (urlparse(host).hostname or host or "").lower()
+    return hn == "www.tbank.ru" and str(path or "").startswith("/api/common/")
+
+
 _STRICT_XAPP_HOSTS = {
     "social-api.t-bank-app.ru", "api-invest-gw.t-bank-app.ru",
     "myauto.t-bank-app.ru", "polls.tbank.ru",
@@ -597,24 +615,36 @@ class MobileSession:
         params[tpl.get("session_param") or "sessionid"] = self.mobile_sessionid
         params["deviceId"] = self.device_id
         params["oldDeviceId"] = self.old_device_id or self.device_id
-        params["wuid"] = self.device_id
+        host = tpl.get("host") or self.base_url
+        path = path_override or tpl["path"]
+        # wuid is the WEB portal's device identifier. It went on every request to
+        # every host; the app sends it only to www.tbank.ru, and only under
+        # /api/common/ (never on the /api/supreme/lifestyle/* checkout paths). On a
+        # native call it is a value the app never puts there — the same reasoning
+        # that already removed it from /v1/pay.
+        if _LEGACY_QUERY or _wants_wuid(host, path):
+            params["wuid"] = self.device_id
         # inject the common base params from the session if not in the template
         # (so builtin endpoints with minimal params still send appName/origin/etc.)
         # inache is the app's routing/feature flag (constant "drivetransitt") — the
         # real client sends it on EVERY request; centralizing it here (default in the
         # dataclass) closes the gap for the ~8 templates that had empty params and
         # omitted it (cars, finhealth presets, my_home, payment_shortcuts, ...).
-        for k, v in (("appName", self.app_name), ("appVersion", self.app_version),
-                     ("origin", self.origin), ("platform", self.platform),
-                     ("ccc", self.ccc), ("cpswc", self.cpswc),
-                     ("connectionType", self.connection_type),
-                     ("vendor", self.vendor), ("client_version", self.client_version),
-                     ("inache", self.inache)):
+        # vendor/client_version are NOT here: they belong to the OIDC authorize call,
+        # which builds its own query and never reaches _call_read, so injecting them
+        # was pure divergence on every other host.
+        base = [("appName", self.app_name), ("appVersion", self.app_version),
+                ("origin", self.origin), ("platform", self.platform),
+                ("ccc", self.ccc), ("cpswc", self.cpswc),
+                ("connectionType", self.connection_type),
+                ("inache", self.inache)]
+        if _LEGACY_QUERY:
+            base += [("vendor", self.vendor), ("client_version", self.client_version)]
+        for k, v in base:
             if v and k not in params:
                 params[k] = v
         if overrides:
             params.update(overrides)
-        host = tpl.get("host") or self.base_url
         headers = {k: v for k, v in tpl.get("headers", {}).items()
                    if k.lower() not in _LIVE_HEADERS}
         # Inject the mobile-client headers the real app sends on this host:
@@ -634,7 +664,6 @@ class MobileSession:
                 headers["Cookie"] = f"tmsgSessionID={self.tmsg_session_id}"
         elif self.cookie_str:
             headers["Cookie"] = self.cookie_str
-        path = path_override or tpl["path"]
         url = f"{host.rstrip('/')}/{path.lstrip('/')}"
         method = (tpl.get("method") or "GET").upper()
         if method == "POST":

@@ -305,8 +305,52 @@ def test_the_web_payment_gate_names_its_calling_system():
     print("  payment gates: web says t-grocery-ib, mobile says t-entertainment-mb")
 
 
+def test_web_only_query_identifiers_stay_on_the_web_host():
+    """`wuid` is the web portal's device id and went out on every read to every
+    host. The app sends it only to www.tbank.ru under /api/common/ — zero of 410
+    captured api.t-bank-app.ru requests and zero of 235 lifestyle ones carry it, and
+    it was already removed from /v1/pay for exactly this reason.
+
+    `vendor`/`client_version` appear only on the OIDC authorize call, which builds
+    its own query and never reaches _call_read, so injecting them here was pure
+    divergence with no upside."""
+    import importlib
+
+    from src import client as C
+
+    s = session({"documents": []})
+    s.bank_documents()                       # api.t-bank-app.ru, an ordinary read
+    q = last(s)["params"]
+    for k in ("wuid", "vendor", "client_version"):
+        check(k not in q,
+              f"{k} was sent to the mobile BFF, where the app never sends it: {sorted(q)}")
+    # The parameters the app DOES send on every request must be untouched.
+    for k in ("appName", "appVersion", "origin", "platform", "inache",
+              "deviceId", "oldDeviceId"):
+        check(k in q, f"{k} went missing from the mobile client context: {sorted(q)}")
+
+    # Still sent where the app sends it: the web portal's own /api/common/ paths.
+    check(C._wants_wuid("https://www.tbank.ru", "/api/common/v1/session_status"),
+          "wuid must still go to the web portal's /api/common/ paths")
+    check(not C._wants_wuid("https://www.tbank.ru",
+                            "/api/supreme/lifestyle/api/grocery/order/create"),
+          "the grocery checkout paths on www.tbank.ru carry no wuid in the capture")
+
+    # And the documented rollback really rolls back.
+    os.environ["TBANK_QUERY_PROFILE"] = "legacy"
+    try:
+        importlib.reload(C)
+        check(C._LEGACY_QUERY, "TBANK_QUERY_PROFILE=legacy must be recognised")
+    finally:
+        os.environ.pop("TBANK_QUERY_PROFILE", None)
+        importlib.reload(C)
+    print("  query scope: wuid only on the web portal, no vendor/client_version, "
+          "legacy switch honoured")
+
+
 def main():
     print("transport:")
+    test_web_only_query_identifiers_stay_on_the_web_host()
     test_mark_read_is_a_put_with_its_own_vendor_types()
     test_the_messenger_user_agent_is_built_from_the_session()
     test_the_web_payment_gate_names_its_calling_system()
