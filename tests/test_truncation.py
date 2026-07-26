@@ -298,6 +298,33 @@ ROW_TOOLS = [
 ]
 
 
+def test_provider_page_is_printed_whole_and_notfound_names_its_boundary():
+    """The provider listing used to render provs[:60] under a header that counted
+    BEFORE the slice — a full page claimed «100 из N» while printing 60. And a
+    provider_id miss after 5 pages of 1026 read as an unconditional «не найден»."""
+    page = {"providers": [{"id": f"p-{i}", "name": f"Провайдер {i}"} for i in range(100)],
+            "page": 1, "totalPages": 1026, "totalProviders": 102571}
+    session = AnySession(providers_compatible_page=page)
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out = server.payment_providers(group="ЖКХ")
+        rows = [ln for ln in out.splitlines() if ln.startswith("- ")]
+        head = out.splitlines()[0]
+        check(len(rows) == 100,
+              f"a 100-provider page must print whole, got {len(rows)} rows")
+        check("100 из 102571" in head, f"the header must count what is printed: {head!r}")
+        check("page=2" in head, f"the header must chain the next page: {head!r}")
+
+        miss = server.payment_providers(group="ЖКХ", provider_id="нет-такого")
+        check("из 1026" in miss and "5 страниц" in miss,
+              f"a not-found after an incomplete scan must name the boundary: {miss!r}")
+        check("pages=" in miss, f"the miss must name the widening argument: {miss!r}")
+    finally:
+        server._require = saved
+    print("  payment_providers: the page prints whole, a bounded miss says so")
+
+
 def test_invest_has_next_is_announced_even_at_limit_zero():
     """When the bank says hasNext, the HEADER says so — including at limit=0, where
     every fetched row is shown and more_hint would stay silent. No cursor is sent:
@@ -459,6 +486,7 @@ def main():
     test_list_tools_report_the_total_they_are_hiding()
     test_list_operations_end_to_end()
     test_limit_zero_means_everything_in_every_list_tool()
+    test_provider_page_is_printed_whole_and_notfound_names_its_boundary()
     test_invest_has_next_is_announced_even_at_limit_zero()
     test_messenger_messages_window_is_honest()
     test_every_json_tool_trims_by_records_not_by_characters()
