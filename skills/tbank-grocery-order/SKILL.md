@@ -248,7 +248,7 @@ grocery_search("свёкла", app_id, point_id)
      (весовые товары могут пересчитаться — не мобильная сумма)
    - `order/create` (пустой `clientEmail` не отправляется)
    - `payment_gate_pay` сразу (до авто-отмены); счёт-источник = `user/payment/account/last`,
-     email = `get-customer-information` (контракт сверен с captures.xml)
+     email = `get-customer-information`
    - каждая попытка пишется в journal (`~/.local/share/tbank-mcp/attempts.jsonl`)
 
    ⚠️ **`expected_sum` передавай всегда — это та сумма, которую ты показал
@@ -268,8 +268,6 @@ grocery_search("свёкла", app_id, point_id)
    и `diagnostics()` (redacted-трейс шагов: delivery/order/payment с http_status/blame) — найти последний
    подтверждённый шаг. Повтор (`force=True`) — только если пользователь подтвердил, что прошлого заказа нет.
 4. При явной ошибке ДО создания заказа (пустая корзина, нет счёта, ошибка доставки) — повтор разрешён.
-5. ⚠️ Точный контракт `order/create`/`payment` не сверялся с живым frontend trace — первый боевой заказ
-   сделай небольшим и проверь результат вручную.
 
 ### Шаг 9: Отчёт
 
