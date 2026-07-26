@@ -42,7 +42,7 @@ import re
 import time
 import uuid
 
-from .observability import _redact_value, redact_text
+from .observability import _is_sensitive_key, _redact_value, redact_text
 
 TRACE_FILE = os.environ.get(
     "TBANK_TRACE_FILE",
@@ -102,6 +102,16 @@ def _short_args(args: dict) -> tuple[dict, str]:
     for k, v in args.items():
         if k in _OPAQUE_ARGS:
             out[k] = f"<{len(str(v))} chars>" if v not in ("", None) else ""
+            continue
+        # The key decides, not just the value. _redact_value only consults
+        # _is_sensitive_key when it is handed a DICT, and this loop unpacks the
+        # arguments before calling it — so the name never reached the blocklist and
+        # every phone, account and card id passed as an argument was stored verbatim,
+        # in the one file this module promises is safe to share (see the header).
+        # The answer's first line was scrubbed by _RE_LONG_ID all along; the
+        # arguments were not.
+        if _is_sensitive_key(k):
+            out[k] = "<redacted>"
             continue
         red = _redact_value(v)
         s = red if isinstance(red, (int, float, bool)) or red is None else str(red)

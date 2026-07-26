@@ -245,12 +245,66 @@ def test_bundle_contains_only_trusted_material():
     print("  bundle: system store + pinned roots only, no leaf anchors")
 
 
+def test_a_built_wheel_actually_carries_the_pinned_root():
+    """Trust that ships only in a git checkout is not shipped.
+
+    `packages = ["src"]` with no package-data built a wheel containing src/*.py and
+    nothing else, while tls.py resolves ROOTS_DIR as `<src>/../ca/roots` — so an
+    installed copy had no roots at all, every bank host failed verification, and
+    tls.py:264 told the user the connection was being INTERCEPTED. A missing data
+    file reported as an attack is the worst possible failure message, and only
+    `pip install -e` hid it.
+
+    This builds the real wheel and looks inside, because that is the only place the
+    question is decided."""
+    try:
+        from setuptools import build_meta
+    except ImportError:                                     # pragma: no cover
+        print("  (setuptools build backend unavailable — wheel contents not checked)")
+        return
+    import contextlib
+    import io
+    import zipfile
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tmp = tempfile.mkdtemp()
+    cwd = os.getcwd()
+    try:
+        os.chdir(root)
+        # setuptools narrates every file it adds; that is its business, not this
+        # suite's output.
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            name = build_meta.build_wheel(tmp)
+        names = zipfile.ZipFile(os.path.join(tmp, name)).namelist()
+    except Exception as e:                                  # noqa: BLE001
+        failures.append(f"the wheel could not be built, so what it ships is unknown: "
+                        f"{type(e).__name__}: {e}")
+        return
+    finally:
+        os.chdir(cwd)
+        shutil.rmtree(os.path.join(root, "build"), ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    for pinned in tls.PINNED_ROOTS:
+        check(f"ca/roots/{pinned}" in names,
+              f"the wheel ships no {pinned} — an install would fail every bank host "
+              f"and blame interception. Wheel has: {sorted(names)[:8]}")
+    check("docs/FLOWS.md" in names,
+          "the wheel ships no docs/FLOWS.md — flows(), the documented discovery entry "
+          "point, answers 'not found' on an installed copy")
+    check(any(n.startswith("src/") and n.endswith(".py") for n in names),
+          "the wheel ships no python at all")
+    print(f"  packaging: the wheel carries {len(tls.PINNED_ROOTS)} pinned root(s) "
+          f"and FLOWS.md, not just src/*.py")
+
+
 def main():
     print("TLS trust:")
     test_a_tampered_shipped_root_is_refused()
     test_a_pinned_file_cannot_smuggle_a_second_certificate()
     test_an_operator_can_add_a_root_without_a_release()
     test_bundle_contains_only_trusted_material()
+    test_a_built_wheel_actually_carries_the_pinned_root()
     test_a_hostile_certificate_is_not_learned()
     if failures:
         print("\nFAILED:")

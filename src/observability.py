@@ -34,6 +34,9 @@ _REDACT_KEY = (
     "pan", "cvv", "cvc", "cipher", "sessionid", "session_id", "sso", "secret",
     "bearer", "apikey", "api_key", "fingerprint", "deviceid", "device_id",
     "passport", "inn", "login", "credential",
+    # ucid names one card. "card" above does not match it, and it is the argument
+    # card_requisites(reveal=True) turns into a PAN and a CVV.
+    "ucid",
 )
 
 # value patterns that look like a secret regardless of the key name

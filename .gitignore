@@ -1,12 +1,28 @@
 # user secrets — NEVER ship
+# Burp exports of the owner's own banking traffic. `captures*.xml` does not cover
+# the flow-named ones (cancel-grossary.xml, delete-order.xml), and those are read
+# by tests/test_grocery_cancel.py and tests/test_booking_and_ranking.py, so they
+# are the ones most likely to get copied into the repo by hand.
 captures.xml
 captures2.xml
 captures*.xml
 captures.jsonl
 refresh_captures.xml
 refresh_captures.jsonl
+cancel-grossary.xml
+delete-order.xml
+*-grossary.xml
 session.json
 *.har
+
+# Runtime logs. They live in ~/.local/share/tbank-mcp/ by default, but
+# TBANK_TRACE_FILE / TBANK_EVENTS / TBANK_ATTEMPTS relocate them anywhere —
+# including here. calls.jsonl carries tool arguments, attempts.jsonl carries
+# checkout bodies.
+calls.jsonl
+events.jsonl
+attempts.jsonl
+*.jsonl.1
 
 # reverse-engineering artifacts (large, not part of the MCP runtime)
 tbank_app.apk

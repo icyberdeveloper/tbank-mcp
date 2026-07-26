@@ -145,6 +145,12 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
     check("секретная записка" not in raw, "a transfer note was written into the trace")
     check(sid not in raw, "the mobile sessionid was written into the trace")
     check("40817810100000001234" not in raw, "an account number reached the trace")
+    # The recipient phone rides in as an ARGUMENT. It used to survive: the answer's
+    # first line was scrubbed by _RE_LONG_ID, but _short_args unpacked the argument
+    # dict before redacting, so the key never reached the blocklist and the value —
+    # 11 digits, too short for _RE_CARD and _RE_BLOB — matched no value pattern.
+    check("+79991234567" not in raw,
+          "the recipient phone reached the trace as a tool argument")
 
     rows = trace.load(path)
     sent = next(r for r in rows if r["tool"] == "messenger_send")
@@ -152,11 +158,19 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
           f"the message must be measured, not stored: {sent['args']}")
     check("chars" in sent["head"] and secret_msg not in sent["head"],
           f"messenger_send echoes the message in its answer: {sent['head']!r}")
+    moved = next(r for r in rows if r["tool"] == "transfer")
+    check(moved["args"]["to_account"] == "<redacted>",
+          f"a sensitive argument must be redacted by KEY, not left to the value "
+          f"patterns: {moved['args']}")
+    check(moved["args"]["amount"] == 1000,
+          f"redacting by key must not swallow the ordinary arguments that make the "
+          f"trace useful: {moved['args']}")
     # An error head is still worth keeping — it is already redacted.
     failed = next(r for r in rows if r["tool"] == "list_cards")
     check("sessionid=<redacted>" in failed["head"],
           f"an error must stay readable after redaction: {failed['head']!r}")
-    print("  privacy: chat text, transfer notes, sessionid and account numbers stay out")
+    print("  privacy: chat text, transfer notes, sessionid, account numbers and "
+          "phone arguments stay out")
 
 
 def test_a_refusal_is_not_recorded_as_an_error():
@@ -273,10 +287,83 @@ def test_a_broken_tracer_cannot_break_a_payment():
     print("  robustness: a tracer that cannot write does not disturb the tool")
 
 
+def test_the_journal_and_the_event_log_redact_too():
+    """The trace was the only one of the three log files with a privacy test asserted
+    against the FILE. journal._append and observability.emit each redact on a single
+    line, and both are read back by tools the user is told to share (grocery_attempts,
+    diagnostics) — so both get the same treatment here.
+
+    They differ from the trace in a way that matters: they hand the WHOLE dict to
+    _redact_value, so the key blocklist already fires for them. This pins that."""
+    from src import journal
+    from src import observability as obs
+
+    jpath = os.path.join(_TMP, "j-redact.jsonl")
+    epath = os.path.join(_TMP, "e-redact.jsonl")
+    journal.ATTEMPTS_FILE = jpath
+    obs.EVENTS_FILE = epath
+
+    account = "40817810100000001234"
+    cookie = "SSO_SESSION=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdef"
+    aid = journal.new_attempt("204", "5980", "hash1", 1458.0)
+    journal.record(aid, "payment", "unknown", account=account, cookie=cookie,
+                   err='{"title": "Недостаточно средств"}')
+    obs.emit("payment", app_id="204", account=account, cookie=cookie, http_status=422)
+
+    jraw = open(jpath, encoding="utf-8").read()
+    eraw = open(epath, encoding="utf-8").read()
+    for label, raw in (("attempts.jsonl", jraw), ("events.jsonl", eraw)):
+        check(account not in raw, f"an account number reached {label}")
+        check(cookie not in raw, f"an SSO cookie reached {label}")
+    # Redaction must not empty the file of the diagnostics it exists for: the
+    # non-secret fields are the whole point of both logs.
+    check("Недостаточно средств" in jraw,
+          f"the journal dropped the gateway error it exists to preserve: {jraw!r}")
+    check('"http_status": 422' in eraw,
+          f"the event log dropped the status it exists to preserve: {eraw!r}")
+    print("  privacy: the journal and the event log redact by key, keep the diagnostics")
+
+
+def test_the_log_files_are_owner_only_even_if_they_already_existed():
+    """All three writers open with 0o600 AND chmod afterwards. The chmod is the part
+    that matters and the part nothing tested: os.open's mode applies only when the
+    file is CREATED and is masked by umask, so a log that already exists at 0644 —
+    from an older version, a restore, a careless editor — would keep leaking to every
+    account on the machine while the code looks correct."""
+    from src import journal
+    from src import observability as obs
+
+    cases = []
+    jpath = os.path.join(_TMP, "j-perm.jsonl")
+    epath = os.path.join(_TMP, "e-perm.jsonl")
+    tpath = os.path.join(_TMP, "t-perm.jsonl")
+    for path in (jpath, epath, tpath):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("")
+        os.chmod(path, 0o644)
+
+    journal.ATTEMPTS_FILE = jpath
+    obs.EVENTS_FILE = epath
+    trace.TRACE_FILE = tpath
+    journal.record("a1", "init", "started")
+    obs.emit("payment", http_status=200)
+    run(Stub(list_accounts=[]), server.list_accounts)
+    cases = [("attempts.jsonl", jpath), ("events.jsonl", epath), ("calls.jsonl", tpath)]
+
+    for label, path in cases:
+        mode = oct(os.stat(path).st_mode & 0o777)
+        check(mode == "0o600",
+              f"{label} stayed {mode} on a pre-existing file — the chmod next to "
+              f"os.open is what fixes this, and it is why both are there")
+    print("  permissions: all three logs come back to 0600 even when they pre-existed")
+
+
 def main():
     print("call trace:")
     test_the_wrapper_does_not_change_what_agents_see()
     test_a_secret_or_a_private_message_never_reaches_the_file()
+    test_the_journal_and_the_event_log_redact_too()
+    test_the_log_files_are_owner_only_even_if_they_already_existed()
     test_a_refusal_is_not_recorded_as_an_error()
     test_the_report_finds_an_agent_that_got_stuck()
     test_tracing_off_writes_nothing()

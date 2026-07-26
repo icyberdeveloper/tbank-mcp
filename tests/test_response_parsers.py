@@ -318,7 +318,7 @@ def test_the_invest_envelopes_are_unwrapped():
          "totalYield": {"currency": "RUB", "value": 1.48}},
         {"brokerAccountId": "2000000002", "brokerAccountType": "Fdr",
          "brokerAccountStatus": "NORM", "isBlocked": True,
-         "totalBalance": {"currency": "RUB", "value": 7344144.96}}]}
+         "totalBalance": {"currency": "RUB", "value": 7000000.00}}]}
 
     class InvestStub(Stub):
         def ensure_client_session(self, *a, **kw):
@@ -331,7 +331,7 @@ def test_the_invest_envelopes_are_unwrapped():
                          "description": "Вывод со счета", "status": "executed",
                          "payment": {"currency": "RUB", "value": -150000}}]},
                     "purchased_securities": {"totals": {}, "portfolios": [
-                        {"brokerAccount": {"brokerAccountId": "2001145214",
+                        {"brokerAccount": {"brokerAccountId": "2000000003",
                                            "name": "Рублевый"},
                          "positions": [{"ticker": "AMD", "securityType": "stock",
                                         "currentBalance": 28, "portfolioPercent": 7.65,
@@ -358,7 +358,7 @@ def test_the_invest_envelopes_are_unwrapped():
     secs = run(server.invest_securities, InvestStub())
     check("AMD" in secs and "28 шт" in secs, f"positions must be listed: {secs!r}")
     check("521.51 USD" in secs, f"the price must keep its currency: {secs!r}")
-    check("2001145214" in secs,
+    check("2000000003" in secs,
           f"the PORTFOLIO id differs from the account id and must be shown: {secs!r}")
 
     # Filtering by an account id that names no portfolio must say why, not answer

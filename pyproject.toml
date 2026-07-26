@@ -18,4 +18,18 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["src"]
+# `ca.roots` and `docs` are DATA, not importable code — they are listed as packages
+# because that is the only way setuptools puts a file in a wheel at a path OUTSIDE
+# the import package, and both are resolved as `<src>/../…` at runtime
+# (src/tls.py ROOTS_DIR, src/server.py _FLOWS_PATH). With `packages = ["src"]` alone
+# a wheel carried src/*.py and nothing else: every bank host then failed certificate
+# verification and src/tls.py reported it as "the connection is being intercepted",
+# which is a missing data file misdiagnosed as an attack. flows() answered
+# "FLOWS.md not found" for the same reason.
+# Only `pip install -e` (what bin/tbank-mcp does) hid this; the console script
+# declared above is the path that did not work.
+packages = ["src", "ca.roots", "docs"]
+
+[tool.setuptools.package-data]
+"ca.roots" = ["*.pem"]
+"docs" = ["*.md"]

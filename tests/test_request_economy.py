@@ -73,7 +73,7 @@ ACCOUNTS = [
     {"id": "1111111111", "name": "Black", "accountType": "Current",
      "moneyAmount": {"value": 13449.27, "currency": {"name": "RUB"}},
      "cards": [{"id": "100000002", "ucid": "1000000001", "name": "Black",
-                "status": "Активна", "value": "553691******1234",
+                "status": "Активна", "value": "510000******1234",
                 "paymentSystem": "MC", "expiration": {"milliseconds": 2029957200000}}]},
     {"id": "2222222222", "name": "Депозит", "accountType": "Deposit"},
     {"id": "3333333333", "name": "Внешняя", "accountType": "ExternalAccount",
