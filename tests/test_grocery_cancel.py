@@ -31,8 +31,11 @@ os.environ.setdefault("TBANK_ATTEMPTS",
 
 from src.client import MobileSession  # noqa: E402
 
-CAPTURE = os.environ.get("TBANK_CAPTURE_CANCEL",
-                         os.path.expanduser("~/tbank-app/cancel-grossary.xml"))
+# The GROCERY cancel capture. The ticket one lives under
+# TBANK_TICKET_CANCEL_CAPTURE — see tests/test_booking_and_ranking.py.
+CAPTURE = os.environ.get("TBANK_GROCERY_CANCEL_CAPTURE",
+                         os.environ.get("TBANK_CAPTURE_CANCEL",
+                                        os.path.expanduser("~/tbank-app/cancel-grossary.xml")))
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "fixtures", "grocery_cancel.json")
 

@@ -562,6 +562,55 @@ def test_the_caller_can_choose_which_account_pays():
     print("  checkout: the caller picks the account, and the answer says which paid")
 
 
+def test_the_checkout_tool_runs_playwright_off_the_event_loop():
+    """sync_playwright() raises "It looks like you are using Playwright Sync API
+    inside the asyncio loop" when called in FastMCP's loop, which is where sync
+    tools run — so grocery_checkout is an async tool that offloads to a worker
+    thread. The fix was protected by a docstring only: every checkout test drives
+    src.checkout.checkout() directly and never touches the tool, so making it sync
+    again would break every real checkout with a green suite.
+
+    Asserted by running the tool inside a real event loop and recording the thread
+    its body executed on."""
+    import asyncio
+    import threading
+
+    from src import server as S
+
+    loop_thread = None
+    body_thread = []
+
+    def fake_body(*a, **kw):
+        body_thread.append(threading.current_thread().ident)
+        return "OK: ran"
+
+    fn = getattr(S.grocery_checkout, "fn", S.grocery_checkout)
+    if not asyncio.iscoroutinefunction(fn):
+        # Reported, not awaited: awaiting a sync tool raises TypeError and the
+        # reader gets a traceback instead of the reason.
+        failures.append("grocery_checkout is no longer a coroutine — a sync tool "
+                        "runs in FastMCP's event loop, where sync_playwright() "
+                        "raises and every real checkout fails")
+        return
+
+    saved = S._do_grocery_checkout
+    S._do_grocery_checkout = fake_body
+    try:
+        async def drive():
+            nonlocal loop_thread
+            loop_thread = threading.current_thread().ident
+            return await S.grocery_checkout("204", "5980")
+        out = asyncio.run(drive())
+    finally:
+        S._do_grocery_checkout = saved
+
+    check(out == "OK: ran", f"the tool must return the body's answer: {out!r}")
+    check(body_thread and body_thread[0] != loop_thread,
+          f"the checkout body ran ON the event loop thread ({loop_thread}) — "
+          f"sync_playwright() would raise there")
+    print("  checkout tool: coroutine, and its body runs off the event loop")
+
+
 def test_payment_gate_problem_json_reaches_the_user():
     """A 4xx from the payment gate arrives as problem+json, and its title/detail is
     the only actionable cause ("Недостаточно средств"). It used to land in
@@ -607,9 +656,12 @@ def test_cart_readiness_distinguishes_not_up_from_empty():
     from src.checkout import CheckoutError
 
     # Never comes up: must fail fast-ish and promise it is safe to retry.
+    # The deadline is passed in rather than left at the production 20 s, which this
+    # case burned in real time — 41 sleeps of 500 ms, 40% of the whole suite — to
+    # assert a message. What is under test is the branch, not the constant.
     down = {"status": 502, "body": {}}
     res, exc, page, _ = run_checkout(routes(
-        {"status": 200, "body": {}}, cart=[down]))
+        {"status": 200, "body": {}}, cart=[down]), cart_ready_timeout_ms=300)
     check(isinstance(exc, CheckoutError), f"an API that never answers must raise: {exc!r}")
     check("never brought its cart API up" in str(exc), f"wrong cause reported: {exc}")
     check("safe to retry" in str(exc), f"must state no order was created: {exc}")
@@ -642,6 +694,7 @@ def main():
         test_lost_payment_answer_is_reconciled_not_declared_unknown,
         test_the_sum_the_user_approved_is_the_sum_that_gets_paid,
         test_the_caller_can_choose_which_account_pays,
+        test_the_checkout_tool_runs_playwright_off_the_event_loop,
         test_payment_gate_problem_json_reaches_the_user,
         test_cart_readiness_distinguishes_not_up_from_empty,
         test_the_cart_readiness_poll_uses_a_real_clock,

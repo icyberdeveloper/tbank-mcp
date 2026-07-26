@@ -4,7 +4,7 @@
 
 ## Features
 
-- **57 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **59 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
 - **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
   transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
@@ -105,13 +105,9 @@ If you are content to hand the password to the agent:
 ⚠️ **Note:** the password ends up in the model's context and in call logs. For an
 account you care about, use Option 1.
 
-### Option 3: environment variables (CI / automation)
-
-```bash
-export TBANK_PASSWORD="your-password"
-export TBANK_PHONE="+7XXXXXXXXXX"
-# login() picks the password up from the environment after confirm_otp()
-```
+Both options need the SMS code typed in either way, so there is no unattended
+login: `TBANK_PASSWORD` / `TBANK_PHONE` are not read anywhere in this codebase,
+and a section here used to claim otherwise.
 
 ## Other agents (Codex, ChatGPT, Hermes, OpenClaw)
 

@@ -148,7 +148,8 @@ def _safe_record(attempt_id, step, status, **fields):
 def checkout(session, app_id: str = "", point_id: str = "",
              client_email: str = "", sum_val: float = 0,
              account: str = "", attempt_id: str | None = None,
-             expected_sum: float = 0) -> dict:
+             expected_sum: float = 0,
+             cart_ready_timeout_ms: int = CART_READY_TIMEOUT_MS) -> dict:
     """Run the grocery checkout via headless browser. `session` is a MobileSession
     with a valid access_token + cookies (from login/silent_relogin).
 
@@ -248,11 +249,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
             _probe, _waited = _poll_until_ready(
                 lambda: web_cart(app_id),
                 ready=lambda r: r[2].get("status") == 200,
-                timeout_ms=CART_READY_TIMEOUT_MS, interval_ms=CART_POLL_INTERVAL_MS)
+                timeout_ms=cart_ready_timeout_ms, interval_ms=CART_POLL_INTERVAL_MS)
             if _probe is None:
                 raise CheckoutError(
                     f"checkout page never brought its cart API up within "
-                    f"{CART_READY_TIMEOUT_MS} ms (waited {_waited} ms) — no order was "
+                    f"{cart_ready_timeout_ms} ms (waited {_waited} ms) — no order was "
                     f"created, safe to retry")
             _log(f"[checkout] cart API up after ~{_waited}ms")
 

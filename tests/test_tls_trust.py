@@ -245,6 +245,55 @@ def test_bundle_contains_only_trusted_material():
     print("  bundle: system store + pinned roots only, no leaf anchors")
 
 
+def test_a_session_built_before_the_bundle_exists_still_verifies_against_it():
+    """The fresh-deploy failure: `_CA_BUNDLE` is evaluated ONCE at import, and on a
+    machine where ca/bundle.pem does not exist yet it latched to None. The old code
+    set `verify` from that latched value BEFORE rebuild_bundle() ran, so verify was
+    never set at all and requests silently fell back to the system CAs — which do
+    not carry the Russian Trusted Root, so every bank host failed to verify.
+
+    Only a comment guarded this. Executed here with the bundle genuinely absent."""
+    from src import client as C
+
+    saved_bundle, saved_latch = tls.BUNDLE, C._CA_BUNDLE
+    tmp = tempfile.mkdtemp()
+    try:
+        tls.BUNDLE = os.path.join(tmp, "bundle.pem")
+        C._CA_BUNDLE = None                      # what import sees on a fresh machine
+        check(not os.path.exists(tls.BUNDLE), "the bundle must be absent to start")
+        s = C.MobileSession(mobile_sessionid="sid", refresh_token="rt")
+        check(s._http.verify == tls.BUNDLE,
+              f"verify must point at the rebuilt bundle, got {s._http.verify!r}")
+        check(os.path.exists(tls.BUNDLE),
+              "the session must have built the bundle it verifies against")
+        text = open(tls.BUNDLE, encoding="utf-8").read()
+        for name in tls.PINNED_ROOTS:
+            root = open(os.path.join(tls.ROOTS_DIR, name), encoding="utf-8").read()
+            check(root.strip() in text,
+                  f"{name} is missing from the freshly built bundle")
+    finally:
+        tls.BUNDLE, C._CA_BUNDLE = saved_bundle, saved_latch
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  fresh deploy: the bundle is built and verified against, not latched to None")
+
+
+def test_a_legacy_session_with_an_empty_token_url_is_normalized():
+    """A session.json written by an older version stored token_url as "", and the
+    dataclass default cannot override an explicit empty string passed at
+    construction — so refresh() would POST to "". Nothing tested it; grepping
+    token_url across tests/ returned nothing at all."""
+    from src.client import DEFAULT_TOKEN_URL, MobileSession
+
+    s = MobileSession(mobile_sessionid="sid", refresh_token="rt", token_url="")
+    check(s.token_url == DEFAULT_TOKEN_URL,
+          f"an empty token_url must fall back to the default, got {s.token_url!r}")
+    keep = "https://example.invalid/token"
+    s2 = MobileSession(mobile_sessionid="sid", refresh_token="rt", token_url=keep)
+    check(s2.token_url == keep,
+          f"an explicit token_url must survive normalization, got {s2.token_url!r}")
+    print("  session: an empty token_url is normalized, a real one is kept")
+
+
 def test_a_built_wheel_actually_carries_the_pinned_root():
     """Trust that ships only in a git checkout is not shipped.
 
@@ -304,6 +353,8 @@ def main():
     test_a_pinned_file_cannot_smuggle_a_second_certificate()
     test_an_operator_can_add_a_root_without_a_release()
     test_bundle_contains_only_trusted_material()
+    test_a_session_built_before_the_bundle_exists_still_verifies_against_it()
+    test_a_legacy_session_with_an_empty_token_url_is_normalized()
     test_a_built_wheel_actually_carries_the_pinned_root()
     test_a_hostile_certificate_is_not_learned()
     if failures:

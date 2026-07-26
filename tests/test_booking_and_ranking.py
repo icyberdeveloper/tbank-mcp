@@ -27,7 +27,11 @@ CAPTURE = os.environ.get("TBANK_CAPTURE2", os.path.expanduser("~/tbank-app/captu
 # The one recorded cancellation: captures.xml only ever caught this endpoint
 # answering 500, which read as "endpoint broken" until this capture showed the
 # real request carries paymentId too.
-CANCEL_CAPTURE = os.environ.get("TBANK_CAPTURE_CANCEL",
+# TBANK_TICKET_CANCEL_CAPTURE, not TBANK_CAPTURE_CANCEL: that name is the GROCERY
+# cancel capture in tests/test_grocery_cancel.py. Two tests reading one variable
+# with two different default files meant that setting it to either real capture
+# broke the other test, with a misleading "fixture drifted" message.
+CANCEL_CAPTURE = os.environ.get("TBANK_TICKET_CANCEL_CAPTURE",
                                 os.path.expanduser("~/tbank-app/delete-order.xml"))
 
 CREATE_MOVIE = 748     # POST /api/order/create/movie
@@ -479,6 +483,7 @@ def check_cancel_fixture_still_matches_capture(fx):
         check(False, f"no /order/cancel request found in {CANCEL_CAPTURE}")
         return
     mine = fx["cancel"]
+    before = len(failures)
     for field in ("method", "host", "path"):
         check(mine[field] == real[field],
               f"fixture cancel.{field} drifted — fixture={mine[field]!r} "
@@ -486,7 +491,13 @@ def check_cancel_fixture_still_matches_capture(fx):
     check(sorted(mine["query_keys"]) == real["query_keys"],
           f"fixture cancel.query_keys drifted — fixture={sorted(mine['query_keys'])} "
           f"capture={real['query_keys']}")
-    print("  cancel fixture vs capture: still matches the real app")
+    # Only claim a match if one was found: this line used to print unconditionally,
+    # so the per-check log said "still matches" directly above the drift it had
+    # just recorded.
+    if len(failures) == before:
+        print("  cancel fixture vs capture: still matches the real app")
+    else:
+        print("  cancel fixture vs capture: DRIFTED — see the failures below")
 
 
 def main():

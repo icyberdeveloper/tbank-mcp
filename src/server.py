@@ -579,12 +579,13 @@ def get_data(section: str, arg: str = "") -> str:
     cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
     invest_offers | invest_yield | pension | broker_margin | shared | appointments.
 
-    Двум секциям НУЖЕН arg, иначе они возвращают пустоту (это фильтры):
+    ТРЁМ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
       providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
                    Перечислить все провайдеры этим эндпоинтом нельзя, только найти
                    известные по id.
       requisites — arg = телефон. Обычно вместо этого нужен transfer_sbp_resolve(phone);
                    а реквизиты СВОЕГО счёта — это account_requisites(account_id).
+      statements — arg = номер счёта из list_accounts().
 
     (invest_portfolio/operations/securities и account_requisites — отдельные тулы.)"""
     try:
