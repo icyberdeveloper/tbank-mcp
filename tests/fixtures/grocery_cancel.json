@@ -1,0 +1,26 @@
+{
+  "_comment": "Contract of POST /api/order/cancel for GROCERY orders, from cancel-grossary.xml (gitignored). Personal values are synthetic; protocol facts (query shape, empty body, headers, response envelope keys) are the contract.",
+  "request": {
+    "method": "POST",
+    "path": "/api/order/cancel",
+    "query_has": ["orderId"],
+    "query_has_not": ["paymentId"],
+    "body": "",
+    "content_type": "application/json",
+    "accept": "application/json"
+  },
+  "response_failed": {
+    "payload": {"status": "Failed", "code": "605"},
+    "trackingId": "00000000000000000000000000000000",
+    "responseTime": 62,
+    "time": "2026-01-01T00:00:00+03:00",
+    "status": "Ok"
+  },
+  "response_success": {
+    "payload": {"status": "Success"},
+    "trackingId": "00000000000000000000000000000000",
+    "responseTime": 62,
+    "time": "2026-01-01T00:00:00+03:00",
+    "status": "Ok"
+  }
+}

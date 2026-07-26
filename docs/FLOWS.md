@@ -93,6 +93,13 @@ You normally just call a read tool; the above runs under the hood. Call
 > `grocery_order_create`, `checkout_process_order`, `payment_gate_pay` move real
 > money — review the body before calling.
 
+8. `grocery_order_cancel(order_id, app_id)` → cancel a placed order, paid or not
+   (refund goes back to the paying account). POST /api/order/cancel with ONLY
+   `orderId` in the query — no paymentId, empty body — unlike the ticket flavour
+   of the same path. The verdict is `payload.status` (`Success`/`Failed` + code,
+   605 = already cancelled); the outer `"status":"Ok"` is transport-level. Pass
+   `app_id` so the tool re-reads the order and reports the actual status.
+
 ## 4. P2P transfer / bill pay  (signed)
 
 1. `transfer_sbp_resolve(phone)` → resolve a phone to its SBP recipient banks

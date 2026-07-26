@@ -103,6 +103,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "grocery_add_to_cart": ("Добавление в корзину", WRITE),
     "grocery_set_cart": ("Перезапись корзины", WRITE),
     "grocery_checkout": ("Оформление и оплата заказа", MONEY),
+    "grocery_order_cancel": ("Отмена продуктового заказа", WRITE),
     # tickets
     "cinema_search": ("Поиск фильма", READ),
     "cinema_schedule": ("Расписание сеансов", READ),
@@ -945,6 +946,46 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
                 f"paymentId={pay_id or '-'} | paid={'yes' if pay_id else 'no payment id'}")
     except Exception as e:
         return _err(e)
+
+
+@mcp.tool()
+def grocery_order_cancel(order_id: str, app_id: str = "") -> str:
+    """Отменить продуктовый заказ (Город) — оплаченный или ещё нет. Деньги за
+    оплаченный возвращаются на счёт списания.
+
+    paymentId НЕ нужен (в отличие от ticket_cancel): приложение отменяет по
+    одному orderId. Вердикт — payload.status ("Success"/"Failed" + code;
+    605 = заказ уже отменён), внешний "status":"Ok" успехом НЕ является.
+
+    app_id (из grocery_stores() или grocery_attempts()) не обязателен, но с ним
+    тул сразу перечитает заказ и покажет фактический статус — до перечитывания
+    «принято» ещё не значит CANCELED. Если тул вернул ошибку, статус заказа
+    НЕИЗВЕСТЕН — grocery_order_status() или приложение."""
+    try:
+        s = _require(); s.ensure_fresh()
+        res = s.cancel_grocery_order(order_id)
+        st = str((res or {}).get("status") or "")
+        code = str((res or {}).get("code") or "")
+        if st.lower() == "success":
+            head = f"Отмена заказа {order_id} принята (status=Success)."
+        elif code == "605":
+            head = f"Заказ {order_id} уже отменён (code=605) — делать ничего не нужно."
+        else:
+            head = (f"Отмена заказа {order_id} НЕ подтверждена: status={st or '?'}"
+                    + (f", code={code}" if code else "")
+                    + " — проверь grocery_order_status() и заказ в приложении.")
+        if app_id:
+            try:
+                r = s.grocery_order_get(order_id=order_id, app_id=app_id)
+                payload = r.get("payload", r) if isinstance(r, dict) else {}
+                order = payload.get("order", payload) if isinstance(payload, dict) else {}
+                head += f"\nПерепроверка: status={order.get('status') or '?'}"
+            except Exception:
+                head += "\nПерепроверка не удалась — grocery_order_status()."
+        return head
+    except Exception as e:
+        return (_err(e) + f"\nСтатус заказа {order_id} НЕИЗВЕСТЕН — "
+                "grocery_order_status() или приложение.")
 
 
 # ── DIAGNOSTICS ─────────────────────────────────────────────

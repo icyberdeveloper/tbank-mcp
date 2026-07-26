@@ -1440,6 +1440,15 @@ BUILTIN_ENDPOINTS.update({
                            "path": "/api/order/cancel/movie", "params": {}},
     "order_cancel": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                      "path": "/api/order/cancel", "params": {}},
+    # The GROCERY flavour of the same path (cancel-grossary.xml): ONLY orderId in
+    # the query — no paymentId, unlike tickets above — and a genuinely EMPTY body
+    # that the app still stamps Content-Type: application/json. The verdict is
+    # payload.{status,code}; the outer "status":"Ok" is transport-level and reads
+    # Ok even when nothing was cancelled (payload {"status":"Failed","code":"605"}
+    # = the order is already cancelled).
+    "grocery_order_cancel": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                             "path": "/api/order/cancel", "params": {},
+                             "headers": {"Content-Type": "application/json"}},
     # MONEY. Note the host: the existing `payment_gate_pay` template points at the
     # WEB gate (www.tbank.ru, cookie-auth, used by the grocery Playwright
     # checkout). Marketplace orders from the mobile app pay through the MOBILE

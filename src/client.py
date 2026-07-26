@@ -3074,6 +3074,20 @@ class MobileSession:
             params["paymentId"] = str(payment_id)
         return self._call_read(key, overrides=params, body={})
 
+    def cancel_grocery_order(self, order_id: str) -> dict:
+        """Cancel a grocery (Город) order — paid or not. The app's request
+        (cancel-grossary.xml) differs from the ticket flavour on both points that
+        bit us there: ONLY orderId rides in the query — no paymentId — and the
+        body is genuinely EMPTY (Content-Length: 0), still stamped
+        Content-Type: application/json.
+
+        The verdict is payload.{status,code}, NOT the outer envelope — the host
+        wraps a refused cancellation in "status":"Ok" too. Observed: 605 = the
+        order is already cancelled."""
+        data = self._call_read("grocery_order_cancel",
+                               overrides={"orderId": str(order_id)})
+        return data if isinstance(data, dict) else {}
+
     # ---- extras ----------------------------------------------------------
 
     def bank_documents(self) -> list[dict]:

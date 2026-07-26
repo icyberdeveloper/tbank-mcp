@@ -210,6 +210,7 @@ def test_every_tool_declares_what_it_does_to_the_world():
     # environment, and every one of these does.
     WRITES = {
         "cinema_book", "ticket_cancel",                      # order, expires unpaid
+        "grocery_order_cancel",                              # cancel, refund comes back
         "grocery_add_to_cart", "grocery_set_cart",           # cart contents
         "messenger_send",                                    # a message to a person
         "login", "confirm_otp", "confirm_password",          # sends an SMS / auth state
