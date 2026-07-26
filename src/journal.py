@@ -132,7 +132,9 @@ def last_status_of_attempt(attempt_id: str) -> str:
 
 
 def recent(limit: int = 20) -> list[dict]:
-    """Last event of each of the most recent N attempts (for reconciliation UI)."""
+    """Last event of each of the most recent N attempts (for reconciliation UI).
+    `limit <= 0` means every attempt on file — spelled out because `order[-0:]`
+    happens to mean the same thing only by accident of slice syntax."""
     by_aid: dict[str, dict] = {}
     order: list[str] = []
     for e in _events():
@@ -142,7 +144,7 @@ def recent(limit: int = 20) -> list[dict]:
         if aid not in by_aid:
             order.append(aid)
         by_aid[aid] = e  # last event wins
-    return [by_aid[aid] for aid in order[-limit:]]
+    return [by_aid[aid] for aid in (order if limit <= 0 else order[-limit:])]
 
 
 def cart_hash_of(goods: list[dict]) -> str:

@@ -45,6 +45,13 @@ from . import observability as obs
 # Single source of truth — bump here, not in 5 separate JS template strings.
 GROCERY_WEB_QS = "appName=grocery_evo&appVersion=7.31.6&platform=webview_ios"
 
+
+def _cut(s, n: int) -> str:
+    # Same contract as server._cut (checkout must not import server): a cut that
+    # is marked, so a gate error trimmed for the answer never reads as complete.
+    s = str(s or "")
+    return s if n <= 0 or len(s) <= n else s[:n - 1] + "…"
+
 # How long the checkout page gets to bring its cart API up. The old 10 s was a bare
 # number; this is the p99 page-ready time observed in the capture session (~3.5 s)
 # with generous headroom, and it is a CEILING, not a wait — the poll exits as soon
@@ -293,7 +300,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
                      duration_ms=_dur, blame=obs.blame_of(deliv.get("status"), d_code))
             if deliv.get("status", 0) >= 400 or d_err:
                 raise CheckoutError(
-                    f"deliveries failed (http={deliv.get('status')}, err={d_err[:120]})")
+                    f"deliveries failed (http={deliv.get('status')}, err={_cut(d_err, 120)})")
             _log(f"[checkout] deliveries ok (http={deliv.get('status')})")
 
             # 4. post-delivery: the deliveries RESPONSE carries payload.cartPrice (weight
@@ -427,8 +434,8 @@ def checkout(session, app_id: str = "", point_id: str = "",
             p_code = str(pbody.get("resultCode") or pbody.get("errorCode") or pbody.get("type") or status or "") if isinstance(pbody, dict) else ""
             p_err = ""
             if isinstance(pbody, dict):
-                p_err = ": ".join(s for s in (str(pbody.get("title") or "").strip(),
-                                              str(pbody.get("detail") or "").strip()) if s)[:200]
+                p_err = _cut(": ".join(s for s in (str(pbody.get("title") or "").strip(),
+                                                   str(pbody.get("detail") or "").strip()) if s), 200)
             obs.emit("payment", attempt_id=attempt_id, app_id=app_id, amount=actual_sum,
                      http_status=pay_res.get("status"), app_code=p_code,
                      order_id_present=bool(order_id), payment_id_present=bool(payment_id),
@@ -458,7 +465,10 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 order_state = str(o.get("status") or o.get("state") or "")
                 paid = bool(o.get("paid")) or order_state.upper() in ("PAID", "PAYED", "SUCCESS")
             except Exception as e:
-                order_state = f"<lookup failed: {type(e).__name__}>"
+                # Keep the (redacted) message, not just the class: «TimeoutError»
+                # alone left nothing to distinguish a dead page from a dead API.
+                order_state = (f"<lookup failed: {type(e).__name__}: "
+                               f"{_cut(obs.redact_text(str(e)), 120)}>")
             obs.emit("payment_reconcile", attempt_id=attempt_id, order_id_present=bool(order_id),
                      payment_status=status, order_state=order_state, paid=paid)
 

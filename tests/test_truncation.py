@@ -60,6 +60,27 @@ def test_json_payload_keeps_whole_records():
     check(small == '{"a": 1}', f"a payload that fits must be untouched, got {small!r}")
 
 
+def test_json_out_zero_means_no_cap():
+    """limit=0 is «everything», like every list tool. Before the guard it fell
+    through the <= checks and answered «ОТВЕТ ОБРЕЗАН: 0 из N» with an empty body."""
+    blob = {"records": [{"id": i, "pad": "x" * 50} for i in range(100)]}
+    out = server._json_out(blob, limit=0)
+    check(not out.startswith("#"), f"limit=0 must not announce truncation: {out[:80]}")
+    check(json.loads(out) == blob, "limit=0 must return the whole payload, parseable")
+
+
+def test_cut_marks_what_it_removes():
+    """_cut is the one column cutter: silent when nothing is lost, «…» when cut,
+    n<=0 = never cut."""
+    check(server._cut("короткое", 40) == "короткое", "an uncut string must be untouched")
+    long = "Перевод от ИП Иванов Иван Иванович за консультационные услуги"
+    cut = server._cut(long, 40)
+    check(len(cut) == 40 and cut.endswith("…"),
+          f"a cut string must fit the column and end with the marker: {cut!r}")
+    check(server._cut(long, 0) == long, "n=0 must mean no cut at all")
+    check(server._cut(None, 10) == "", "None must render as empty, not 'None'")
+
+
 def test_untrimmable_payload_is_flagged_loudly():
     """No list to trim: the text is still cut, but it must be impossible to mistake
     for a complete answer."""
@@ -359,6 +380,8 @@ def test_real_capture_payload_survives():
 def main():
     print("truncation honesty:")
     test_json_payload_keeps_whole_records()
+    test_json_out_zero_means_no_cap()
+    test_cut_marks_what_it_removes()
     test_untrimmable_payload_is_flagged_loudly()
     test_trimming_handles_shapes_the_single_pass_gave_up_on()
     test_list_tools_report_the_total_they_are_hiding()

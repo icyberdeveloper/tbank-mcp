@@ -262,7 +262,7 @@ def _err(e):
     trace.note_error(e)
 
     def safe(msg):
-        return redact_text(str(msg))[:300]
+        return _cut(redact_text(str(msg)), 300)
     if isinstance(e, SessionExpired):
         return f"SESSION EXPIRED: call refresh_session(). {safe(e.message)}"
     if isinstance(e, TbankApiError):
@@ -312,9 +312,13 @@ def _json_out(data, limit: int = 5000) -> str:
     outcome it exists to avoid: several sibling lists of comparable size (shrinking
     the biggest alone never fits), and a payload that IS a list at the top level —
     its path is (), which `_set_in` cannot address. Both are ordinary here: the root
-    is trimmed through a holder, and each pass re-picks whatever is biggest now."""
+    is trimmed through a holder, and each pass re-picks whatever is biggest now.
+
+    `limit <= 0` means NO cap — the same convention as _rows_out. Without the guard
+    a zero fell through every `<= limit` check and returned «ОТВЕТ ОБРЕЗАН: 0 из N»
+    with an empty body."""
     full = json.dumps(data, ensure_ascii=False, default=str)
-    if len(full) <= limit:
+    if limit <= 0 or len(full) <= limit:
         return full
 
     import copy
@@ -364,6 +368,19 @@ def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: s
     if len(shown) < total:
         head += f" (новые сверху). {more_hint or f'Передай limit={total}, чтобы увидеть все.'}"
     return "\n".join([head] + [render(r) for r in shown])
+
+
+def _cut(s, n: int) -> str:
+    """Cut a string for a column, MARKING the cut.
+
+    A bare `s[:40]` is indistinguishable from the full text, so a payment
+    description that ends exactly where the merchant name got interesting reads
+    as complete. `n <= 0` means no cut at all — same convention as limit in
+    _rows_out."""
+    s = str(s or "")
+    if n <= 0 or len(s) <= n:
+        return s
+    return s[:n - 1] + "…"
 
 
 def _store(app_id: str, point_id: str) -> tuple[str, str]:
@@ -495,18 +512,21 @@ def list_accounts() -> str:
             return ("Счетов не найдено. Это НЕ ошибка запроса — сессия жива, банк "
                     "вернул пустой список. Проверь session_status().")
         return "\n".join(f"- {a.get('id','?')} | {a.get('accountType','')} | "
-            f"{a.get('name','')[:30]} | {(a.get('moneyAmount') or {}).get('value','?')} "
+            f"{_cut(a.get('name',''), 30)} | {(a.get('moneyAmount') or {}).get('value','?')} "
             f"{((a.get('currency') or {}).get('name','') if isinstance(a.get('currency'),dict) else a.get('currency',''))}"
             for a in accs)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def list_operations(account_id: str, days: int = 30, limit: int = 50) -> str:
+def list_operations(account_id: str, days: int = 30, limit: int = 50,
+                    desc_len: int = 40) -> str:
     """Операции за период, новые сверху.
 
     limit — сколько показать (0 = все). В шапке всегда указано, сколько операций
-    всего за период, поэтому видно, обрезан ли ответ."""
+    всего за период, поэтому видно, обрезан ли ответ.
+    desc_len — ширина колонки описания (0 = описание целиком). Обрезанное
+    описание кончается на «…» — полный текст даст desc_len=0."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -525,7 +545,7 @@ def list_operations(account_id: str, days: int = 30, limit: int = 50) -> str:
         def render(o):
             return (f"- [{when(o)}] {sign(o)}{(o.get('amount') or {}).get('value','?')} "
                     f"{((o.get('amount') or {}).get('currency') or {}).get('name','')} | "
-                    f"{(o.get('description') or '')[:40]}")
+                    f"{_cut(o.get('description') or '', desc_len)}")
         return _rows_out(ops, render, limit=limit, total=len(ops),
                          header=f"[account {account_id}] операции за {days} дн.")
     except Exception as e:
@@ -547,7 +567,7 @@ def spending_categories(account_id: str, days: int = 30) -> str:
         lines = [f"Траты за {days} дн.: {num(rep['total_spent'])} {rep['currency']} "
                  f"по {len(cats)} категориям (поступления {num(rep['total_earned'])})"]
         for c in cats:
-            lines.append(f"- {c['category'][:25]:25} {num(c['amount'], 12)} {c['share_pct']:5.1f}%")
+            lines.append(f"- {_cut(c['category'], 25):25} {num(c['amount'], 12)} {c['share_pct']:5.1f}%")
         if not cats:
             lines.append("(категорий нет — за период не было расходных операций)")
         return "\n".join(lines)
@@ -560,6 +580,10 @@ def operations_histogram(account_id: str = "", days: int = 30,
     """Траты, сгруппированные банком. Возвращает сырой JSON (дерево
     summary + intervals[].aggregated[]); для готовой разбивки по категориям
     бери spending_categories() — он это дерево уже разворачивает.
+
+    Внутренние переводы (между своими счетами) ИСКЛЮЧЕНЫ: эндпоинт всегда
+    вызывается с config=allNotInner, как в приложении. Полный список операций,
+    включая внутренние, — list_operations().
 
     В захвате приложения этот эндпоинт вызывался 27 раз и КАЖДЫЙ раз с
     period=«day», group_by=«category» — только эта пара проверена. Любое другое
@@ -915,7 +939,11 @@ def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
             # order/create point-of-no-return (last status blocking) → UNKNOWN, else
             # FAILED (safe). Without this, the attempt stayed at `started` and a retry
             # was wrongly allowed even if it crashed mid-order/create.
-            err_msg = f"{type(e).__name__}: {str(e)[:120]}"
+            # redact_text BEFORE the message reaches the UNKNOWN answer below:
+            # obs.emit and journal.record scrub their own copies, but this string
+            # goes verbatim into the tool result — a ConnectionError carries the
+            # full URL, sessionid included.
+            err_msg = f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}"
             already_blocking = journal.last_status_of_attempt(attempt_id) in journal.BLOCKING_STATUSES
             obs.emit("checkout", attempt_id=attempt_id,
                      result="unknown" if already_blocking else "failed",
@@ -1715,7 +1743,7 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
             # every row printed «?» for the one number that matters.
             return (f"- [{str(o.get('date', ''))[:16]}] "
                     f"{_money(o.get('payment') or o.get('paymentRub'))} "
-                    f"| {o.get('type', '')} | {str(o.get('description', ''))[:40]} "
+                    f"| {o.get('type', '')} | {_cut(o.get('description', ''), 40)} "
                     f"| {o.get('status', '')}")
         # limit was passed to the API AND then ignored here by a hardcoded [:50],
         # so invest_operations(limit=200) silently showed 50.
@@ -1879,11 +1907,13 @@ def card_requisites(ucid: str, reveal: bool = False) -> str:
         return _err_session(e)
 
 @mcp.tool()
-def card_operations(card_id: str, days: int = 30, limit: int = 50) -> str:
+def card_operations(card_id: str, days: int = 30, limit: int = 50,
+                    desc_len: int = 40) -> str:
     """Операции по КОНКРЕТНОЙ карте. card_id — поле id из list_cards().
     Серверного фильтра по карте нет (API умеет только excludeCardIds), поэтому
     берутся операции за период и фильтруются по полю card.
-    limit=0 — показать все за период."""
+    limit=0 — показать все за период.
+    desc_len — ширина колонки описания (0 = описание целиком, обрезка помечена «…»)."""
     try:
         s = _require(); s.ensure_fresh()
         start, end = ms_for_period(days)
@@ -1906,7 +1936,7 @@ def card_operations(card_id: str, days: int = 30, limit: int = 50) -> str:
         def render(o):
             return (f"- [{when(o)}] {'-' if o.get('type') == 'Debit' else '+'}"
                     f"{(o.get('amount') or {}).get('value','?')} "
-                    f"| {(o.get('description') or '')[:40]}")
+                    f"| {_cut(o.get('description') or '', desc_len)}")
         return _rows_out(ops, render, limit=limit, total=len(ops), header=head)
     except Exception as e:
         return _err(e)
@@ -2041,7 +2071,7 @@ def orders(kind: str = "", limit: int = 10) -> str:
             pay = o.get("paymentId")
             return (f"- {str(o.get('created',''))[:10]} | {o.get('objectType','?'):13} "
                     f"| {o.get('status','?'):15} | {o.get('amount','?'):>10} ₽ "
-                    f"| {what[:34]} | id={o.get('orderId','?')}"
+                    f"| {_cut(what, 34)} | id={o.get('orderId','?')}"
                     + (f" | paymentId={pay}" if pay else ""))
         return _rows_out(picked, render, limit=limit, total=len(picked),
                          header="Заказы" + (f" ({kind})" if kind else ""))
@@ -2180,9 +2210,11 @@ def grocery_good_info(good_id: str, app_id: str = "", point_id: str = "") -> str
         if meta.get("storage"):
             out.append(f"Хранение: {meta['storage']}")
         if meta.get("description"):
-            out.append(f"Описание: {meta['description'][:300]}")
+            out.append(f"Описание: {_cut(meta['description'], 300)}")
         if meta.get("ingredients"):
-            out.append(f"Состав: {meta['ingredients'][:700]}")
+            # НЕ резать: аллергены стоят в ХВОСТЕ списка состава, и обрезанный
+            # состав опаснее отсутствующего — он выглядит полным.
+            out.append(f"Состав: {meta['ingredients']}")
         return "\n".join(out)
     except Exception as e:
         return _err(e)
@@ -2506,7 +2538,7 @@ def concert_hall(event_id: str, slot_id: str, object_id: str) -> str:
                f"{info.get('maxSeatsInOrder','?')}"]
         for sec in sectors:
             p = (sec.get("prices") or {}).get("fix")
-            out.append(f"- {sec.get('sectorName','?')[:52]} | "
+            out.append(f"- {_cut(sec.get('sectorName','?'), 52)} | "
                        f"{'есть' if sec.get('isTicketsAvailable') else 'нет'} "
                        f"({sec.get('availableTickets', 0)} шт) | "
                        f"{f'{p:.0f} ₽' if p else 'цена не указана'}")
@@ -2693,7 +2725,9 @@ def insurance_policies() -> str:
                        f"| {str(p.get('FromDate', p.get('fromDate','')))[:10]} — "
                        f"{str(p.get('ToDate', p.get('toDate','')))[:10]} "
                        f"| премия {p.get('Bounty', p.get('bounty','?'))}")
-        return "\n".join(out) or json.dumps(data, ensure_ascii=False)[:2000]
+        # _json_out, not dumps()[:2000]: the fallback fires exactly when the shape
+        # is unknown, and a bare cut of an unknown shape is invisible data loss.
+        return "\n".join(out) or _json_out(data, 2000)
     except Exception as e:
         return _err(e)
 

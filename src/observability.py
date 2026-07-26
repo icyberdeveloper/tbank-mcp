@@ -83,7 +83,10 @@ def _redact_value(v):
         except (ValueError, TypeError):
             parsed = None
         if isinstance(parsed, (dict, list)):
-            return json.dumps(_redact_value(parsed), ensure_ascii=False)[:_MAX_VAL]
+            s = json.dumps(_redact_value(parsed), ensure_ascii=False)
+            # Mark the cut like the plain-string branch below does — a JSON dump
+            # severed at 300 chars is otherwise indistinguishable from a whole one.
+            return s if len(s) <= _MAX_VAL else s[:_MAX_VAL] + "…<trunc>"
         v = redact_text(v)
         if len(v) > _MAX_VAL:
             v = v[:_MAX_VAL] + "…<trunc>"
