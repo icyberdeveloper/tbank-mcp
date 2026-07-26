@@ -585,8 +585,136 @@ def test_the_recipient_bank_the_user_picked_is_the_one_used():
     print("  recipient: the caller's chosen SBP bank survives; auto-resolve only without one")
 
 
+MOSENERGO = {
+    "id": "mosenergosb-moskva-fix", "name": "МосЭнергоСбыт",
+    "groupId": "Коммунальные платежи", "paymentType": "Payment",
+    "fields": [
+        {"id": "account", "name": "Лицевой счет", "regexp": r"^\d{10}$",
+         "hint": "10 цифр", "type": "Text",
+         "usageTypes": [{"code": "Pay", "required": True, "visible": True,
+                         "editable": True, "order": 0}]},
+        {"id": "date", "name": "Период оплаты", "regexp": "", "hint": "", "type": "Date",
+         "usageTypes": [{"code": "Pay", "required": False, "visible": True,
+                         "editable": True, "order": 1}]},
+        {"id": "internal", "name": "Служебное", "regexp": "", "hint": "", "type": "Text",
+         "usageTypes": [{"code": "Template", "required": True, "visible": True,
+                         "editable": True, "order": 0}]},
+    ],
+}
+
+
+class BillSession(CaptureSession):
+    """A payer whose catalogue and commission are canned, so the validation and the
+    refusals can be driven without touching the bank."""
+
+    def __init__(self, commission=None):
+        super().__init__()
+        self.commission_calls = 0
+        self._commission = commission if commission is not None else {
+            "value": {"value": 0}, "total": {"value": 100},
+            "minAmount": 0.01, "maxAmount": 200000000.0}
+
+    def find_provider(self, provider_id, group=""):
+        return dict(MOSENERGO) if provider_id == MOSENERGO["id"] else {}
+
+    def payment_commission(self, body):
+        self.commission_calls += 1
+        return self._commission
+
+
+def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong():
+    """The provider's own schema carries a regexp per field, and it is the only thing
+    between a typo and a stranger's utility account being paid. Checked BEFORE the
+    request, so a bad value costs nothing — and the refusal has to name what was
+    wrong, or the agent will just try again with the same value."""
+    import os
+
+    from src import server
+
+    saved = server._require
+    try:
+        # Wrong format: 9 digits where the provider's regexp demands 10.
+        s = BillSession()
+        server._require = lambda: s
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        out = server.pay_bill(MOSENERGO["id"], '{"account": "123456789"}', 100,
+                              group="ЖКХ", from_account="0000000000")
+        check(s.url is None, f"a refused payment must not reach the bank: {s.url}")
+        check(s.commission_calls == 0, "a refused payment must not even be priced")
+        check("account" in out and "^\\d{10}$" in out,
+              f"the refusal must name the field and its format: {out!r}")
+
+        # A field the provider does not accept at all.
+        s2 = BillSession()
+        server._require = lambda: s2
+        out2 = server.pay_bill(MOSENERGO["id"], '{"schet": "1234567890"}', 100,
+                               group="ЖКХ", from_account="0000000000")
+        check(s2.url is None, "an unknown field must not be sent to the bank")
+        check("schet" in out2 and "account" in out2,
+              f"the refusal must list the fields the provider does accept: {out2!r}")
+
+        # Only Pay-usage fields are required: `internal` is Template-only and its
+        # absence must not block a payment.
+        s3 = BillSession()
+        server._require = lambda: s3
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        out3 = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
+                               group="ЖКХ", from_account="0000000000")
+        check(s3.commission_calls == 1,
+              f"a valid payment must be priced exactly once first: {s3.commission_calls}")
+        check(s3.url and "/v1/pay" in s3.url,
+              f"a valid payment must reach the signed pay path: {s3.url!r}")
+        pp = s3.sent_pay_parameters()
+        check(pp["provider"] == MOSENERGO["id"], f"wrong provider sent: {pp}")
+        check(pp["providerFields"] == {"account": "1234567890"},
+              f"providerFields must carry exactly what was validated: {pp}")
+        check("paymentType" not in pp,
+              "paymentType belongs to the commission body, never to pay")
+        check("МосЭнергоСбыт" in out3, f"the answer must name the payee: {out3!r}")
+
+        # An unknown provider is refused with a way forward, not a traceback.
+        s4 = BillSession()
+        server._require = lambda: s4
+        out4 = server.pay_bill("no-such-provider", '{"account": "1"}', 100, group="ЖКХ")
+        check(s4.url is None, "an unknown provider must not be paid")
+        check("payment_providers" in out4,
+              f"the refusal must name the tool that lists providers: {out4!r}")
+    finally:
+        server._require = saved
+    print("  pay_bill: wrong fields refused before sending, valid one priced then paid")
+
+
+def test_a_bill_payment_respects_the_provider_limits():
+    """The commission preview returns the provider's own min/max. Sending an amount
+    outside them is a rejection the bank would make anyway — better made here, where
+    it costs no attempt and no journal entry."""
+    import os
+
+    from src import server
+
+    saved = server._require
+    try:
+        s = BillSession(commission={"value": {"value": 0}, "total": {"value": 1},
+                                    "minAmount": 10.0, "maxAmount": 5000.0})
+        server._require = lambda: s
+        open(os.environ["TBANK_ATTEMPTS"], "w").close()
+        low = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 5,
+                              group="ЖКХ", from_account="0000000000")
+        check(s.url is None and "Минимальная" in low,
+              f"an amount under the provider minimum must be refused: {low!r}")
+        high = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 9999,
+                               group="ЖКХ", from_account="0000000000")
+        check(s.url is None and "Максимальная" in high,
+              f"an amount over the provider maximum must be refused: {high!r}")
+    finally:
+        server._require = saved
+    print("  pay_bill: the provider's own min/max are enforced before sending")
+
+
 def main():
     print("transfer money path:")
+    test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
+    test_a_bill_payment_respects_the_provider_limits()
     test_the_fixture_still_matches_the_capture()
     test_body_matches_the_real_pay_request()
     test_the_pay_request_looks_like_the_device_it_claims_to_be()

@@ -846,6 +846,12 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi"
   }
  },
+ # The provider CATALOGUE, and the only place the per-provider field schema lives:
+ # each record carries fields[] with an id, a human name, a validating `regexp`, a
+ # hint and usageTypes (which fields are required for `Pay` vs for a template).
+ # `groups` (a group NAME, not an id), `page`, `pageSize` and `frontendFeatureFlag`
+ # are sent by the app on every captured call — without them this returns a
+ # differently-scoped page than the app's own screen.
  "providers_compatible_page": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -858,7 +864,10 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6"
+   "appVersion": "7.31.6",
+   "pageSize": "100",
+   "page": "1",
+   "frontendFeatureFlag": "SHAWithSubs"
   }
  },
  "atm_withdrawal_qrs": {

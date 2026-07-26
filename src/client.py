@@ -1698,12 +1698,72 @@ class MobileSession:
         return self._as_list(self._call_read("contact_list"))
 
     def providers_groups(self) -> list[dict]:
-        """Payment provider groups (for bill payments)."""
-        return self._as_list(self._call_read("providers_groups"))
+        """Payment provider groups — 19 of them live («ЖКХ», «Мобильная связь»,
+        «Госуслуги», …).
 
-    def providers_compatible_page(self) -> list[dict]:
-        """Compatible payment providers (paged)."""
-        return self._as_list(self._call_read("providers_compatible_page"))
+        The payload nests them: the endpoint answers a LIST whose single element is
+        {"groups": [...]}, so `_as_list` alone handed back that wrapper and every
+        caller read zero groups. Verified live 2026-07-26."""
+        data = self._call_read("providers_groups")
+        for item in self._as_list(data):
+            if isinstance(item, dict) and isinstance(item.get("groups"), list):
+                return [g for g in item["groups"] if isinstance(g, dict)]
+        # Already flat (or an unexpected shape) — return what is usable.
+        return [g for g in self._as_list(data)
+                if isinstance(g, dict) and (g.get("name") or g.get("id"))]
+
+    def providers_compatible_page(self, group: str = "", page: int = 1,
+                                  page_size: int = 100) -> dict:
+        """One page of the provider catalogue, with each provider's FIELD SCHEMA.
+
+        `group` is a group NAME as `providers_groups()` prints it («Переводы»,
+        «ЖКХ», …), not an id. Returns the raw providersPage:
+        {page, providers[], totalPages, totalProviders, storageId, updateTime}.
+
+        Each provider carries `fields[]`, and every field has `id`, `name`,
+        `regexp`, `hint`, `keyboard`, `type` and `usageTypes[]` — the last one is
+        what says whether the field is required for a payment (`code: "Pay"`) or
+        only for saving a template. That schema is the only thing that makes a
+        composed payment checkable before it is sent."""
+        ov = {"page": str(page), "pageSize": str(page_size)}
+        if group:
+            ov["groups"] = self.GROUP_ALIASES.get(group.strip(), group.strip())
+        data = self._call_read("providers_compatible_page", overrides=ov)
+        if isinstance(data, dict):
+            return data.get("providersPage") or data
+        return {}
+
+    # The two endpoints disagree, and the filter matches the PROVIDER's groupId,
+    # not the name the groups list prints. Verified live 2026-07-26: «ЖКХ» returns
+    # an empty page while «Коммунальные платежи» returns 63 889 providers, and the
+    # groups list spells one group with a comma that the groupId does not have.
+    # A wrong group here is not an error — it is HTTP 200 with an empty payload.
+    GROUP_ALIASES = {
+        "ЖКХ": "Коммунальные платежи",
+        "Интернет, ТВ и телефония": "Интернет ТВ и телефония",
+    }
+
+    @staticmethod
+    def provider_pay_fields(provider: dict) -> list[dict]:
+        """The fields THIS provider needs for a payment, in the app's own order.
+
+        A field counts when its usageTypes carry a `Pay` entry; `required` and
+        `editable` come from that same entry, not from the field record."""
+        out = []
+        for f in (provider.get("fields") or []):
+            if not isinstance(f, dict):
+                continue
+            pay = next((u for u in (f.get("usageTypes") or [])
+                        if isinstance(u, dict) and u.get("code") == "Pay"), None)
+            if pay is None or not pay.get("visible", True):
+                continue
+            out.append({"id": f.get("id"), "name": f.get("name"),
+                        "regexp": f.get("regexp") or "", "hint": f.get("hint") or "",
+                        "type": f.get("type") or "", "required": bool(pay.get("required")),
+                        "editable": bool(pay.get("editable", True)),
+                        "order": pay.get("order", 0)})
+        out.sort(key=lambda x: (x["order"], str(x["id"])))
+        return out
 
     def atm_withdrawal_qrs(self) -> list[dict]:
         """ATM withdrawal QRs."""
@@ -2823,6 +2883,77 @@ class MobileSession:
         # /v1/pay body in either capture carries it (checked all three: captures.xml
         # #1423 and #1477, captures2.xml #595). Sending it is an invention.
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
+        return self.pay(body)
+
+    def find_provider(self, provider_id: str, group: str = "") -> dict:
+        """One provider record from the catalogue, {} if not found.
+
+        Walks the pages of `group` when given (cheap: the group filter narrows
+        63 889 utility providers to one page), otherwise searches the ungrouped
+        catalogue, which is 100k+ providers — so a group is strongly preferred."""
+        pid = str(provider_id)
+        for page in range(1, 8):
+            pg = self.providers_compatible_page(group=group, page=page)
+            for prov in (pg.get("providers") or []):
+                if str(prov.get("id")) == pid:
+                    return prov
+            if page >= int(pg.get("totalPages") or 1):
+                break
+        return {}
+
+    def validate_provider_fields(self, provider: dict, fields: dict) -> list[str]:
+        """Complaints about `fields` against the provider's own schema, [] if clean.
+
+        The catalogue publishes a `regexp` per field and a `required` flag per usage,
+        and this is the only thing standing between a typo and a stranger's utility
+        account being paid. Checked BEFORE the request, so a bad value costs nothing."""
+        problems: list[str] = []
+        schema = self.provider_pay_fields(provider)
+        known = {f["id"]: f for f in schema}
+        for f in schema:
+            val = fields.get(f["id"])
+            if val in (None, ""):
+                if f["required"]:
+                    problems.append(
+                        f"нет обязательного поля {f['id']} ({f['name']})"
+                        + (f" — {f['hint']}" if f["hint"] else ""))
+                continue
+            rx = f["regexp"]
+            if rx:
+                try:
+                    if not re.fullmatch(rx, str(val)):
+                        problems.append(
+                            f"{f['id']} ({f['name']}) не подходит под формат {rx}"
+                            + (f" — {f['hint']}" if f["hint"] else ""))
+                except re.error:
+                    # A schema we cannot compile is not the caller's fault; say so
+                    # rather than letting a broken pattern block a valid payment.
+                    problems.append(f"{f['id']}: регулярку провайдера не удалось "
+                                    f"разобрать ({rx!r}) — проверь значение сам")
+        for k in fields:
+            if k not in known:
+                problems.append(f"поле {k!r} провайдер не принимает; допустимые: "
+                                + ", ".join(sorted(known)))
+        return problems
+
+    def pay_bill(self, provider_id: str, fields: dict, amount: float,
+                 account: str = "", user_payment_id: str = "") -> Any:
+        """Pay a service bill (utilities, fines, taxes, internet…). REAL MONEY.
+
+        Same signed /v1/pay envelope transfer() uses — capture-verified for the
+        transfer providers — with this provider's own providerFields. `paymentType`
+        is deliberately absent: it belongs to payment_commission, and no captured
+        pay body carries it.
+
+        The caller is expected to have validated `fields` against the catalogue and
+        previewed the commission; this method does neither, so that the server layer
+        can report each failure with its own message."""
+        src = account or self._source_account()
+        pay_params = {"provider": str(provider_id), "currency": "RUB", "account": src,
+                      "moneyAmount": amount, "providerFields": dict(fields),
+                      "cellularService": "WiFi", "frontCamera": "true",
+                      "userPaymentId": user_payment_id or str(int(time.time() * 1000))}
+        body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params, ensure_ascii=False))
         return self.pay(body)
 
 

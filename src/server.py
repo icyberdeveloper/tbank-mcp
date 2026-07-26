@@ -123,6 +123,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     # money
     "transfer_sbp_resolve": ("Получатель СБП по телефону", READ),
     "payment_commission": ("Предпросмотр комиссии", READ),
+    "payment_providers": ("Каталог платёжных провайдеров", READ),
+    "pay_bill": ("Оплата счёта", MONEY),
     "transfer": ("Перевод денег", MONEY),
     # invest
     "invest_accounts": ("Инвест-счета", READ),
@@ -1408,6 +1410,207 @@ def transfer(amount: float, to_account: str, description: str = "",
                 f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
         return _err(e)
+
+@mcp.tool()
+def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
+             from_account: str = "", force: bool = False) -> str:
+    """Оплатить счёт: ЖКХ, связь, интернет, штраф, налог. РЕАЛЬНЫЕ ДЕНЬГИ.
+
+    provider_id и fields — из payment_providers(provider_id=…), fields — JSON вида
+    {"account": "1234567890"}. Имена полей у каждого провайдера свои, угадывать их
+    нельзя: тул сверяет значения с регуляркой из каталога и откажет до отправки.
+
+    Перед оплатой всегда считается комиссия (это же и проверка тела банком), и
+    итоговая сумма показывается. Показывай её пользователю и жди явного «да»
+    ИМЕННО НА ЭТУ СУММУ — «оплати» без суммы подтверждением не считается.
+
+    ⚠️ Конверт /v1/pay для счётных провайдеров НЕ сверен с захватом: в захвате
+    есть оплата штрафа, но через веб-хост, а на мобильном хосте захвачены только
+    переводы. Проверено живьём, что мобильный хост принимает счётного провайдера
+    на расчёте комиссии. Первый боевой платёж сделай МАЛЕНЬКИМ и проверь
+    list_operations().
+
+    Неверный номер лицевого счёта оплачивает чужую квитанцию, и вернуть это
+    сложнее, чем перевод. force=True — только если пользователь подтвердил, что
+    предыдущий платёж не прошёл."""
+    try:
+        import time
+
+        from . import journal
+        s = _require(); s.ensure_fresh()
+        try:
+            vals = json.loads(fields) if isinstance(fields, str) else dict(fields or {})
+        except json.JSONDecodeError as e:
+            return (f"fields — это JSON-объект вида {{\"account\": \"123\"}}, "
+                    f"разобрать не удалось: {e}")
+        if not isinstance(vals, dict):
+            return "fields должен быть JSON-ОБЪЕКТОМ {поле: значение}, а не списком."
+        if amount is None or float(amount) <= 0:
+            return "Сумма должна быть больше нуля."
+
+        prov = s.find_provider(provider_id, group=group)
+        if not prov:
+            return (f"Провайдер {provider_id!r} не найден"
+                    + (f" в группе {group!r}" if group else " (укажи group — так поиск "
+                       "идёт по одной группе, а не по 100 000 провайдеров)")
+                    + ". Список: payment_providers(group=\"…\").")
+        problems = s.validate_provider_fields(prov, vals)
+        if problems:
+            return ("Платёж НЕ отправлен — поля не проходят проверку провайдера "
+                    f"«{prov.get('name')}»:\n" + "\n".join(f"- {p}" for p in problems)
+                    + f"\nСхема полей: payment_providers(provider_id=\"{provider_id}\").")
+
+        src = from_account or s._source_account()
+        # The commission preview is both a courtesy and the bank's own validation of
+        # the body — it is the step that proved this envelope is understood for bill
+        # providers at all. A refusal here means the payment would have been refused.
+        quote = s.payment_commission(json.dumps({"payParameters": {
+            "account": src, "moneyAmount": float(amount), "currency": "RUB",
+            "paymentType": "Payment", "provider": str(provider_id),
+            "providerFields": vals}}, ensure_ascii=False))
+        q = quote if isinstance(quote, dict) else {}
+        fee = ((q.get("value") or {}).get("value")
+               if isinstance(q.get("value"), dict) else q.get("value"))
+        total = ((q.get("total") or {}).get("value")
+                 if isinstance(q.get("total"), dict) else q.get("total"))
+        lo, hi = q.get("minAmount"), q.get("maxAmount")
+        if lo is not None and float(amount) < float(lo):
+            return f"Минимальная сумма у этого провайдера — {_money(lo, 'RUB')}."
+        if hi is not None and float(amount) > float(hi):
+            return f"Максимальная сумма у этого провайдера — {_money(hi, 'RUB')}."
+
+        key = _transfer_key(amount, provider_id, "bill", src)
+        blocked, prev = _transfer_blocked(key)
+        if blocked and not force:
+            return (f"ПОВТОР ЗАБЛОКИРОВАН: такой же платёж ({amount}₽ → "
+                    f"{prov.get('name')}) уже отправлялся и его исход НЕ подтверждён "
+                    f"(статус «{(prev or {}).get('status','?')}»). Деньги могли уйти. "
+                    f"Проверь list_operations('{src}', days=1); если платежа нет — "
+                    f"повтори с force=True.")
+        retry_of = prev if (prev or {}).get("status") in _TRANSFER_BLOCKING else None
+        upid = str(int((retry_of or {}).get("user_payment_ms") or 0)
+                   or int(time.time() * 1000))
+        attempt = journal.new_attempt(str(provider_id), "bill", key, amount)
+        journal.record(attempt, "pay", "posting", user_payment_ms=int(upid), account=src)
+
+        try:
+            res = s.pay_bill(provider_id, vals, float(amount), account=src,
+                             user_payment_id=upid) or {}
+        except Exception as e:
+            import requests as _rq
+            answered = isinstance(e, (TbankApiError, SessionExpired))
+            if answered and not isinstance(e, _rq.exceptions.RequestException):
+                journal.record(attempt, "pay", "failed", user_payment_ms=int(upid),
+                               error=str(e)[:160])
+                return (f"Платёж НЕ выполнен: {_err(e)}\nЗапрос не прошёл, деньги на "
+                        f"месте. Исправь причину и повтори обычным вызовом.")
+            journal.record(attempt, "pay", "unknown", user_payment_ms=int(upid),
+                           error=str(e)[:160])
+            return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — деньги могли "
+                    f"списаться. НЕ повторяй вслепую: проверь "
+                    f"list_operations('{src}', days=1), и только если платежа нет — "
+                    f"pay_bill(..., force=True).")
+
+        payload = res.get("payload", res) if isinstance(res, dict) else {}
+        pid = str(payload.get("paymentId") or payload.get("id") or "") if isinstance(payload, dict) else ""
+        journal.record(attempt, "pay", "paid" if pid else "unknown",
+                       user_payment_ms=int(upid), payment_id=pid)
+        if not pid:
+            return (f"Ответ банка без paymentId — исход неясен. "
+                    f"Проверь list_operations('{src}', days=1). "
+                    f"Ответ: {_json_out(payload, 400)}")
+        fee_txt = f", комиссия {_money(fee, 'RUB')}" if fee is not None else ""
+        return (f"Оплачено {_money(amount, 'RUB')} → {prov.get('name')} "
+                f"со счёта {src}{fee_txt}. paymentId={pid} "
+                f"(payment_receipt('{pid}') — чек).")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def payment_providers(group: str = "", query: str = "", page: int = 1,
+                      provider_id: str = "") -> str:
+    """Каталог платёжных провайдеров (ЖКХ, связь, штрафы, налоги, интернет…) —
+    только чтение, денег не двигает.
+
+    Без аргументов печатает ГРУППЫ провайдеров — с них и начинай, дальше
+    payment_providers(group="ЖКХ"). group — это НАЗВАНИЕ группы, не id.
+    query — подстрока по названию провайдера внутри группы.
+
+    provider_id="<id>" печатает ПОЛЯ, которые провайдер требует для платежа:
+    id поля, человеческое название, обязательность, подсказку и регулярку, по
+    которой значение проверяется. Это единственный источник формы платежа —
+    угадывать имена полей нельзя.
+
+    Что с этим делать дальше: посчитать комиссию через payment_commission(). Сам
+    платёж по счёту через MCP пока не реализован — см. docstring pay_bill()."""
+    try:
+        s = _require(); s.ensure_fresh()
+        if not group and not provider_id:
+            groups = s.providers_groups()
+            names = [str(g.get("name") or g.get("id") or "") for g in groups
+                     if isinstance(g, dict)]
+            names = [n for n in names if n]
+            if not names:
+                return "Групп провайдеров не вернулось."
+            return ("Группы провайдеров (дальше: payment_providers(group=\"…\")):\n"
+                    + "\n".join(f"- {n}" for n in sorted(names)))
+
+        if provider_id:
+            # Scan the pages of the named group (or the default page) for this id.
+            found = None
+            for p in range(1, 6):
+                pg = s.providers_compatible_page(group=group, page=p)
+                for prov in (pg.get("providers") or []):
+                    if str(prov.get("id")) == str(provider_id):
+                        found = prov
+                        break
+                if found or p >= int(pg.get("totalPages") or 1):
+                    break
+            if not found:
+                return (f"Провайдер {provider_id!r} не найден"
+                        + (f" в группе {group!r}" if group else "")
+                        + ". Открой список: payment_providers(group=\"…\").")
+            fields = s.provider_pay_fields(found)
+            head = (f"{found.get('name')} | id={found.get('id')} | "
+                    f"группа={found.get('groupId')} | "
+                    f"тип={found.get('paymentType') or '?'}")
+            if not fields:
+                return head + "\nПолей для платежа провайдер не публикует."
+            lines = [head, "Поля для платежа:"]
+            for f in fields:
+                lines.append(
+                    f"- {f['id']} — {f['name']}"
+                    + ("  [ОБЯЗАТЕЛЬНО]" if f["required"] else "  [необязательно]")
+                    + (f"\n    подсказка: {f['hint']}" if f["hint"] else "")
+                    + (f"\n    формат: {f['regexp']}" if f["regexp"] else ""))
+            return "\n".join(lines)
+
+        pg = s.providers_compatible_page(group=group, page=page)
+        provs = pg.get("providers") or []
+        if query:
+            q = query.lower()
+            provs = [p for p in provs if q in str(p.get("name", "")).lower()]
+        if not provs:
+            # An unmatched group is HTTP 200 with an empty payload, not an error, so
+            # say what it means instead of letting it read as "no such providers".
+            return (f"В группе {group!r} ничего не найдено"
+                    + (f" по запросу {query!r}" if query else "") + ".\n"
+                    "Фильтр сверяется с groupId у провайдера, а он не всегда совпадает "
+                    "с названием из списка групп (например «ЖКХ» → «Коммунальные "
+                    "платежи»). Проверь написание по payment_providers() без аргументов.")
+        total, pages = pg.get("totalProviders"), pg.get("totalPages")
+        lines = [f"{group or 'провайдеры'}: {len(provs)} из {total or '?'} "
+                 f"(страница {pg.get('page', page)} из {pages or '?'})"]
+        for p in provs[:60]:
+            lines.append(f"- {p.get('name')} | id={p.get('id')}"
+                         + ("" if p.get("isActive", True) else " | НЕАКТИВЕН"))
+        lines.append("Поля конкретного провайдера: "
+                     "payment_providers(provider_id=\"…\", group=\"…\")")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
 
 @mcp.tool()
 def payment_commission(body: str = "") -> str:

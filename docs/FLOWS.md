@@ -129,6 +129,33 @@ You normally just call a read tool; the above runs under the hood. Call
 > Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
 > is cookie-only.
 
+### Service bills (utilities, fines, taxes, internet)
+
+4. `payment_providers()` → the 19 provider GROUPS. `payment_providers(group, query)`
+   → providers inside one (102 571 exist in total across 1026 pages, so always
+   filter). `payment_providers(provider_id, group)` → that provider's payment FIELD
+   SCHEMA: field id, human name, required flag, hint and a validating `regexp`.
+   That schema is the only source of the field names — they differ per provider.
+
+   The group filter matches the provider's `groupId`, which does not always equal
+   the name the groups list prints: «ЖКХ» is `Коммунальные платежи` (63 889
+   providers) and «Интернет, ТВ и телефония» drops its comma. A mismatch is HTTP 200
+   with an EMPTY payload, not an error. `GROUP_ALIASES` in `src/client.py` maps the
+   two known cases.
+5. `pay_bill(provider_id, fields, amount, group, from_account)` → REAL MONEY. It
+   validates every field against the provider's `regexp` and refuses before sending,
+   then prices the payment through `payment_commission` (which is also the bank
+   validating the body) and enforces the provider's min/max. Unknown outcome blocks a
+   repeat and reuses `userPaymentId`, exactly as `transfer` does.
+
+> ⚠️ The pay ENVELOPE for bill providers is not capture-verified: the one captured
+> bill payment is on the WEB host (`www.tbank.ru/api/common/v1/pay`, with
+> `delayAccepted`/`ucid` and a browser device block), while the mobile signed
+> `/v1/pay` has only ever been captured carrying TRANSFER providers. Verified live
+> that the mobile host accepts a bill provider on the commission endpoint — it
+> resolves the provider, prices it and returns its limits. Keep the first real
+> payment to a new provider small.
+
 ## 5. Messenger / support chat  (read + send)
 
 1. `messenger_unread()` → how many unread, and in which chats (by name).

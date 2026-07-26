@@ -204,7 +204,7 @@ def test_every_tool_declares_what_it_does_to_the_world():
     # MONEY debits an account. Only these three force a confirmation dialog: by the
     # repo owner's rule a booking that expires by itself, a cart line, a chat
     # message and an SMS are all recoverable, and a payment is not.
-    MONEY = {"transfer", "grocery_checkout", "ticket_pay"}
+    MONEY = {"transfer", "grocery_checkout", "ticket_pay", "pay_bill"}
     # WRITE changes something that costs nothing. They must NOT claim to be
     # read-only — `readOnlyHint: true` states that a tool does not modify its
     # environment, and every one of these does.
