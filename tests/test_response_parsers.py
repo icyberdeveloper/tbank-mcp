@@ -169,6 +169,46 @@ def test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat():
     print("  messenger: a retired token is re-minted once, never shown as a chat")
 
 
+def test_documents_merge_and_lists():
+    """Three losses documents() used to make silently: list-valued entered fields
+    (licence categories, OSAGO drivers) were dropped by the dict-only flattener;
+    duplicate copies kept only the field-richest one, losing fields unique to the
+    poorer copy; and `name` was always hidden although for an unknown code it is
+    the only human-readable label."""
+    wrap = lambda v: {"isEntered": True, "value": v}          # noqa: E731
+    docs = {
+        "RusDriversLic": [
+            {"value": {"serial": wrap("77"), "number": wrap("123"),
+                       "categories": wrap(["B", "B1", "M"]),
+                       "person": {"birthDate": wrap("1990-01-01")}}},
+            # Same licence from another source: fewer fields, one unique.
+            {"value": {"serial": wrap("77"), "number": wrap("123"),
+                       "issueDate": wrap("2020-05-01"),
+                       "person": {"birthDate": wrap("1990-01-01")}}},
+        ],
+        "SomeNewCode": [
+            {"value": {"number": wrap("42"), "name": wrap("Карта болельщика")}},
+        ],
+    }
+
+    class DocStub(Stub):
+        def ensure_client_session(self, *a, **kw):
+            return None
+
+    out = run(server.documents, DocStub(
+        identity_documents=docs,
+        identity_brief={"birthDate": {"value": "1990-01-01"}}))
+    check("B, B1, M" in out,
+          f"an entered list field must survive the flattener: {out!r}")
+    check("issueDate = 2020-05-01" in out,
+          f"a field unique to the poorer duplicate must survive the merge: {out!r}")
+    check(out.count("Водительское удостоверение:") == 1,
+          f"duplicates must merge into one document, not two: {out!r}")
+    check("Карта болельщика" in out,
+          f"name must print when the title is a raw code: {out!r}")
+    print("  documents: list fields kept, duplicates merged, unknown codes keep their name")
+
+
 def test_grocery_search_header_is_honest():
     """The tool header must separate three different numbers: shown, matched, and
     what the store returned at all — «10 товаров» that silently came out of 25
@@ -541,6 +581,7 @@ def main():
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
+    test_documents_merge_and_lists()
     test_grocery_search_header_is_honest()
     test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()

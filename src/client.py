@@ -1845,12 +1845,17 @@ class MobileSession:
                     area_id = str((ret.get("delivery", {}) or {}).get("areaId", "") or "")
                     eta, window = delivery_eta(nearest)
                     if app_id and name:
+                        # address/addressCount: the store list is built for ONE
+                        # profile address (the first), and the answer never said
+                        # which — with several saved addresses the agent could not
+                        # tell what «доставка за 30 мин» was relative to.
                         stores.append({"appId": app_id, "name": name, "areaId": area_id,
                                        "pointId": point_id, "minOrderSum": min_sum,
                                        "etaMin": eta, "deliveryWindow": window,
                                        "deliveryPrice": nearest.get("price", 0),
                                        "cashback": cashback.get("value", ""),
-                                       "category": cat.get("name", "")})
+                                       "category": cat.get("name", ""),
+                                       "address": addr, "addressCount": len(addrs)})
         except Exception:
             pass
         # dedupe by (appId, pointId) — the retailers list can repeat a store (#14)
@@ -3483,12 +3488,14 @@ class MobileSession:
     _SECTION_NEEDS_CLIENT = {"invoices", "subscription_bills", "subscriptions",
                              "templates", "autopayments", "sbp"}
 
-    def get_data(self, section: str, arg: str = "") -> Any:
+    def get_data(self, section: str, arg: str = "", days: int = 30) -> Any:
         """Unified getter for banking data.
 
         `arg` is required by the sections in _SECTION_ARG (providers → a
         comma-separated id list; requisites → a phone). Passing it for any other
-        section is ignored."""
+        section is ignored. `days` sets the statements window — it used to be a
+        buried literal 30, so older statements were unreachable through any
+        argument while the answer read as complete."""
         _SECTIONS = {
             "subscriptions": "subscription_all", "subscription_bills": "subscription_all_bills",
             "credit_schedule": "credit_payment_schedule", "credit_rating": "credit_rating",
@@ -3545,7 +3552,7 @@ class MobileSession:
             ov = {arg_key: arg}
             if section.lower() == "statements":
                 # The other two query params the app always sends with the account.
-                start, _ = ms_for_period(30)
+                start, _ = ms_for_period(days)
                 ov.update({"dateFrom": str(start), "itemsOrder": "desc"})
             return self._call_read(key, overrides=ov)
         return self._call_read(key)

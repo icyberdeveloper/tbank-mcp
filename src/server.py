@@ -598,7 +598,7 @@ def operations_histogram(account_id: str = "", days: int = 30,
         return _err(e)
 
 @mcp.tool()
-def get_data(section: str, arg: str = "") -> str:
+def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000) -> str:
     """Универсальный getter. section = subscriptions | subscription_bills |
     credit_schedule | credit_rating |
     statements | invoices | templates | contacts | cards | loans | autopayments |
@@ -620,12 +620,17 @@ def get_data(section: str, arg: str = "") -> str:
                    известные по id.
       requisites — arg = телефон. Обычно вместо этого нужен transfer_sbp_resolve(phone);
                    а реквизиты СВОЕГО счёта — это account_requisites(account_id).
-      statements — arg = номер счёта из list_accounts().
+      statements — arg = номер счёта из list_accounts(). days задаёт окно выписки
+                   (по умолчанию 30 — раньше это окно было зашито и нигде не
+                   упоминалось; другие секции days не принимают).
+
+    max_chars — кап ответа в символах (по умолчанию 5000; 0 = весь JSON без
+    обрезки). Обрезка всегда помечена заголовком «ПОКАЗАНО X из Y».
 
     (invest_portfolio/operations/securities и account_requisites — отдельные тулы.)"""
     try:
         s = _require(); s.ensure_fresh()
-        return _json_out(s.get_data(section, arg), 5000)
+        return _json_out(s.get_data(section, arg, days=days), max_chars)
     except Exception as e:
         return _err(e)
 
@@ -686,7 +691,18 @@ def grocery_stores(sort_by: str = "", order: str = "asc") -> str:
                     f"| доставка: {speed}, {_money(st.get('deliveryPrice'), '₽')} "
                     f"| minSum={st.get('minOrderSum', '')} "
                     f"| cashback={st.get('cashback', '')}%")
-        return "\n".join(render(st) for st in rows)
+        body = "\n".join(render(st) for st in rows)
+        # Which address this list was built for — with several saved addresses the
+        # listing silently meant «the first one» and nothing said so.
+        addr = rows[0].get("address") if rows and isinstance(rows[0], dict) else ""
+        if addr:
+            n_addr = rows[0].get("addressCount") or 1
+            head = f"Адрес доставки: {addr}"
+            if n_addr > 1:
+                head += (f" (в профиле адресов: {n_addr}, используется первый — "
+                         f"сменить можно в приложении)")
+            return head + "\n" + body
+        return body
     except Exception as e:
         return _err(e)
 
@@ -968,12 +984,13 @@ def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
             return _err(e)
 
 @mcp.tool()
-def grocery_attempts() -> str:
+def grocery_attempts(limit: int = 15) -> str:
     """Недавние попытки grocery checkout (read-only) — для reconciliation после
-    неопределённого результата (UNKNOWN). Показывает status/order_id/attempt_id/sum."""
+    неопределённого результата (UNKNOWN). Показывает status/order_id/attempt_id/sum.
+    limit — сколько последних попыток показать (0 = все); в шапке видно общее число."""
     try:
         from . import journal
-        rows = journal.recent(60)
+        rows = journal.recent(0)
         if not rows:
             return "Попыток checkout пока не было."
         # One row per ATTEMPT, not per journal line. The journal writes an `init`
@@ -996,9 +1013,13 @@ def grocery_attempts() -> str:
             bits.append(f"order={a.get('order_id') or '-'}")
             tail = (a.get("error") or a.get("payment_status") or "")
             if tail:
-                bits.append(str(tail)[:60])
+                bits.append(_cut(tail, 60))
             return " | ".join(bits)
-        return "\n".join(render(a) for a in list(merged.values())[-15:])
+        # Newest first, through _rows_out: the bare [-15:] tail printed 15 attempts
+        # with no count — indistinguishable from «15 attempts ever».
+        items = list(merged.values())[::-1]
+        return _rows_out(items, render, limit=limit, total=len(items),
+                         header="Попытки checkout")
     except Exception as e:
         return _err(e)
 
@@ -1547,7 +1568,9 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
             return (f"Провайдер {provider_id!r} не найден"
                     + (f" в группе {group!r}" if group else " (укажи group — так поиск "
                        "идёт по одной группе, а не по 100 000 провайдеров)")
-                    + ". Список: payment_providers(group=\"…\").")
+                    + ". Каталог сканируется максимум на 7 страниц (700 записей), "
+                    "поэтому «не найден» без group не окончателен. "
+                    "Список: payment_providers(group=\"…\").")
         problems = s.validate_provider_fields(prov, vals)
         if problems:
             return ("Платёж НЕ отправлен — поля не проходят проверку провайдера "
@@ -1623,18 +1646,21 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
 
 @mcp.tool()
 def payment_providers(group: str = "", query: str = "", page: int = 1,
-                      provider_id: str = "") -> str:
+                      provider_id: str = "", pages: int = 5) -> str:
     """Каталог платёжных провайдеров (ЖКХ, связь, штрафы, налоги, интернет…) —
     только чтение, денег не двигает.
 
     Без аргументов печатает ГРУППЫ провайдеров — с них и начинай, дальше
     payment_providers(group="ЖКХ"). group — это НАЗВАНИЕ группы, не id.
-    query — подстрока по названию провайдера внутри группы.
+    query — подстрока по названию провайдера внутри группы (фильтрует ТЕКУЩУЮ
+    страницу). page — номер страницы каталога, шапка подсказывает следующую.
 
     provider_id="<id>" печатает ПОЛЯ, которые провайдер требует для платежа:
     id поля, человеческое название, обязательность, подсказку и регулярку, по
     которой значение проверяется. Это единственный источник формы платежа —
-    угадывать имена полей нельзя.
+    угадывать имена полей нельзя. Поиск по id сканирует до `pages` страниц
+    каталога (по 100 записей); ответ «не найден» честно называет, сколько
+    страниц просмотрено — с group поиск попадает в первую страницу.
 
     Что с этим делать дальше: pay_bill(provider_id, fields, amount) — он сам
     проверит поля по регулярке и посчитает комиссию. Уже выставленный счёт вместе
@@ -1654,17 +1680,27 @@ def payment_providers(group: str = "", query: str = "", page: int = 1,
         if provider_id:
             # Scan the pages of the named group (or the default page) for this id.
             found = None
-            for p in range(1, 6):
+            scanned, total_pages = 0, None
+            for p in range(1, max(1, pages) + 1):
                 pg = s.providers_compatible_page(group=group, page=p)
+                scanned = p
+                total_pages = int(pg.get("totalPages") or 1)
                 for prov in (pg.get("providers") or []):
                     if str(prov.get("id")) == str(provider_id):
                         found = prov
                         break
-                if found or p >= int(pg.get("totalPages") or 1):
+                if found or p >= total_pages:
                     break
             if not found:
-                return (f"Провайдер {provider_id!r} не найден"
-                        + (f" в группе {group!r}" if group else "")
+                # «не найден» после неполного скана — не факт, а граница поиска;
+                # молчать о ней = ложный отказ на провайдере со страницы pages+1.
+                where = f" в группе {group!r}" if group else ""
+                if total_pages and scanned < total_pages:
+                    return (f"Провайдер {provider_id!r} не найден{where} среди первых "
+                            f"{scanned} страниц из {total_pages}. Уточни group "
+                            f"(попадёт в первую страницу) или увеличь pages=. "
+                            f"Список групп: payment_providers().")
+                return (f"Провайдер {provider_id!r} не найден{where}"
                         + ". Открой список: payment_providers(group=\"…\").")
             fields = s.provider_pay_fields(found)
             head = (f"{found.get('name')} | id={found.get('id')} | "
@@ -1694,10 +1730,20 @@ def payment_providers(group: str = "", query: str = "", page: int = 1,
                     "Фильтр сверяется с groupId у провайдера, а он не всегда совпадает "
                     "с названием из списка групп (например «ЖКХ» → «Коммунальные "
                     "платежи»). Проверь написание по payment_providers() без аргументов.")
-        total, pages = pg.get("totalProviders"), pg.get("totalPages")
-        lines = [f"{group or 'провайдеры'}: {len(provs)} из {total or '?'} "
-                 f"(страница {pg.get('page', page)} из {pages or '?'})"]
-        for p in provs[:60]:
+        total, total_pages = pg.get("totalProviders"), pg.get("totalPages")
+        cur_page = pg.get("page", page)
+        # No [:60] cut: the header counted len(provs) BEFORE the old slice, so a
+        # full page claimed «100 из N» while printing 60 — providers 61–100 of
+        # every page were silently unreachable and the header lied about it.
+        head = (f"{group or 'провайдеры'}: {len(provs)} из {total or '?'} "
+                f"(страница {cur_page} из {total_pages or '?'})")
+        try:
+            if int(cur_page) < int(total_pages or 1):
+                head += f"; следующая: page={int(cur_page) + 1}"
+        except (TypeError, ValueError):
+            pass
+        lines = [head]
+        for p in provs:
             lines.append(f"- {p.get('name')} | id={p.get('id')}"
                          + ("" if p.get("isActive", True) else " | НЕАКТИВЕН"))
         lines.append("Поля конкретного провайдера: "
@@ -2045,17 +2091,34 @@ _DOC_TITLES = {
 
 def _doc_flat(node, prefix=""):
     """prefill wraps every leaf as {"value":…,"isEntered":bool}. Flatten to dotted
-    paths, keeping only leaves the bank actually holds a value for."""
+    paths, keeping only leaves the bank actually holds a value for.
+
+    Lists ARE data here, not structure to skip: a licence's categories and an
+    OSAGO's drivers arrive as {"isEntered": true, "value": [...]}, and the old
+    dict-only recursion dropped exactly those — entered fields, gone without a
+    trace. Scalars join into one readable value; dict elements recurse with an
+    index in the path."""
     out = {}
     if isinstance(node, dict):
         if "isEntered" in node:
-            if node.get("isEntered") and not isinstance(node.get("value"), (dict, list)):
-                out[prefix] = node.get("value")
-            elif isinstance(node.get("value"), dict):
-                out.update(_doc_flat(node["value"], prefix))
+            v = node.get("value")
+            if isinstance(v, dict):
+                out.update(_doc_flat(v, prefix))
+            elif isinstance(v, list):
+                if node.get("isEntered"):
+                    out.update(_doc_flat(v, prefix))
+            elif node.get("isEntered"):
+                out[prefix] = v
             return out
         for k, v in node.items():
             out.update(_doc_flat(v, f"{prefix}.{k}" if prefix else k))
+    elif isinstance(node, list):
+        scalars = [x for x in node if not isinstance(x, (dict, list))]
+        if scalars and len(scalars) == len(node):
+            out[prefix] = ", ".join(str(x) for x in scalars)
+        else:
+            for i, item in enumerate(node):
+                out.update(_doc_flat(item, f"{prefix}[{i}]"))
     return out
 
 @mcp.tool()
@@ -2084,18 +2147,27 @@ def documents(kind: str = "", include_others: bool = False) -> str:
                 mine = own_bd is None or bd is None or bd == own_bd
                 if not mine and not include_others:
                     continue
-                # the same document repeats across sources; keep the richest copy
+                # the same document repeats across sources; MERGE the copies. The
+                # old «richest copy wins» compared field counts, so a field present
+                # only in the smaller copy was silently lost with it.
                 key = (f.get("serial"), f.get("number") or f.get("serialAndNumber"),
                        f.get("person.lastName"), bd)
-                if len(f) > len(seen.get(key, {})):
-                    seen[key] = {**f, "_mine": mine}
+                cur = seen.setdefault(key, {"_mine": mine})
+                for k, v in f.items():
+                    cur.setdefault(k, v)
             for f in seen.values():
                 who = "" if f.get("_mine") else "  ⚠ не ваш документ"
                 num = " ".join(str(f[k]) for k in ("serial", "number", "serialAndNumber")
                                if f.get(k))
                 head = f"{title}: {num or '—'}{who}"
+                # `name` usually duplicates the catalogue title, but for a code
+                # _DOC_TITLES does not know, the raw code IS the title — then the
+                # dropped name was the only human-readable label.
+                hide = {"serial", "number", "serialAndNumber", "_mine"}
+                if str(f.get("name", "")) == title:
+                    hide.add("name")
                 rest = [f"    {k} = {v}" for k, v in sorted(f.items())
-                        if k not in ("serial", "number", "serialAndNumber", "_mine", "name")]
+                        if k not in hide]
                 out.append("\n".join([head] + rest))
         return "\n".join(out) or f"Документов не найдено (kind={kind!r})."
     except Exception as e:
@@ -2350,19 +2422,27 @@ def grocery_rank(query: str, app_id: str = "", point_id: str = "",
 # Pure UI scaffolding in the search response — carries no searchable entity.
 _SEARCH_NOISE = {"masterWidget", "block_marker"}
 
-def _search_rows(hits: list[dict]) -> list[dict]:
-    """Flatten a search response into {type, name, note, id} rows.
+def _search_rows(hits: list[dict]) -> tuple[list[dict], int]:
+    """Flatten a search response into ({type, name, note, id} rows, skipped).
 
     Two hit shapes come back. `afisha`/`movie_main` return typed entities
     (eventId/eventName/objectName). `services` wraps results in `universal_block`
     display cards whose id only exists inside a deeplink
-    ("tinkoffbank://…/Movies?movieId=104321")."""
+    ("tinkoffbank://…/Movies?movieId=104321").
+
+    `skipped` counts hits with neither a name nor an id — dropping them used to be
+    silent, and the «N результатов» header counted only the survivors, so a shape
+    this parser does not know simply vanished. A hit with an id but no name is now
+    KEPT as «[без названия]»: the id is actionable."""
     rows = []
+    skipped = 0
     for hit in hits:
         kind = hit.get("objectType") or "?"
         src = hit.get("objectSource") or {}
         if kind == "universal_block":
-            rows.extend(_search_rows(src.get("objects") or []))
+            sub, sub_skipped = _search_rows(src.get("objects") or [])
+            rows.extend(sub)
+            skipped += sub_skipped
             continue
         if kind in _SEARCH_NOISE:
             continue
@@ -2376,14 +2456,17 @@ def _search_rows(hits: list[dict]) -> list[dict]:
             m = re.search(r"[?&](?:movieId|eventId|id)=([^&]+)", deeplink)
             ident = m.group(1) if m else ident
         if not name:
-            continue
+            if not ident:
+                skipped += 1
+                continue
+            name = "[без названия]"
         if not note:
             venue = src.get("objectName") or ""
             when = src.get("dateForShow") or ""
             price = src.get("priceForShow") or ""
             note = " · ".join(x for x in (venue, when, price) if x)
         rows.append({"type": kind, "name": name, "note": note, "id": ident})
-    return rows
+    return rows, skipped
 
 @mcp.tool()
 def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
@@ -2399,18 +2482,24 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
                    (там нужны app_id/point_id и фильтр «в наличии»)"""
     try:
         s = _require(); s.ensure_fresh()
-        rows = _search_rows(s.app_search(query, screen=screen, limit=limit))
+        hits = s.app_search(query, screen=screen, limit=limit)
+        rows, skipped = _search_rows(hits)
         if not rows:
             return f"По запросу {query!r} в разделе {screen!r} ничего не найдено."
         by_type: dict[str, list[dict]] = {}
         for r in rows:
             by_type.setdefault(r["type"], []).append(r)
-        out = [f"«{query}» в разделе {screen}: {len(rows)} результатов"]
+        head = f"«{query}» в разделе {screen}: {len(rows)} результатов"
+        if skipped:
+            head += f" (+{skipped} нераспознанных скрыто)"
+        if len(hits) >= limit > 0:
+            head += f"; ровно limit={limit} — возможно, есть ещё, увеличь limit"
+        out = [head]
         for kind, items in by_type.items():
             out.append(f"  {kind}:")
             for r in items:
-                out.append(f"    - {r['name'][:56]}"
-                           + (f" | {r['note'][:44]}" if r["note"] else "")
+                out.append(f"    - {_cut(r['name'], 56)}"
+                           + (f" | {_cut(r['note'], 44)}" if r["note"] else "")
                            + (f" | id={r['id']}" if r["id"] else ""))
         return "\n".join(out)
     except Exception as e:
@@ -2420,16 +2509,21 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
 # ── CINEMA ──────────────────────────────────────────────────
 
 @mcp.tool()
-def cinema_search(query: str = "", city: str = "Москва", limit: int = 20) -> str:
+def cinema_search(query: str = "", city: str = "Москва", limit: int = 20,
+                  pages: int = 8) -> str:
     """Найти фильм в прокате и его eventId (нужен для cinema_schedule).
     query — часть названия; пусто = вся сегодняшняя афиша города (её видно
     целиком только при limit=0 — по умолчанию показаны первые 20).
     city — город афиши, по умолчанию Москва. Спроси пользователя, если он его
     не назвал: молчаливая Москва даёт правдоподобный список чужого города.
-    Сам eventId от города не зависит."""
+    Сам eventId от города не зависит.
+    pages — сколько страниц афиши сканировать (по 30 фильмов; раньше потолок
+    8 страниц был зашит). Если шапка говорит «остальные НЕ проверены» —
+    подними pages, limit скан не расширяет."""
     try:
         s = _require(); s.ensure_fresh()
-        movies, scanned, listing = s.cinema_movies(city=city, query=query)
+        movies, scanned, listing = s.cinema_movies(city=city, query=query,
+                                                   max_pages=pages)
         if not movies:
             return (f"В прокате ({city}) ничего не найдено по запросу {query!r} "
                     f"(просмотрено {scanned} из {listing} фильмов афиши).")
@@ -2518,15 +2612,20 @@ def _seat_id_of(seat: dict) -> str:
 
 
 def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
-               kind: str = "movie") -> list[str]:
+               kind: str = "movie", limit: int = 0) -> list[str]:
     """Vacant seats grouped by row, cheapest rows first.
 
     Concerts are printed differently, and must be: cinema_book needs the seat's own
     composite id ("Сектор|цена§~§ticketId|type") passed back verbatim, and this
     renderer only ever printed row and number — so the argument the tool demands was
     obtainable from no tool at all. Concert seats also frequently carry no `pos`, so
-    grouping them by row collapsed the whole hall into a single «ряд —»."""
+    grouping them by row collapsed the whole hall into a single «ряд —».
+
+    `limit` overrides the display caps (40 concert seats / 24 numbers per row);
+    0 keeps the defaults, and the «…ещё N» tail always says how to see the rest."""
     out = []
+    concert_cap = limit if limit > 0 else 40
+    row_cap = limit if limit > 0 else 24
     for hall in halls:
         seats = [s for s in (hall.get("seats") or []) if s.get("status") == "vacant"]
         if max_price:
@@ -2535,15 +2634,16 @@ def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
             if not seats:
                 continue
             out.append(f"{hall.get('hallName','?')} — свободно {len(seats)}")
-            for s in sorted(seats, key=lambda x: float(x.get("price") or 0))[:40]:
+            for s in sorted(seats, key=lambda x: float(x.get("price") or 0))[:concert_cap]:
                 pos = s.get("pos") or {}
                 where = (f"ряд {pos.get('row')} место {pos.get('number')}"
                          if pos.get("row") or pos.get("number") else "без нумерации")
                 sid = _seat_id_of(s)
                 out.append(f"  {float(s.get('price') or 0):.0f} ₽ | {where} | "
                            + (f"seatId={sid}" if sid else "seatId=НЕТ В ОТВЕТЕ"))
-            if len(seats) > 40:
-                out.append(f"  …ещё {len(seats) - 40} мест")
+            if len(seats) > concert_cap:
+                out.append(f"  …ещё {len(seats) - concert_cap} мест "
+                           f"(limit={len(seats)} покажет все)")
             continue
         by_row: dict[str, list] = {}
         for s in seats:
@@ -2557,8 +2657,9 @@ def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
                 continue
             group = sorted(by_row[r], key=lambda s: int((s.get("pos") or {}).get("number") or 0))
             prices = sorted({float(s.get("price") or 0) for s in group})
-            nums = ", ".join(str((s.get("pos") or {}).get("number") or "?") for s in group[:24])
-            more = f" …ещё {len(group) - 24}" if len(group) > 24 else ""
+            nums = ", ".join(str((s.get("pos") or {}).get("number") or "?") for s in group[:row_cap])
+            more = (f" …ещё {len(group) - row_cap} (limit={len(group)} покажет все)"
+                    if len(group) > row_cap else "")
             price = (f"{prices[0]:.0f} ₽" if len(prices) == 1
                      else f"{prices[0]:.0f}–{prices[-1]:.0f} ₽")
             out.append(f"  ряд {r:>3} ({price}): {nums}{more}")
@@ -2566,18 +2667,21 @@ def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
 
 @mcp.tool()
 def cinema_seats(event_id: str, slot_id: str, object_id: str,
-                 row: str = "", max_price: float = 0, kind: str = "movie") -> str:
+                 row: str = "", max_price: float = 0, kind: str = "movie",
+                 limit: int = 0) -> str:
     """Свободные места на сеансе, по рядам. Денег не двигает.
     slot_id и object_id — из cinema_schedule()/concert_schedule().
     row — показать только один ряд, max_price — потолок цены за место.
-    kind — "movie" или "concert"."""
+    kind — "movie" или "concert".
+    limit — поднять кап показа (по умолчанию 40 мест концерта / 24 номера в
+    ряду; хвост «…ещё N» подсказывает значение)."""
     try:
         s = _require(); s.ensure_fresh()
         halls = s.event_seats(event_id, slot_id, object_id, kind=kind)
         if not halls:
             return ("Схема зала пуста. Для концертов со свободной рассадкой "
                     "смотри concert_hall() — там места не нумеруются.")
-        lines = _seat_rows(halls, max_price=max_price, row=row, kind=kind)
+        lines = _seat_rows(halls, max_price=max_price, row=row, kind=kind, limit=limit)
         if not lines:
             return "Свободных мест по заданным условиям нет."
         nxt = ("\n\nДальше: cinema_book(event_id, slot_id, object_id, "
