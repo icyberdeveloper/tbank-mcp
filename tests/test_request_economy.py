@@ -261,11 +261,11 @@ def test_nutrition_is_fetched_concurrently():
 
     class SearchSession(CountingSession):
         # grocery_search posts to search.t-bank-app.ru through _http, not _call_read.
-        def grocery_search(self, query, app_id="", point_id="", **kw):
+        def grocery_search(self, query, app_id="", point_id="", limit=10, **kw):
             with self._lock:
                 self.calls.append("grocery_search")
             time.sleep(self.delay)
-            return goods
+            return goods, len(goods), len(goods)
 
     s = SearchSession({
         "grocery_good": {"good": {"meta": {"nutritionalValue": {
@@ -273,8 +273,8 @@ def test_nutrition_is_fetched_concurrently():
             "value": ""}, "weight": {"value": 100.0, "unit": "GRM"}}}},
     }, delay=per_call)
     started = time.monotonic()
-    rows = s.grocery_candidates("молоко", app_id="204", point_id="5980",
-                                limit=8, with_nutrition=True)
+    rows, _ = s.grocery_candidates("молоко", app_id="204", point_id="5980",
+                                   limit=8, with_nutrition=True)
     elapsed = time.monotonic() - started
 
     check(len(rows) == 8, f"expected 8 candidates, got {len(rows)}")
@@ -288,6 +288,48 @@ def test_nutrition_is_fetched_concurrently():
           f"nutrition still looks sequential: {elapsed:.2f}s vs {sequential:.2f}s serial")
     print(f"  grocery_rank: 8 nutrition lookups in {elapsed:.2f}s "
           f"(sequential would be ~{sequential:.2f}s)")
+
+
+def test_grocery_search_sees_the_whole_page_before_ranking():
+    """grocery_search used to break at the 10th match and sort AFTER the break: a
+    cheaper match at position 15 of the server page was unreachable, and «cheapest»
+    meant cheapest of an arbitrary first ten."""
+    def good(i, price):
+        return {"objectType": "grocery_goods",
+                "objectSource": {"goodForeignId": str(i), "name": f"Молоко №{i}",
+                                 "price": {"value": price},
+                                 "weight": {"value": 900.0, "unit": "GRM"}}}
+    hits = [good(i, 100 + i) for i in range(30)]
+    hits[15] = good(15, 1)             # the cheapest match, beyond the old break
+
+    class Answer:
+        @staticmethod
+        def json():
+            return {"payload": {"sortedByScoreObjects": hits}}
+
+    class SearchStore(CountingSession):
+        def __init__(self):
+            super().__init__({})
+            self.access_token = "tok"
+            self.mobile_sessionid = "sid"
+            self.device_id = self.old_device_id = "dev"
+            self.app_name, self.app_version, self.platform = "mobile", "7.31.6", "ios"
+            self.origin, self.ccc, self.cpswc = "mobile", "true", "true"
+            self.connection_type, self.inache = "WiFi", "drivetransitt"
+            self._http = type("H", (), {"post": lambda *a, **k: Answer()})()
+
+    s = SearchStore()
+    rows, matched, fetched = s.grocery_search("молоко", app_id="204", point_id="5980")
+    check(matched == 30 and fetched == 30,
+          f"the counters must see the whole page: matched={matched}, fetched={fetched}")
+    check(len(rows) == 10, f"the default cut is still 10 rows, got {len(rows)}")
+    check(rows and rows[0]["id"] == "15",
+          f"sorting must run over ALL matches before the cut — the cheap match at "
+          f"position 15 used to be lost to the break: {rows[0] if rows else None}")
+
+    every, m2, _ = s.grocery_search("молоко", app_id="204", point_id="5980", limit=0)
+    check(len(every) == m2 == 30, f"limit=0 must return every match, got {len(every)}")
+    print("  grocery_search: 30 hits ranked before the cut, limit=0 returns them all")
 
 
 def listing(named: dict, amount: int = 120, per_page: int = 30):
@@ -566,6 +608,7 @@ def main():
     test_a_cold_start_add_to_cart_asks_for_the_address_once()
     test_documents_resolves_the_contact_id_once()
     test_nutrition_is_fetched_concurrently()
+    test_grocery_search_sees_the_whole_page_before_ranking()
     test_a_named_film_search_sees_every_page()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()

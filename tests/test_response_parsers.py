@@ -169,6 +169,24 @@ def test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat():
     print("  messenger: a retired token is re-minted once, never shown as a chat")
 
 
+def test_grocery_search_header_is_honest():
+    """The tool header must separate three different numbers: shown, matched, and
+    what the store returned at all — «10 товаров» that silently came out of 25
+    matches is how the old output read as complete."""
+    rows = [{"id": str(i), "name": f"Йогурт {i}", "price": 50 + i, "weight": "",
+             "likely_raw": True} for i in range(10)]
+    out = run(server.grocery_search, Stub(grocery_search=(rows, 25, 30)),
+              "йогурт", "204", "5980")
+    head = out.splitlines()[0]
+    check("показано 10 из 25" in head and "вернула 30" in head,
+          f"the header must say shown/matched/fetched: {head!r}")
+    check("limit=0" in head, f"the header must say how to see the rest: {head!r}")
+    empty = run(server.grocery_search, Stub(grocery_search=([], 0, 0)),
+                "йогурт", "204", "5980")
+    check("Не нашёл" in empty, f"an empty search must stay honest: {empty!r}")
+    print("  grocery_search: the header separates shown / matched / fetched")
+
+
 def test_messenger_paging_arguments_reach_the_client():
     """messenger_conversations(offset=, archived=) must reach the wire as the same
     query params the app sends on every call today (offset / use_is_archived), and
@@ -523,6 +541,7 @@ def main():
     test_a_paid_order_does_not_read_as_unpaid()
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
+    test_grocery_search_header_is_honest()
     test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
     test_delivery_speed_is_read_from_both_slot_shapes()

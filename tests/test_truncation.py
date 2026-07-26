@@ -291,11 +291,30 @@ ROW_TOOLS = [
     ("list_operations", lambda lim: server.list_operations("1111111111", 30, lim),
      AnySession(list_operations=MANY)),
     ("invest_operations", lambda lim: server.invest_operations("2000000001", "", lim),
-     AnySession(invest_operations=MANY)),
+     AnySession(invest_operations=(MANY, False))),
     ("cinema_search", lambda lim: server.cinema_search("", "Москва", lim),
      AnySession(cinema_movies=([{"name": f"Фильм {i}", "eventId": str(i)}
                                 for i in range(200)], 200, 200))),
 ]
+
+
+def test_invest_has_next_is_announced_even_at_limit_zero():
+    """When the bank says hasNext, the HEADER says so — including at limit=0, where
+    every fetched row is shown and more_hint would stay silent. No cursor is sent:
+    a bigger limit is the only capture-backed way to ask for more."""
+    session = AnySession(invest_operations=(MANY[:50], True))
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out = server.invest_operations("2000000001", "", 0)
+        head = out.splitlines()[0]
+        check("у банка есть ещё" in head and "limit" in head,
+              f"hasNext must surface in the header with the recovery arg: {head!r}")
+        check(len([ln for ln in out.splitlines() if ln.startswith("- ")]) == 50,
+              "limit=0 must still render every fetched row")
+    finally:
+        server._require = saved
+    print("  invest_operations: hasNext reaches the header even when nothing is hidden")
 
 
 def test_messenger_messages_window_is_honest():
@@ -440,6 +459,7 @@ def main():
     test_list_tools_report_the_total_they_are_hiding()
     test_list_operations_end_to_end()
     test_limit_zero_means_everything_in_every_list_tool()
+    test_invest_has_next_is_announced_even_at_limit_zero()
     test_messenger_messages_window_is_honest()
     test_every_json_tool_trims_by_records_not_by_characters()
     test_every_row_tool_reports_what_it_hides()

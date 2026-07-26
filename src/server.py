@@ -691,16 +691,27 @@ def grocery_stores(sort_by: str = "", order: str = "asc") -> str:
         return _err(e)
 
 @mcp.tool()
-def grocery_search(query: str, app_id: str = "", point_id: str = "") -> str:
+def grocery_search(query: str, app_id: str = "", point_id: str = "",
+                   limit: int = 10) -> str:
     """Поиск товара по названию. app_id/point_id — из grocery_stores() (обязательны).
-    Возвращает товары с тегом likely_raw (сырой/готовый)."""
+    Возвращает товары с тегом likely_raw (сырой/готовый).
+    limit — сколько показать (0 = все подходящие); в шапке видно, сколько
+    нашлось всего и сколько товаров вообще вернула сеть."""
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
-        results = s.grocery_search(query, app_id=app_id, point_id=point_id)
-        body = "\n".join(f"- id={r['id']} | {r['name'][:40]} | {r['price']}₽ | {r.get('weight','') or '-'} | {'RAW' if r.get('likely_raw') else 'PREP'}"
-            for r in results) or f"Не нашёл '{query}'"
-        return f"[store appId={app_id} pointId={point_id}]\n" + body
+        results, matched, fetched = s.grocery_search(query, app_id=app_id,
+                                                     point_id=point_id, limit=limit)
+        if not results:
+            return f"[store appId={app_id} pointId={point_id}]\nНе нашёл '{query}'"
+        head = (f"[store appId={app_id} pointId={point_id}] "
+                f"«{query}»: показано {len(results)} из {matched} подходящих "
+                f"(сеть вернула {fetched})")
+        if len(results) < matched:
+            head += "; limit=0 — все подходящие"
+        body = "\n".join(f"- id={r['id']} | {_cut(r['name'], 40)} | {r['price']}₽ | {r.get('weight','') or '-'} | {'RAW' if r.get('likely_raw') else 'PREP'}"
+            for r in results)
+        return head + "\n" + body
     except Exception as e:
         return _err(e)
 
@@ -1784,7 +1795,8 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
     какие типы реально пришли в ответе, потом фильтруй по ним."""
     try:
         s = _require(); s.ensure_client_session()
-        ops = s.invest_operations(broker_account_id, operation_type=operation_type, limit=limit)
+        ops, has_next = s.invest_operations(broker_account_id,
+                                            operation_type=operation_type, limit=limit)
         if not ops:
             return "нет операций"
         def render(o):
@@ -1795,9 +1807,14 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
                     f"| {o.get('type', '')} | {_cut(o.get('description', ''), 40)} "
                     f"| {o.get('status', '')}")
         # limit was passed to the API AND then ignored here by a hardcoded [:50],
-        # so invest_operations(limit=200) silently showed 50.
-        return _rows_out(ops, render, limit=limit, total=len(ops),
-                         header="Брокерские операции")
+        # so invest_operations(limit=200) silently showed 50. has_next goes into
+        # the HEADER, not more_hint: the bank holding more back is true even when
+        # every fetched row is shown (limit=0). No cursor is sent — its wire name
+        # is unconfirmed; a bigger limit is the capture-backed way to see more.
+        head = "Брокерские операции"
+        if has_next:
+            head += f" (у банка есть ещё — увеличь limit, сейчас {limit})"
+        return _rows_out(ops, render, limit=limit, total=len(ops), header=head)
     except Exception as e:
         return _err(e)
 
@@ -2304,13 +2321,15 @@ def grocery_rank(query: str, app_id: str = "", point_id: str = "",
             return (f"Неизвестное поле сортировки {sort_by!r}. "
                     f"Доступны: {', '.join(s.SORTABLE_KEYS)} (или пусто — без сортировки).")
         need_nutrition = with_nutrition or key in s.NUTRITION_KEYS
-        rows = s.grocery_candidates(query, app_id=app_id, point_id=point_id,
-                                    limit=limit, with_nutrition=need_nutrition)
+        rows, matched = s.grocery_candidates(query, app_id=app_id, point_id=point_id,
+                                             limit=limit, with_nutrition=need_nutrition)
         if not rows:
             return f"По запросу {query!r} ничего не найдено в магазине {app_id}/{point_id}."
         rows = _rank_rows(rows, key, order)
         n = lambda v: "—" if v is None else f"{v:g}"   # noqa: E731 — часть КБЖУ сеть не публикует
-        head = f"«{query}» — {len(rows)} кандидатов"
+        head = f"«{query}» — показано {len(rows)} из {matched} кандидатов"
+        if len(rows) < matched:
+            head += f" (limit={matched} или limit=0 — все)"
         head += f", сортировка по {key} ({'убыв' if order.lower().startswith('desc') else 'возр'}):" \
             if key else ", порядок магазина (сортировка не запрошена):"
         lines = [head]
@@ -2320,7 +2339,7 @@ def grocery_rank(query: str, app_id: str = "", point_id: str = "",
                 kcal = f"{r['kcal']:.0f}" if r.get("kcal") is not None else "—"
                 line += (f" | {kcal:>5} ккал/100г | Б{n(r.get('protein'))}"
                          f"/Ж{n(r.get('fat'))}/У{n(r.get('carb'))}")
-            lines.append(line + f" | {r['name'][:42]} | id={r['id']}")
+            lines.append(line + f" | {_cut(r['name'], 42)} | id={r['id']}")
         return "\n".join(lines)
     except Exception as e:
         return _err(e)

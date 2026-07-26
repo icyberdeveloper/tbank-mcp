@@ -1289,17 +1289,22 @@ class MobileSession:
                                            "include_cash_in_periods": "true"})
 
     def invest_operations(self, broker_account_id: str, operation_type: str = "",
-                           limit: int = 50) -> list[dict]:
+                           limit: int = 50) -> tuple[list[dict], bool]:
+        """(operations, has_next). has_next comes from the answer's envelope — the
+        request itself is untouched (no cursor param: its wire name is not in any
+        capture; raising `limit` is the confirmed way to see more)."""
         ov = {"brokerAccountId": broker_account_id, "limit": str(limit)}
         if operation_type:
             ov["operationType"] = operation_type
         data = self._call_read("ca_operations", overrides=ov)
         # {"items": [...], "hasNext": …, "nextCursor": …} — _as_list does not know
         # this key and returned the envelope as a single element, so the caller
-        # printed one row reading «- [] ? |».
+        # printed one row reading «- [] ? |». hasNext used to be dropped here too,
+        # so the tool could not say the bank was holding more operations back.
         if isinstance(data, dict) and isinstance(data.get("items"), list):
-            return [o for o in data["items"] if isinstance(o, dict)]
-        return self._as_list(data)
+            return ([o for o in data["items"] if isinstance(o, dict)],
+                    bool(data.get("hasNext")))
+        return self._as_list(data), False
 
     def invest_securities(self, broker_account_id: str = "") -> list[dict]:
         """Positions, as [{brokerAccountId, name, positions: [...]}, …].
@@ -2061,7 +2066,9 @@ class MobileSession:
         fallback = None
         for variant in self._query_variants(query):
             try:
-                r = self.grocery_search(variant, app_id=app_id, point_id=point_id)
+                # limit=0: _pick_candidate must see every match, not the top ten.
+                r, _, _ = self.grocery_search(variant, app_id=app_id,
+                                              point_id=point_id, limit=0)
             except Exception:
                 continue
             quals = self._qualifier_stems(query, variant)
@@ -2344,11 +2351,17 @@ class MobileSession:
         hits = payload.get("sortedByScoreObjects") or []
         return [h for h in hits if isinstance(h, dict)][:limit]
 
-    def grocery_search(self, query: str, app_id: str = "", point_id: str = "") -> list[dict]:
+    def grocery_search(self, query: str, app_id: str = "", point_id: str = "",
+                       limit: int = 10) -> tuple[list[dict], int, int]:
         """Global grocery search via search/fulltext — searches the ENTIRE store
         catalog (not just one category). Uses inStockFilter (only available
-        items). Filters out prepared foods. Returns: id, name, price, weight,
-        store, imageUrl. query = e.g. "свёкла"."""
+        items). Returns (rows, matched, fetched): rows — up to `limit` matches
+        (0 = all of them), matched — how many hits matched the query, fetched —
+        how many goods the search service returned at all. query = e.g. "свёкла".
+
+        The old shape collected matches with a `break` at 10 and SORTED AFTER the
+        break: a cheaper match at position 11 of the server page was silently
+        unreachable, and «cheapest» meant cheapest of an arbitrary first ten."""
         _need_store(app_id, point_id)
         q = query.lower().strip().replace("ё", "е")
         # POST search/fulltext (global search across the store)
@@ -2357,7 +2370,7 @@ class MobileSession:
             "searchTypes": ["grocery_goods", "grocery_categories"],
             "filters": [{"name": "inStockFilter", "type": "grocery_goods",
                          "mode": "always", "value": True}],
-            "maxObjectsCount": 30,
+            "maxObjectsCount": max(30, limit),
             "sortTypes": [{"type": "grocery_goods", "name": "default"}],
             "text": query.replace("ё", "е"),
         }
@@ -2370,12 +2383,14 @@ class MobileSession:
         try:
             data = r.json()
         except Exception:
-            return []
+            return [], 0, 0
         hits = data.get("payload", {}).get("sortedByScoreObjects", [])
         results = []
+        fetched = 0
         for hit in hits:
             if hit.get("objectType") != "grocery_goods":
                 continue
+            fetched += 1
             src = hit.get("objectSource", {})
             if not src:
                 continue
@@ -2411,11 +2426,13 @@ class MobileSession:
                 "store_app_id": str(src.get("applicationId", app_id)),
                 "imageUrl": src.get("imageUrl", ""),
             })
-            if len(results) >= 10:
-                break
-        # sort: likely_raw first, then by price
+        # sort BEFORE the cut: likely_raw first, then by price — so `limit` keeps
+        # the best matches, not whichever ten arrived first.
         results.sort(key=lambda r: (not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
-        return results
+        matched = len(results)
+        if limit > 0:
+            results = results[:limit]
+        return results, matched, fetched
 
     # How long one client/info answer is reused. Short on purpose: unlike areaId,
     # the delivery address CAN change — the user edits it in the app — so this is a
@@ -3173,19 +3190,23 @@ class MobileSession:
     SORTABLE_KEYS = ("price", "weight") + NUTRITION_KEYS
 
     def grocery_candidates(self, query: str, app_id: str = "", point_id: str = "",
-                           limit: int = 8, with_nutrition: bool = False) -> list[dict]:
-        """Search `query` and return the candidates as plain attribute rows.
+                           limit: int = 8, with_nutrition: bool = False,
+                           ) -> tuple[list[dict], int]:
+        """Search `query` and return (candidate rows, how many matched in total).
 
         This deliberately applies NO selection policy — it is the capability, not
         the strategy. Ranking ("cheapest", "lowest calorie", "most protein") is the
         caller's decision; see grocery_rank in server.py and the grocery skill.
+        `limit <= 0` means every match; the matched count is returned so the
+        caller's header can say «N из M» instead of presenting N as everything.
 
         with_nutrition costs one extra /api/grocery/good request per candidate, so
         it is off unless the caller actually needs those fields. A good whose
         nutrition the retailer does not publish keeps None — "not published" is a
         different fact from zero and must not be flattened into one."""
-        found = self.grocery_search(query, app_id=app_id, point_id=point_id)
-        picked = found[:max(1, limit)]
+        found, matched, _ = self.grocery_search(query, app_id=app_id,
+                                                point_id=point_id, limit=0)
+        picked = found if limit <= 0 else found[:limit]
         rows = []
         for item in picked:
             row = dict(item)
@@ -3220,7 +3241,7 @@ class MobileSession:
                     row.update({k: n.get(k) for k in self.NUTRITION_KEYS})
                     if n.get("grams"):
                         row["weight"] = n["grams"]
-        return rows
+        return rows, matched
 
     # ---- cinema ----------------------------------------------------------
 
