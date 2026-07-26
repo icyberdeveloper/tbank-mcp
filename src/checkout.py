@@ -398,7 +398,15 @@ def checkout(session, app_id: str = "", point_id: str = "",
             stage = pbody.get("stage", {}) if isinstance(pbody, dict) else {}
             payment_id = pbody.get("paymentId", "") if isinstance(pbody, dict) else ""
             status = stage.get("status", "")
-            p_code = str(pbody.get("resultCode") or pbody.get("errorCode") or status or "") if isinstance(pbody, dict) else ""
+            # On 4xx the gate answers problem+json — {"type": "payment-gate/…",
+            # "title": "Недостаточно средств", "detail": "…"} — not the
+            # resultCode envelope, so `type` is the code and title/detail are
+            # the only human-readable cause the user will ever get.
+            p_code = str(pbody.get("resultCode") or pbody.get("errorCode") or pbody.get("type") or status or "") if isinstance(pbody, dict) else ""
+            p_err = ""
+            if isinstance(pbody, dict):
+                p_err = ": ".join(s for s in (str(pbody.get("title") or "").strip(),
+                                              str(pbody.get("detail") or "").strip()) if s)[:200]
             obs.emit("payment", attempt_id=attempt_id, app_id=app_id, amount=actual_sum,
                      http_status=pay_res.get("status"), app_code=p_code,
                      order_id_present=bool(order_id), payment_id_present=bool(payment_id),
@@ -453,6 +461,7 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 f"payment not SUCCESS (order {order_id} exists, stage={status!r}, "
                 f"http={pay_res.get('status')}, order reads {order_state or 'unknown'!r}"
                 + (", the payment request TIMED OUT" if pay_res.get("timedOut") else "")
-                + ") — order may be unpaid/pending; do NOT retry blindly")
+                + ") — order may be unpaid/pending; do NOT retry blindly"
+                + (f"\nШлюз ответил: {p_err} [{p_code}]" if p_err else ""))
         finally:
             browser.close()

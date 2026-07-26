@@ -492,6 +492,44 @@ def test_lost_payment_answer_is_reconciled_not_declared_unknown():
     print("  checkout: lost answer reconciled by lookup, real failures still UNKNOWN")
 
 
+def test_payment_gate_problem_json_reaches_the_user():
+    """A 4xx from the payment gate arrives as problem+json, and its title/detail is
+    the only actionable cause ("Недостаточно средств"). It used to land in
+    attempts.jsonl and nowhere else: the tool said "payment not SUCCESS, http=422"
+    and the agent went hunting for session bugs while the account was simply short
+    of money. The message must carry title/detail, and the diagnostics event must
+    carry the problem `type` as app_code instead of an empty string."""
+    from src import observability as obs
+    from src.checkout import CheckoutUnknown
+
+    problem = {"status": 422, "body": {
+        "type": "payment-gate/balance-otb-is-spent",
+        "title": "Недостаточно средств", "status": 422,
+        "detail": "Операция не может быть выполнена, недостаточно средств"}}
+    lookup_new = {"status": 200, "body": {"payload": {"order": {"status": "CREATED"}}}}
+
+    events = []
+    saved_emit = obs.emit
+    obs.emit = lambda step, **f: events.append((step, f))
+    try:
+        _, exc, _, _ = run_checkout(routes(problem, order_lookup=lookup_new))
+    finally:
+        obs.emit = saved_emit
+
+    check(isinstance(exc, CheckoutUnknown), f"a 422 must stay UNKNOWN: {exc!r}")
+    check("Недостаточно средств" in str(exc),
+          f"the gate's title must reach the user: {exc}")
+    check("недостаточно средств" in str(exc).split("Недостаточно средств", 1)[1],
+          f"the gate's detail must reach the user too: {exc}")
+    check("balance-otb-is-spent" in str(exc),
+          f"the problem type must reach the user: {exc}")
+
+    pay_events = [f for step, f in events if step == "payment"]
+    check(bool(pay_events), f"no payment event was emitted: {events}")
+    check(pay_events[-1].get("app_code") == "payment-gate/balance-otb-is-spent",
+          f"diagnostics must carry the problem type as app_code: {pay_events[-1]}")
+
+
 def test_cart_readiness_distinguishes_not_up_from_empty():
     """The poll used to wait for a NON-EMPTY cart, so a genuinely empty cart burned
     the full deadline and then reported the wrong cause."""
