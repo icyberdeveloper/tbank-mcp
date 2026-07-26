@@ -23,7 +23,7 @@ MCP работает с настоящей афишей Т-Банка: брон�
 | `cinema_search(query, city)` | Только фильмы в сегодняшнем прокате города | нет |
 | `cinema_schedule(event_id, date, cinema, around, window_min, city)` | Сеансы фильма на дату. Отдаёт `slotId`, `objectId`, цену, зал. `city` — тот же, что в `cinema_search`: он задаёт и город, и точку сортировки по расстоянию (по умолчанию Москва, молча) | нет |
 | `concert_schedule(event_id)` | Показы концерта: площадка, дата, `slotId`, `objectId` | нет |
-| `cinema_seats(event_id, slot_id, object_id, row, max_price, kind)` | Свободные места по рядам с ценами | нет |
+| `cinema_seats(event_id, slot_id, object_id, row, max_price, kind, limit)` | Свободные места по рядам с ценами; хвост «…ещё N» снимается `limit` | нет |
 | `concert_hall(event_id, slot_id, object_id)` | Секторы со свободной рассадкой (входные, фан-зоны) | нет |
 | `cinema_book(event_id, slot_id, object_id, seats, kind)` | **Бронь мест.** Создаёт заказ, но НЕ платит | нет |
 | `ticket_pay(order_id, amount, nfs_payment_token, account_id)` | **Оплата брони** | **ДА** |

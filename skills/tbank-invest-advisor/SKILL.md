@@ -15,7 +15,7 @@ description: |
 |---|---|
 | `invest_accounts()` | Инвест-счета (брокерские + InvestBox). Отсюда `brokerAccountId` для остальных тулов |
 | `invest_portfolio(broker_account_id, days)` | Статистика портфеля (сумма, P&L, доходность) |
-| `invest_operations(broker_account_id, operation_type, limit)` | Операции (покупки/продажи/вводы) |
+| `invest_operations(broker_account_id, operation_type, limit)` | Операции (покупки/продажи/вводы). «У банка есть ещё» в шапке — подними `limit` |
 | `invest_securities(broker_account_id)` | Ценные бумаги в портфеле (акции/облигации/ETF) |
 | `get_data("invest_offers")` | Предложения InvestBox |
 | `get_data("invest_yield")` | Доходность продуктов InvestBox |

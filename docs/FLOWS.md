@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **59 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **62 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -41,7 +41,9 @@ You normally just call a read tool; the above runs under the hood. Call
 ## 2. Read accounts + recent purchases + spending
 
 1. `list_accounts` → accounts + cards (take an `account.id`).
-2. `list_operations(account_id, days=30)` → recent purchases.
+2. `list_operations(account_id, days=30)` → recent purchases. `limit=0` shows
+   every operation of the period; `desc_len=0` prints descriptions whole (the
+   40-char column marks its cuts with «…»).
 3. `spending_categories(account_id, days=30)` → spend grouped by category (+ share %).
    (or `operations_histogram(account_id, days, period, group_by)` for flexible
    breakdown by category/merchant/mcc.)
@@ -58,8 +60,10 @@ You normally just call a read tool; the above runs under the hood. Call
 > return `NO_STORE_CONTEXT`, and mixing contexts makes the cart look empty. Keep app_id/pointId
 > identical across the whole add → cart → checkout flow.
 
-1. `grocery_search(query, app_id, point_id)` → find goods by name and get their
-   `id`, which every cart call addresses them by. (`grocery_plan_order` does the
+1. `grocery_search(query, app_id, point_id, limit)` → find goods by name and get
+   their `id`, which every cart call addresses them by. The header separates
+   shown / matched / what the store returned; `limit=0` shows every match.
+   (`grocery_plan_order` does the
    same for a whole shopping list at once, and `grocery_rank` sorts the hits —
    see §10.)
 2. `grocery_add_to_cart` (adds) / `grocery_set_cart` (absolute counts, `count: 0` removes, `clear=True` empties) → both go through cart/set on the
@@ -133,9 +137,12 @@ You normally just call a read tool; the above runs under the hood. Call
 
 4. `payment_providers()` → the 19 provider GROUPS. `payment_providers(group, query)`
    → providers inside one (102 571 exist in total across 1026 pages, so always
-   filter). `payment_providers(provider_id, group)` → that provider's payment FIELD
-   SCHEMA: field id, human name, required flag, hint and a validating `regexp`.
-   That schema is the only source of the field names — they differ per provider.
+   filter; the header chains `page=N+1`). `payment_providers(provider_id, group)`
+   → that provider's payment FIELD SCHEMA: field id, human name, required flag,
+   hint and a validating `regexp`. That schema is the only source of the field
+   names — they differ per provider. The id lookup scans up to `pages=` catalogue
+   pages (default 5, 100 records each) and says so when a not-found is only a
+   search boundary — with `group` the record lands on the first page.
 
    The group filter matches the provider's `groupId`, which does not always equal
    the name the groups list prints: «ЖКХ» is `Коммунальные платежи` (63 889
@@ -185,6 +192,8 @@ You normally just call a read tool; the above runs under the hood. Call
 1. `invest_accounts()` → InvestBox/brokerage accounts (take `brokerAccountId`).
 2. `invest_portfolio(broker_account_id, days)` → portfolio statistics.
 3. `invest_operations(broker_account_id, operation_type, limit)` → broker ops.
+   When the bank holds more than `limit`, the header says so — raise `limit`
+   (there is no cursor: its wire name is in no capture).
 4. `invest_securities(broker_account_id)` → purchased stocks/bonds/ETF.
 
 Extras have no tool of their own — reach them through `get_data(section)`:

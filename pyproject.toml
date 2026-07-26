@@ -1,6 +1,6 @@
 [project]
 name = "tbank-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for the T-Bank (Т-Банк) mobile personal-banking API (capture-driven, headless, pinned-root TLS)."
 readme = "README.md"
 requires-python = ">=3.11"

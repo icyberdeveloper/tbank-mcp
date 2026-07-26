@@ -24,7 +24,7 @@ MCP обращается к реальным магазинам Т-Банка �
 | Тул | Что делает |
 |---|---|
 | `grocery_stores(sort_by, order)` | Доступные магазины: appId, pointId, окно ближайшей доставки, её цена, минимальная сумма, кешбэк. **Источник appId/pointId для всех остальных тулов.** `sort_by` ∈ `speed` \| `price` \| `min_sum`; пусто — порядок банка. |
-| `grocery_search(query, app_id, point_id)` | Поиск товара по названию — возвращает товары с тегом `likely_raw`. **app_id/point_id обязательны.** |
+| `grocery_search(query, app_id, point_id, limit)` | Поиск товара по названию — возвращает товары с тегом `likely_raw`. **app_id/point_id обязательны.** Шапка говорит «показано X из Y»; `limit=0` — все подходящие. |
 | `grocery_rank(query, app_id, point_id, sort_by, order, limit, with_nutrition)` | Кандидаты с атрибутами (цена, вес, КБЖУ), опционально отсортированные. Стратегию задаёшь ты — см. Шаг 4. Без `sort_by` — порядок магазина. |
 | `grocery_good_info(good_id, app_id, point_id)` | Карточка товара: состав, КБЖУ на 100 г и на упаковку, срок хранения, производитель. |
 | `grocery_plan_order(ingredients, app_id, point_id)` | Умный планировщик: ищет каждый ингредиент (сначала custom_ordered, потом глобально) → план. **app_id/point_id обязательны.** |

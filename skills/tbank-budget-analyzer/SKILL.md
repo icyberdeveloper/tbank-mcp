@@ -15,7 +15,7 @@ description: |
 | Тул | Что показывает |
 |---|---|
 | `list_accounts()` | Счета + балансы |
-| `list_operations(account_id, days)` | Операции за период |
+| `list_operations(account_id, days, limit, desc_len)` | Операции за период; `limit=0` — все, `desc_len=0` — описания целиком |
 | `spending_categories(account_id, days)` | Траты по категориям (+ % от суммы) |
 | `operations_histogram(account_id, days, period, group_by)` | График трат (по дням/неделям/категориям) |
 | `get_data("subscriptions")` | Подписки (банковские сервисы) |

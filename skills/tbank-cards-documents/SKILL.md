@@ -20,7 +20,7 @@ description: |
 | `list_cards()` | Все карты: `id`, `ucid`, счёт, тип, баланс |
 | `card_limits(ucid)` | Лимиты на покупки и снятие + сколько израсходовано |
 | `card_requisites(ucid, reveal)` | Держатель, срок, номер. По умолчанию маскирован |
-| `card_operations(card_id, days, limit)` | Операции по ОДНОЙ карте |
+| `card_operations(card_id, days, limit, desc_len)` | Операции по ОДНОЙ карте; `desc_len=0` — описания целиком |
 | `account_requisites(account_id, currencies)` | Реквизиты для входящего перевода |
 | `documents(kind, include_others)` | Паспорт, загран, права, СНИЛС, ИНН, ОСАГО, ПТС |
 | `bank_documents()` | Справки банка (о движении средств и т.п.) |
