@@ -268,7 +268,7 @@ Travel is split by vertical, because each one authorizes differently:
    query. The MCP ranks; WHICH ranking to use for a given phrase lives in the
    grocery skill, and applies only on an explicit request.
 
-## 11. Tickets — cinema and concerts  (REAL money at step 5)
+## 11. Tickets — cinema, concerts, theatre and exhibitions  (REAL money at step 5)
 
 Full detail, including the confirmation wording, lives in the `tbank-tickets`
 skill. The order here is the part you must not improvise:
@@ -294,6 +294,14 @@ skill. The order here is the part you must not improvise:
    Only after the user confirms a concrete sum and concrete seats. The tool
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
+
+> **Which vertical.** `kind` selects it: `кино` | `концерт` | `театр` | `выставка`
+> (the API's own `movie`/`concert`/`spectacle`/`exhibition` are accepted too). They
+> differ in exactly two ways that matter here: cinema numbers its seats
+> (`ряд:место`, the rest use a composite `seatId`) and scopes showings by date, so
+> cinema listings come from `cinema_schedule` and everything else from
+> `concert_schedule`. An unknown kind is refused rather than defaulted to cinema —
+> defaulting is how a theatre booking would have been posted to /order/create/movie.
 
 7. `ticket_cancel(order_id, kind, payment_id, force)` → cancels. It reads the
    order first and, when the bank has flagged it uncancelable, does not send the

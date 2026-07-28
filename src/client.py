@@ -3365,36 +3365,63 @@ class MobileSession:
     # ---- ticket booking (cinema + concerts) ------------------------------
 
     def event_seats(self, event_id: str, slot_id: str, object_id: str,
-                    kind: str = "movie") -> list[dict]:
+                    kind: str = "movie", sector_id: str = "") -> list[dict]:
         """Hall layout for one showing: every seat with status and price.
 
-        Cinemas key seats as "row:number". Concerts use a composite string
-        ("Фанзона|5000§~§54093386|default") that must be passed back to
-        order/create verbatim — it encodes sector, price and ticket id."""
+        Cinemas key seats as "row:number". The other three verticals use a
+        composite string ("Фанзона|5000§~§54093386|default") that must be passed
+        back to order/create verbatim — it encodes sector, price and ticket id.
+
+        sector_id narrows the answer to one sector; the app sends it when the
+        buyer has already picked one off the hall map."""
         key = vertical(kind)["sectors_key"]
-        data = self._call_read(key, overrides={
-            "eventId": str(event_id), "slotId": str(slot_id),
-            "objectId": str(object_id)})
+        params = {"eventId": str(event_id), "slotId": str(slot_id),
+                  "objectId": str(object_id)}
+        if sector_id:
+            params["sectorId"] = str(sector_id)
+        data = self._call_read(key, overrides=params)
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []
 
-    def concert_hall(self, event_id: str, slot_id: str, object_id: str) -> dict:
-        """Free-seating concert venues answer here instead of /sectors: sectors
-        with `freeSeating: true` and a ticket count rather than a seat grid.
+    def concert_hall(self, event_id: str, slot_id: str, object_id: str,
+                     kind: str = "concert") -> dict:
+        """Free-seating venues answer here instead of /sectors: sectors with
+        `freeSeating: true` and a ticket count rather than a seat grid.
+
+        Only concerts and theatre have this screen — the captures hold no
+        /api/scheme/hall/exhibition at all, and cinemas number their seats.
 
         READ ONLY on purpose — the capture has no order/create example for this
         purchase screen, so the request body for it is unknown and this client
         will not invent one."""
-        data = self._call_read("scheme_hall_concert", overrides={
+        key = vertical(kind)["hall_key"]
+        if not key:
+            raise TbankApiError(
+                "NO_FREE_SEATING",
+                f"{kind}: у этой вертикали нет схемы со свободной рассадкой — "
+                "места смотри в event_seats()")
+        data = self._call_read(key, overrides={
             "eventId": str(event_id), "slotId": str(slot_id),
             "objectId": str(object_id)})
         return data if isinstance(data, dict) else {}
 
-    def concert_schedule(self, event_id: str) -> list[dict]:
-        """Showings of one concert. Unlike movies these are not date-scoped."""
-        data = self._call_read("schedule_concert", body={"eventId": str(event_id)})
+    def event_showings(self, event_id: str, kind: str = "concert",
+                       object_id: str = "") -> list[dict]:
+        """Showings of one concert, play or exhibition.
+
+        Unlike movies these carry no date in the request and the answer covers
+        everything scheduled ahead, so filtering by day is the caller's job.
+        object_id narrows it to a single venue."""
+        body: dict = {"eventId": str(event_id)}
+        if object_id:
+            body["objectId"] = str(object_id)
+        data = self._call_read(vertical(kind)["schedule_key"], body=body)
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []
+
+    def concert_schedule(self, event_id: str) -> list[dict]:
+        """Kept as the concert-shaped entry point into event_showings()."""
+        return self.event_showings(event_id, kind="concert")
 
     def create_ticket_order(self, event_id: str, slot_id: str, object_id: str,
                             seats: list[dict], kind: str = "movie") -> dict:

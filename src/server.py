@@ -2653,20 +2653,28 @@ def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
         seats = [s for s in (hall.get("seats") or []) if s.get("status") == "vacant"]
         if max_price:
             seats = [s for s in seats if float(s.get("price") or 0) <= max_price]
-        if kind == "concert":
+        if vertical(kind)["seat_render"] != "grid":
             if not seats:
                 continue
-            out.append(f"{hall.get('hallName','?')} — свободно {len(seats)}")
-            for s in sorted(seats, key=lambda x: float(x.get("price") or 0))[:concert_cap]:
+            # Free seating hands out one entry per available TICKET, all sharing a
+            # seatId — so len(seats) counts tickets, not choices, and printing them
+            # straight repeats the same line dozens of times. seatsQuantity is the
+            # sector's own count and is what the app shows.
+            uniq: dict = {}
+            for s in seats:
+                uniq.setdefault(_seat_id_of(s) or len(uniq), s)
+            free = int(hall.get("seatsQuantity") or 0) or len(seats)
+            out.append(f"{hall.get('hallName','?')} — свободно {free}")
+            for s in sorted(uniq.values(), key=lambda x: float(x.get("price") or 0))[:concert_cap]:
                 pos = s.get("pos") or {}
                 where = (f"ряд {pos.get('row')} место {pos.get('number')}"
                          if pos.get("row") or pos.get("number") else "без нумерации")
                 sid = _seat_id_of(s)
                 out.append(f"  {float(s.get('price') or 0):.0f} ₽ | {where} | "
                            + (f"seatId={sid}" if sid else "seatId=НЕТ В ОТВЕТЕ"))
-            if len(seats) > concert_cap:
-                out.append(f"  …ещё {len(seats) - concert_cap} мест "
-                           f"(limit={len(seats)} покажет все)")
+            if len(uniq) > concert_cap:
+                out.append(f"  …ещё {len(uniq) - concert_cap} вариантов "
+                           f"(limit={len(uniq)} покажет все)")
             continue
         by_row: dict[str, list] = {}
         for s in seats:
@@ -2691,26 +2699,35 @@ def _seat_rows(halls: list[dict], max_price: float = 0, row: str = "",
 @mcp.tool()
 def cinema_seats(event_id: str, slot_id: str, object_id: str,
                  row: str = "", max_price: float = 0, kind: str = "movie",
-                 limit: int = 0) -> str:
-    """Свободные места на сеансе, по рядам. Денег не двигает.
+                 limit: int = 0, sector_id: str = "") -> str:
+    """Свободные места на сеансе. Денег не двигает.
     slot_id и object_id — из cinema_schedule()/concert_schedule().
     row — показать только один ряд, max_price — потолок цены за место.
-    kind — "movie" или "concert".
-    limit — поднять кап показа (по умолчанию 40 мест концерта / 24 номера в
-    ряду; хвост «…ещё N» подсказывает значение)."""
+    kind — "кино" | "концерт" | "театр" | "выставка" (принимает и movie /
+    concert / spectacle / exhibition).
+    sector_id — показать один сектор; без него приходят все.
+    limit — поднять кап показа (по умолчанию 40 мест / 24 номера в ряду;
+    хвост «…ещё N» подсказывает значение).
+
+    У кино места нумерованные — бронь идёт как "ряд:место". У остальных трёх
+    вертикалей место опознаётся составным seatId, и его надо вернуть в
+    cinema_book ЦЕЛИКОМ, как напечатано."""
     try:
         s = _require(); s.ensure_fresh()
-        halls = s.event_seats(event_id, slot_id, object_id, kind=kind)
+        v = vertical(kind)
+        halls = s.event_seats(event_id, slot_id, object_id, kind=kind,
+                              sector_id=sector_id)
         if not halls:
-            return ("Схема зала пуста. Для концертов со свободной рассадкой "
-                    "смотри concert_hall() — там места не нумеруются.")
+            hint = (" Для свободной рассадки смотри concert_hall(kind=…) — "
+                    "там места не нумеруются." if v["hall_key"] else "")
+            return "Схема зала пуста." + hint
         lines = _seat_rows(halls, max_price=max_price, row=row, kind=kind, limit=limit)
         if not lines:
             return "Свободных мест по заданным условиям нет."
         nxt = ("\n\nДальше: cinema_book(event_id, slot_id, object_id, "
-               "seats=\"<seatId>,<seatId>\", kind=\"concert\") — передавай seatId "
+               f"seats=\"<seatId>,<seatId>\", kind=\"{kind}\") — передавай seatId "
                "ЦЕЛИКОМ, как напечатано выше. Это БРОНЬ без оплаты."
-               if kind == "concert" else
+               if v["seat_render"] != "grid" else
                "\n\nДальше: cinema_book(event_id, slot_id, object_id, seats=\"ряд:место,…\")"
                " — это БРОНЬ без оплаты.")
         return "\n".join(lines) + nxt
@@ -2718,13 +2735,18 @@ def cinema_seats(event_id: str, slot_id: str, object_id: str,
         return _err(e)
 
 @mcp.tool()
-def concert_hall(event_id: str, slot_id: str, object_id: str) -> str:
-    """Секторы концерта со свободной рассадкой (входные билеты, фан-зоны).
-    Только чтение: примера создания заказа для такого экрана в захвате нет,
-    поэтому бронировать отсюда MCP не умеет — только смотреть наличие."""
+def concert_hall(event_id: str, slot_id: str, object_id: str,
+                 kind: str = "concert") -> str:
+    """Секторы со свободной рассадкой (входные билеты, фан-зоны).
+    kind — "концерт" или "театр": у кино места нумерованные, а у выставок
+    такого экрана в API нет вовсе.
+
+    Только чтение: примера создания заказа именно с этого экрана в захвате нет,
+    поэтому бронировать отсюда MCP не умеет — только смотреть наличие. Сами
+    места с их seatId видны в cinema_seats(kind=…)."""
     try:
         s = _require(); s.ensure_fresh()
-        data = s.concert_hall(event_id, slot_id, object_id)
+        data = s.concert_hall(event_id, slot_id, object_id, kind=kind)
         info = data.get("info") or {}
         sectors = data.get("sectors") or []
         if not sectors:
@@ -2737,17 +2759,27 @@ def concert_hall(event_id: str, slot_id: str, object_id: str) -> str:
                        f"{'есть' if sec.get('isTicketsAvailable') else 'нет'} "
                        f"({sec.get('availableTickets', 0)} шт) | "
                        f"{f'{p:.0f} ₽' if p else 'цена не указана'}")
-        return "\n".join(out) + "\n\nБронирование таких секторов через MCP не реализовано."
+        return ("\n".join(out) +
+                "\n\nОтсюда MCP не бронирует: захвата заказа именно с этого экрана нет. "
+                "Места сектора со своими seatId — cinema_seats(sector_id=…, kind=…).")
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
-def concert_schedule(event_id: str) -> str:
-    """Показы концерта: площадка, дата, slotId и objectId для cinema_seats().
+def concert_schedule(event_id: str, kind: str = "concert",
+                     object_id: str = "") -> str:
+    """Показы концерта, спектакля или выставки: площадка, дата, slotId и
+    objectId для cinema_seats().
+    kind — "концерт" | "театр" | "выставка". Кино сюда НЕ ходит: у него показы
+    привязаны к дате, это cinema_schedule(event_id, date).
+    object_id — сузить до одной площадки.
+
+    Даты в запросе нет: приходит всё будущее сразу, поэтому нужный день
+    выбирай из напечатанного.
     event_id — из search_app(query, screen="afisha")."""
     try:
         s = _require(); s.ensure_fresh()
-        venues = s.concert_schedule(event_id)
+        venues = s.event_showings(event_id, kind=kind, object_id=object_id)
         if not venues:
             return f"Показов для события {event_id} не найдено."
         out = []
@@ -2758,9 +2790,18 @@ def concert_schedule(event_id: str) -> str:
                        f"| objectId={info.get('objectId','?')}")
             for ev in (v.get("events") or []):
                 for sl in (ev.get("slots") or []):
-                    price = (sl.get("prices") or {}).get("fix")
-                    out.append(f"    {str(sl.get('startDateTime',''))[:16]} | "
-                               f"{f'{price:.0f} ₽' if price else 'цена по секторам'} "
+                    prices = sl.get("prices") or {}
+                    fix, lo, hi = prices.get("fix"), prices.get("min"), prices.get("max")
+                    # Theatre and exhibitions price by sector, so a single `fix`
+                    # is the exception here rather than the rule.
+                    if fix:
+                        money = f"{fix:.0f} ₽"
+                    elif lo or hi:
+                        money = (f"{lo:.0f}–{hi:.0f} ₽" if lo and hi and lo != hi
+                                 else f"от {(lo or hi):.0f} ₽")
+                    else:
+                        money = "цена по секторам"
+                    out.append(f"    {str(sl.get('startDateTime',''))[:16]} | {money} "
                                f"| slotId={sl.get('slotId','?')}")
         return "\n".join(out)
     except Exception as e:
@@ -2772,17 +2813,21 @@ def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,
     """ЗАБРОНИРОВАТЬ места. Создаёт заказ, но НЕ платит — деньги списывает
     отдельный ticket_pay(). Неоплаченная бронь отваливается сама.
 
+    kind — "кино" | "концерт" | "театр" | "выставка".
     seats — через запятую: для кино "7:10,7:11" (ряд:место из cinema_seats),
-    для концертов — составные seatId из cinema_seats(kind="concert") как есть.
+    для остальных — составные seatId из cinema_seats(kind=…) как есть.
+
+    seat_type применяется ТОЛЬКО к кино: у трёх других вертикалей поля type в
+    запросе нет вовсе — так в захвате.
 
     Покажи пользователю итоговую сумму со сбором ДО вызова ticket_pay."""
     try:
         s = _require(); s.ensure_fresh()
+        t = vertical(kind)["seat_type"]
         ids = [x.strip() for x in seats.split(",") if x.strip()]
         if not ids:
             return "Не переданы места. Пример: seats=\"7:10,7:11\"."
-        payload = ([{"id": i} for i in ids] if kind == "concert"
-                   else [{"id": i, "type": seat_type} for i in ids])
+        payload = [{"id": i, **({"type": seat_type} if t else {})} for i in ids]
         res = s.create_ticket_order(event_id, slot_id, object_id, payload, kind=kind)
         order = res.get("order") or {}
         cart = res.get("cart") or []

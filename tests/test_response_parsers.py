@@ -629,9 +629,39 @@ def test_search_keeps_the_venues_it_used_to_drop():
     print("  search: venue hits keep their name and objectId; events unchanged")
 
 
+def test_free_seating_counts_choices_not_tickets():
+    """A free-seating sector returns one entry per available TICKET, all sharing a
+    seatId. Counting them made «свободно» a ticket count — 40 for a sector with
+    one choice — and printing them straight repeated the same line forty times.
+    seatsQuantity is the sector's own number and is what the app shows."""
+    hall = {"hallName": "Танцпол", "seatsQuantity": 72, "seats": [
+        {"status": "vacant", "price": 5500, "id": "Танцпол|5500§~§1|default"}
+        for _ in range(40)
+    ] + [{"status": "vacant", "price": 3900, "id": "Танцпол|3900§~§2|default"}]}
+    out = run(server.cinema_seats, Stub(event_seats=[hall]),
+              "e1", "s1", "o1", "", 0, "концерт")
+    check("свободно 72" in out,
+          f"the sector's own count must be printed, not the ticket rows: {out!r}")
+    check(out.count("Танцпол|5500") == 1,
+          f"one seatId must print once, not once per ticket: {out!r}")
+    check("Танцпол|3900" in out, f"the other choice went missing: {out!r}")
+
+    # With no seatsQuantity the row count is still the best available answer.
+    bare = {"hallName": "Партер", "seats": [
+        {"status": "vacant", "price": 100, "id": "a"},
+        {"status": "vacant", "price": 200, "id": "b"}]}
+    out2 = run(server.cinema_seats, Stub(event_seats=[bare]),
+               "e1", "s1", "o1", "", 0, "театр")
+    check("свободно 2" in out2, f"fallback count is wrong: {out2!r}")
+    check('kind="театр"' in out2,
+          f"the next-step hint must echo the kind the caller used: {out2!r}")
+    print("  free seating: sector count, one line per choice, not per ticket")
+
+
 def main():
     print("response parsers:")
     test_search_keeps_the_venues_it_used_to_drop()
+    test_free_seating_counts_choices_not_tickets()
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
     test_concert_seats_print_the_id_the_booking_tool_demands()
     test_a_paid_order_does_not_read_as_unpaid()
