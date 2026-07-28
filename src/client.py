@@ -3577,6 +3577,40 @@ class MobileSession:
             uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
         return uniq, amount
 
+    def ticket_artifacts(self, order_id: str) -> dict:
+        """What is actually presented at the door, for one order.
+
+        It lives in the ORDERS FEED, in the order's `fields` — not in
+        order_details, which carries the booking code and nothing else. The
+        obvious-looking /api/tickets/get is dead: four calls, four code=228, so no
+        template exists for it and none should be added.
+
+        Coverage is partial and the caller has to say so: across 75 afisha orders
+        every one carried a reservationCode but only 53 carried a `qr`, and the
+        partners differ in what they hand out — Рамблер gives a pdfUrl, Ticketland
+        gives neither. An unpaid reservation is not in this feed at all, so an
+        empty answer means «no ticket yet», not «no such order»."""
+        row = next((o for o in self.orders()
+                    if str(o.get("orderId")) == str(order_id)), None)
+        if row is None:
+            return {}
+        f = row.get("fields") or {}
+        return {
+            "found": True,
+            "status": str(row.get("status") or ""),
+            "event": str(f.get("eventName") or row.get("title") or ""),
+            "venue": str(f.get("objectName") or f.get("objectForeignName") or ""),
+            "hall": str(f.get("hallName") or ""),
+            "partner": str(f.get("partnerName") or ""),
+            "reservation_code": str(f.get("reservationCode") or ""),
+            # A short payload string ("WS7BZJW"), not an image: it is what the
+            # scanner reads, and rendering it as a barcode is the client's job.
+            "qr": str(f.get("qr") or ""),
+            "barcode_type": str(f.get("barcodeType") or ""),
+            "pdf_url": str(f.get("pdfUrl") or ""),
+            "ticket_url": str(f.get("ticketUrl") or ""),
+        }
+
     # ---- venues ----------------------------------------------------------
 
     PLACES_PAGE = 100              # the endpoint's ceiling: 116 answers 400

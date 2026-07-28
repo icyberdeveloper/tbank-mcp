@@ -752,9 +752,50 @@ def test_a_cinema_repertoire_reads_as_films_not_as_venues():
     print("  schedule: a venue's day lists films, a film's day lists venues")
 
 
+def test_the_ticket_says_what_it_has_and_what_it_lacks():
+    """What is presented at the door lives in the orders feed, and how much of it
+    exists depends on the partner: across 75 real afisha orders every one carried a
+    booking code, 53 carried a QR, and Ticketland hands out neither QR nor PDF.
+
+    So «no QR» must read as a fact about that partner, not as a failure — and an
+    order missing from the feed means the ticket is not issued yet, which is a
+    different thing from the order not existing."""
+    feed = [
+        {"orderId": "1", "status": "CREATED_DYNAMIC", "fields": {
+            "eventName": "Майкл", "hallName": "ЗАЛ №7", "reservationCode": "WS7BZJW",
+            "qr": "WS7BZJW", "partnerName": "Рамблер/Касса"}},
+        {"orderId": "2", "status": "CREATED_DYNAMIC", "fields": {
+            "eventName": "Лекция", "reservationCode": "115382035",
+            "pdfUrl": "https://example.invalid/t.pdf", "partnerName": "Рамблер"}},
+        {"orderId": "3", "status": "CREATED_DYNAMIC", "fields": {
+            "eventName": "Стас", "reservationCode": "85776589",
+            "partnerName": "Ticketland"}},
+    ]
+    s = Stub(orders=feed)
+
+    withqr = run(server.ticket_qr, s, "1")
+    check("WS7BZJW" in withqr, f"the QR payload must be printed: {withqr!r}")
+    check("не картинка" in withqr,
+          f"a 7-character payload must not be mistaken for an image: {withqr!r}")
+
+    pdf = run(server.ticket_qr, s, "2")
+    check("example.invalid/t.pdf" in pdf, f"the PDF link went missing: {pdf!r}")
+
+    none = run(server.ticket_qr, s, "3")
+    check("Ticketland" in none and "код брони" in none,
+          f"a partner that issues no QR must be named, not treated as an error: {none!r}")
+    check("85776589" in none, f"the booking code is what is shown instead: {none!r}")
+
+    missing = run(server.ticket_qr, s, "404")
+    check("Неоплаченные" in missing or "order_details" in missing,
+          f"an absent order must point at where unpaid bookings live: {missing!r}")
+    print("  ticket: prints what the partner issues, names what it does not")
+
+
 def main():
     print("response parsers:")
     test_a_city_is_resolved_or_refused_never_assumed()
+    test_the_ticket_says_what_it_has_and_what_it_lacks()
     test_a_cinema_repertoire_reads_as_films_not_as_venues()
     test_search_keeps_the_venues_it_used_to_drop()
     test_free_seating_counts_choices_not_tickets()

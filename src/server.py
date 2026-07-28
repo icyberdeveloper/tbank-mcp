@@ -109,6 +109,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "cinema_search": ("Поиск фильма", READ),
     "cinema_schedule": ("Расписание сеансов", READ),
     "afisha_catalog": ("Афиша за период", READ),
+    "ticket_qr": ("Билет: QR и код брони", READ),
     "afisha_places": ("Площадки города", READ),
     "place_schedule": ("Афиша площадки", READ),
     "place_info": ("Карточка площадки", READ),
@@ -2833,6 +2834,48 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return "\n".join(out)
     except Exception as e:
         return _err(e)
+
+@mcp.tool()
+def ticket_qr(order_id: str) -> str:
+    """Сам билет по оплаченному заказу: код брони, QR и ссылка на PDF.
+
+    Лежит это в ленте заказов, а НЕ в order_details(), который отдаёт только код
+    брони. Что именно есть — зависит от партнёра: из 75 афишных заказов код
+    брони был у всех, QR у 53, а Ticketland не даёт ни QR, ни PDF. Тул печатает
+    то, что есть, и прямо говорит, чего нет.
+
+    QR — это короткая строка-payload, которую показывают сканеру, а не картинка.
+
+    Пустой ответ означает «билета ещё нет» (или бронь не оплачена — неоплаченные
+    в ленту не попадают), а не «заказа не существует»."""
+    try:
+        s = _require(); s.ensure_fresh()
+        a = s.ticket_artifacts(order_id)
+        if not a.get("found"):
+            return (f"Заказа {order_id} нет в ленте. Неоплаченные брони туда не "
+                    "попадают — проверь order_details(), он их видит.")
+        head = " | ".join(x for x in (a["event"], a["venue"], a["hall"]) if x)
+        out = [f"{head or 'Заказ'} — {order_id} ({a['status']})"]
+        if a["reservation_code"]:
+            out.append(f"Код брони: {a['reservation_code']}")
+        if a["qr"]:
+            out.append(f"QR: {a['qr']}"
+                       + (f" (тип {a['barcode_type']})" if a["barcode_type"] else "")
+                       + " — это строка для сканера, не картинка")
+        for label, url in (("PDF", a["pdf_url"]), ("Билет", a["ticket_url"])):
+            if url:
+                out.append(f"{label}: {url}")
+        if not (a["qr"] or a["pdf_url"] or a["ticket_url"]):
+            out.append(f"QR и PDF нет" + (f" — {a['partner']} их не выдаёт"
+                                          if a["partner"] else "")
+                       + ". На входе показывают код брони.")
+            out.append("Если билет только что оплачен, он может появиться с задержкой.")
+        elif a["partner"]:
+            out.append(f"Партнёр: {a['partner']}")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
 
 @mcp.tool()
 def afisha_catalog(kind: str = "movie", city: str = "", date_from: str = "",

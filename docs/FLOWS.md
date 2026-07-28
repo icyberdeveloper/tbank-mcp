@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **65 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **66 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -293,7 +293,11 @@ skill. The order here is the part you must not improvise:
 5. `ticket_pay(order_id, amount, nfs_payment_token, account_id)` → **REAL money.**
    Only after the user confirms a concrete sum and concrete seats. The tool
    re-reads the order from the backend and refuses to pay a mismatched amount.
-6. `order_details(order_id)` → booking code, hall, seats.
+6. `order_details(order_id)` → booking code, hall, seats. The ticket itself —
+   QR payload, PDF link — is in the orders feed instead, via `ticket_qr(order_id)`;
+   `/api/tickets/get` is dead (four calls, four code=228). Coverage is partial by
+   partner: of 75 afisha orders all carried a booking code, 53 a QR, and Ticketland
+   hands out neither, so the tool prints what exists and names what does not.
 
 > **A period, not a day.** `afisha_catalog(kind, city, date_from, date_to)` lists
 > a vertical over a date RANGE. The app only ever asks for one day because its
