@@ -238,6 +238,7 @@ _HOST_ACCEPT = {
     "id.t-bank-app.ru": _JSON_ACCEPT,
     "www.tbank.ru": "*/*",
     "webview.t-bank-app.ru": "*/*",
+    "trains.t-bank-app.ru": "*/*",
 }
 # Paths whose host says one thing and whose own capture says another: the lifestyle
 # superapp shelf is served by the same host as Город but answers the native default.
@@ -773,7 +774,8 @@ class MobileSession:
         return h
 
     def _call_read(self, template_key: str, *, overrides: dict | None = None,
-                   body: dict | None = None, path_override: str | None = None) -> Any:
+                   body: dict | list | None = None,
+                   path_override: str | None = None) -> Any:
         """Replay a read endpoint (builtin shape) with fresh sessionid + Bearer.
 
         path_override replaces the path (for parameterized endpoints like
@@ -783,9 +785,18 @@ class MobileSession:
                   if k not in _LIVE_QUERY}
         # Most hosts read the mobile sessionid from `sessionid`; the prefill-profile
         # and insurance hosts spell it `sessionId` and reject the lowercase form.
-        params[tpl.get("session_param") or "sessionid"] = self.mobile_sessionid
-        params["deviceId"] = self.device_id
-        params["oldDeviceId"] = self.old_device_id or self.device_id
+        # Some hosts want none of the native client context. The webview-served
+        # ones carry only appName/appVersion/platform and answer 400 to the rest,
+        # which is the same class of divergence that once broke the lifestyle cart:
+        # sending what the app does not send is not free.
+        lean = bool(tpl.get("no_base_params"))
+        if not lean:
+            params[tpl.get("session_param") or "sessionid"] = self.mobile_sessionid
+            params["deviceId"] = self.device_id
+            params["oldDeviceId"] = self.old_device_id or self.device_id
+        elif tpl.get("session_param"):
+            # A lean host may still key its session off ONE named query param.
+            params[tpl["session_param"]] = self.mobile_sessionid
         host = tpl.get("host") or self.base_url
         path = path_override or tpl["path"]
         # wuid is the WEB portal's device identifier. It went on every request to
@@ -812,7 +823,7 @@ class MobileSession:
         if _LEGACY_QUERY:
             base += [("vendor", self.vendor), ("client_version", self.client_version)]
         for k, v in base:
-            if v and k not in params:
+            if v and k not in params and not lean:
                 params[k] = v
         if overrides:
             params.update(overrides)
@@ -825,16 +836,13 @@ class MobileSession:
         # template header or Authorization/Cookie below still wins.
         for k, v in self._mobile_headers(host, path).items():
             headers.setdefault(k, v)
-        headers["Authorization"] = "Bearer " + self.access_token
-        # messenger (tm.t-bank-app.ru) uses ONLY the tmsgSessionID cookie, minted
-        # on demand from the access_token via issueTokenBySSO; other hosts use the
-        # SSO/sessionid cookie_str.
-        if "tm.t-bank-app.ru" in host:
-            self._ensure_tmsg()
-            if self.tmsg_session_id:
-                headers["Cookie"] = f"tmsgSessionID={self.tmsg_session_id}"
-        elif self.cookie_str:
-            headers["Cookie"] = self.cookie_str
+        # A few hosts are authorised by cookie alone and the app sends no Bearer to
+        # them at all; carrying one there is another silent divergence.
+        if not tpl.get("no_bearer"):
+            headers["Authorization"] = "Bearer " + self.access_token
+        cookie = self._cookie_for(host)
+        if cookie:
+            headers["Cookie"] = cookie
         url = f"{host.rstrip('/')}/{path.lstrip('/')}"
         method = (tpl.get("method") or "GET").upper()
         if method == "POST":
@@ -1054,6 +1062,20 @@ class MobileSession:
         if jwt:
             self.tmsg_session_id = jwt
         return jwt
+
+    def _cookie_for(self, host: str) -> str:
+        """The Cookie header this host expects, or "".
+
+        Hosts do not agree on how the session reaches them, and the disagreement
+        is not a detail: the messenger accepts ONLY its own minted JWT, and
+        sending it the SSO cookie instead of that authorises nothing. Keeping the
+        per-host answer in one place is what stops a new host from inheriting
+        whichever branch happened to be last."""
+        if "tm.t-bank-app.ru" in host:
+            # Minted on demand from the access_token via issueTokenBySSO.
+            self._ensure_tmsg()
+            return f"tmsgSessionID={self.tmsg_session_id}" if self.tmsg_session_id else ""
+        return self.cookie_str or ""
 
     def _ensure_tmsg(self) -> None:
         """Ensure a valid tmsg for messenger. If missing/expired, do a silent

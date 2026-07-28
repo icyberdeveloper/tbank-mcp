@@ -398,6 +398,49 @@ def test_the_accept_profile_is_off_by_default_and_correct_when_on():
     print("  Accept profile: off by default, captured values per host/path when on")
 
 
+def test_a_lean_host_gets_only_what_the_app_sends_it():
+    """Not every host wants the native client context. The webview-served ones
+    carry appName/appVersion/platform and nothing else, and are authorised by
+    cookie with no Bearer at all — so a template can opt out of both.
+
+    This is the same class of divergence that once broke the lifestyle cart:
+    sending a host what the real app does not send is not free, it is a 400 or a
+    silent no-op. The flags exist so the opt-out is per endpoint and visible in
+    the template, rather than another branch on hostname."""
+    from src.endpoints import BUILTIN_ENDPOINTS
+    BUILTIN_ENDPOINTS["_lean_probe"] = {
+        "method": "GET", "host": "https://webview.t-bank-app.ru",
+        "path": "/probe", "params": {"appName": "mobile", "platform": "webview_ios"},
+        "no_base_params": True, "no_bearer": True}
+    BUILTIN_ENDPOINTS["_fat_probe"] = {
+        "method": "GET", "host": "https://api.t-bank-app.ru",
+        "path": "/probe", "params": {}}
+    try:
+        s = session()
+        s._call_read("_lean_probe")
+        lean = s._http.sent[-1]
+        check(set(lean["params"]) == {"appName", "platform"},
+              f"a lean host got extra query params: {sorted(lean['params'])}")
+        check("Authorization" not in lean["headers"],
+              f"a lean host must get no Bearer: {sorted(lean['headers'])}")
+        check(lean["headers"].get("Cookie") == "SSO_SESSION=x",
+              f"the cookie is how it authorises: {lean['headers'].get('Cookie')!r}")
+
+        # The default is unchanged: everything else still carries the full context.
+        s2 = session()
+        s2._call_read("_fat_probe")
+        fat = s2._http.sent[-1]
+        for k in ("sessionid", "deviceId", "oldDeviceId", "appName", "origin",
+                  "platform", "inache"):
+            check(k in fat["params"], f"a normal read lost {k}: {sorted(fat['params'])}")
+        check(fat["headers"].get("Authorization") == "Bearer tok",
+              "a normal read must still carry the Bearer")
+    finally:
+        BUILTIN_ENDPOINTS.pop("_lean_probe", None)
+        BUILTIN_ENDPOINTS.pop("_fat_probe", None)
+    print("  lean hosts: no native context, no Bearer; every other read unchanged")
+
+
 def main():
     print("transport:")
     test_the_accept_profile_is_off_by_default_and_correct_when_on()
@@ -414,6 +457,7 @@ def main():
     test_messenger_uses_its_own_cookie_and_vendor_accept()
     test_bank_documents_asks_for_the_v2_record_shape()
     test_templates_stay_structurally_sane()
+    test_a_lean_host_gets_only_what_the_app_sends_it()
     if failures:
         print("\nFAILED:")
         for f in failures:
