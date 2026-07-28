@@ -350,6 +350,49 @@ def check_cancel_carries_both_ids():
     print("  cancel: orderId + paymentId in the query, empty body, feed lookup")
 
 
+def check_every_vertical_reaches_its_own_path():
+    """Each call used to choose its path with «concert if kind == 'concert' else
+    movie», so anything that was not the string "concert" booked a cinema seat.
+    A theatre kind would have gone to /order/create/movie and been accepted.
+
+    The table has to route all four, and refuse a fifth rather than fall back."""
+    from src.client import TbankApiError
+    want = {
+        "movie": ("scheme_sectors_movie", "order_create_movie", "order_cancel_movie"),
+        "concert": ("scheme_sectors_concert", "order_create_concert", "order_cancel"),
+        "spectacle": ("scheme_sectors_spectacle", "order_create_spectacle", "order_cancel"),
+        "exhibition": ("scheme_sectors_exhibition", "order_create_exhibition", "order_cancel"),
+    }
+    for kind, (sectors, create, cancel) in want.items():
+        s = ReplaySession()
+        s.event_seats("e", "s", "o", kind=kind)
+        check(s.sent_key == sectors, f"{kind} seats → {s.sent_key!r}, want {sectors!r}")
+        s = ReplaySession()
+        s.create_ticket_order("e", "s", "o", [{"id": "1"}], kind=kind)
+        check(s.sent_key == create, f"{kind} create → {s.sent_key!r}, want {create!r}")
+        s = ReplaySession()
+        s.cancel_ticket_order(CANCEL_ORDER, kind=kind, payment_id=CANCEL_PAYMENT)
+        check(s.sent_key == cancel, f"{kind} cancel → {s.sent_key!r}, want {cancel!r}")
+
+    # The Russian words the tools document, and the API's own spellings, both work.
+    for alias, segment in (("кино", "movie"), ("театр", "spectacle"),
+                           ("выставка", "exhibition"), ("theatre", "spectacle")):
+        s = ReplaySession()
+        s.event_seats("e", "s", "o", kind=alias)
+        check(s.sent_key == f"scheme_sectors_{segment}",
+              f"alias {alias!r} → {s.sent_key!r}, want segment {segment!r}")
+
+    # A vertical nobody wired up must fail loudly, not book a cinema seat.
+    for bad in ("opera", "movies", ""):
+        try:
+            ReplaySession().event_seats("e", "s", "o", kind=bad)
+            check(False, f"kind={bad!r} was accepted instead of refused")
+        except TbankApiError as e:
+            check(e.result_code == "UNKNOWN_KIND" and "movie" in str(e),
+                  f"the refusal must name the problem: {e}")
+    print("  verticals: all four route to their own path, an unknown kind refuses")
+
+
 def check_cancel_reads_the_order_before_asking():
     """isCancelAvailable is the only field that predicted the outcome live: the one
     order flagged true cancelled, seven flagged false were refused and stayed put.
@@ -549,6 +592,7 @@ def main():
     check_ticket_pay_amount_guard()
     test_the_ticket_payment_names_its_calling_system()
     check_cancel_carries_both_ids()
+    check_every_vertical_reaches_its_own_path()
     check_cancel_reads_the_order_before_asking()
     fx = fixture()
     check_create(fx["create_movie"], "order/create/movie", "movie",

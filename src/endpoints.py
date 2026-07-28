@@ -1511,3 +1511,115 @@ BUILTIN_ENDPOINTS.update({
                                 "headers": {"Pg-Api-System": "t-entertainment-mb"},
                                 "params": {}},
 })
+
+
+# Theatre and exhibitions ride the same four shapes as cinema and concerts —
+# only the path segment differs. Counted in captures-gorod.xml, all 200:
+# schedule/spectacle 9, schedule/exhibition 1, scheme/sectors/spectacle 3,
+# scheme/sectors/exhibition 1, scheme/hall/spectacle 5, order/create/spectacle 2,
+# order/create/exhibition 1. There is no scheme/hall/exhibition anywhere.
+BUILTIN_ENDPOINTS.update({
+    "schedule_spectacle": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                           "path": "/api/schedule/spectacle", "params": {}},
+    "schedule_exhibition": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                            "path": "/api/schedule/exhibition", "params": {}},
+    "scheme_sectors_spectacle": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                                 "path": "/api/scheme/sectors/spectacle", "params": {}},
+    "scheme_sectors_exhibition": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                                  "path": "/api/scheme/sectors/exhibition", "params": {}},
+    "scheme_hall_spectacle": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                              "path": "/api/scheme/hall/spectacle", "params": {}},
+    "order_create_spectacle": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                               "path": "/api/order/create/spectacle", "params": {}},
+    "order_create_exhibition": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                                "path": "/api/order/create/exhibition", "params": {}},
+})
+
+
+# ---- afisha verticals ------------------------------------------------------
+# One row per vertical, because the bank spells each one four different ways and
+# picking the wrong spelling fails differently every time. The path segment is
+# `movie`, the ?service= for the same thing is `cinema`; theatre is `spectacle`
+# in a path and `theatre` in a service. Nothing in the responses declares the
+# mapping — it was read off objects that carry both at once (an event with
+# eventType=spectacle arriving under service=theatre).
+#
+# `order_types` is a DIFFERENT axis: it is the type of the VENUE, not of the
+# vertical, and the two disagree — the orders feed holds objectType=cinema rows
+# whose eventType is concert. It belongs here only because the feed filter has to
+# be built from somewhere, and having one table beats four hand-kept tuples.
+#
+# Confirmed live except where noted.
+VERTICALS = {
+    "movie": {
+        "ru": "кино",
+        "segment": "movie",          # /api/{schedule,scheme/sectors,order/create}/…
+        "service": "cinema",         # ?service= on events/objects, events/info, by/service
+        "screen": "movie_main",      # search_app screen
+        "order_types": ("cinema",),
+        "sectors_key": "scheme_sectors_movie",
+        "hall_key": "",              # cinemas have numbered seats, no free seating
+        "schedule_key": "schedule_movie",
+        "create_key": "order_create_movie",
+        "cancel_key": "order_cancel_movie",   # the only cancel segment in any capture
+        "seat_type": "basic",        # seats[].type — ONLY movie sends it
+        "seat_render": "grid",       # numbered rows vs a flat list
+    },
+    "concert": {
+        "ru": "концерт",
+        "segment": "concert",
+        "service": "concert",
+        "screen": "concerts_main",   # plural, unlike the others
+        "order_types": ("concerthall", "club", "sports", "other"),
+        "sectors_key": "scheme_sectors_concert",
+        "hall_key": "scheme_hall_concert",
+        "schedule_key": "schedule_concert",
+        "create_key": "order_create_concert",
+        "cancel_key": "order_cancel",
+        "seat_type": "",
+        "seat_render": "list",
+    },
+    "spectacle": {
+        "ru": "театр",
+        "segment": "spectacle",
+        "service": "theatre",
+        "screen": "spectacle_main",
+        # ASSUMED, not observed: no spectacle order appeared in any capture, so
+        # this is the venue type such an order would plausibly carry. An extra
+        # type in the feed filter is harmless; a missing one loses orders.
+        "order_types": ("theatre",),
+        "sectors_key": "scheme_sectors_spectacle",
+        "hall_key": "scheme_hall_spectacle",
+        "schedule_key": "schedule_spectacle",
+        "create_key": "order_create_spectacle",
+        "cancel_key": "order_cancel",
+        "seat_type": "",
+        "seat_render": "list",
+    },
+    "exhibition": {
+        "ru": "выставка",
+        "segment": "exhibition",
+        "service": "exhibition",
+        "screen": "exhibition_main",
+        "order_types": ("museum",),
+        "sectors_key": "scheme_sectors_exhibition",
+        "hall_key": "",              # no /api/scheme/hall/exhibition in any capture
+        "schedule_key": "schedule_exhibition",
+        "create_key": "order_create_exhibition",
+        "cancel_key": "order_cancel",
+        "seat_type": "",
+        "seat_render": "list",
+    },
+}
+
+# What an agent may type. The Russian words are what the tools document; the
+# segments are accepted too because the API uses them and they leak into
+# conversations through ids and paths.
+VERTICAL_ALIASES = {
+    "фильм": "movie", "кино": "movie", "movie": "movie", "cinema": "movie",
+    "концерт": "concert", "concert": "concert", "concerthall": "concert",
+    "театр": "spectacle", "спектакль": "spectacle",
+    "spectacle": "spectacle", "theatre": "spectacle", "theater": "spectacle",
+    "выставка": "exhibition", "музей": "exhibition",
+    "exhibition": "exhibition", "museum": "exhibition",
+}

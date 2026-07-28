@@ -29,7 +29,7 @@ from urllib.parse import urlparse, parse_qsl
 
 import requests
 
-from .endpoints import BUILTIN_ENDPOINTS
+from .endpoints import BUILTIN_ENDPOINTS, VERTICALS, VERTICAL_ALIASES
 
 MOBILE_BASE = "https://api.t-bank-app.ru"
 ID_BASE = "https://id.t-bank-app.ru"
@@ -360,6 +360,21 @@ def _normalize_phone(phone: str) -> str:
     if not (len(d) == 11 and d.startswith("7")):
         raise TbankApiError("INVALID_PHONE", f"not a valid RU mobile number: {phone}")
     return "+" + d
+
+
+def vertical(kind: str) -> dict:
+    """The VERTICALS row for `kind`, or an error naming what is accepted.
+
+    Every afisha call used to pick its path with `"concert" if kind == "concert"
+    else <movie>`, so a typo — or a vertical nobody had wired up yet — silently
+    booked a cinema seat instead of failing. An unknown kind raises here."""
+    key = VERTICAL_ALIASES.get(str(kind).strip().lower())
+    if not key:
+        raise TbankApiError(
+            "UNKNOWN_KIND",
+            f"unknown kind {kind!r}; use one of: {', '.join(VERTICALS)} "
+            f"(кино, концерт, театр, выставка)")
+    return VERTICALS[key]
 
 
 @dataclass
@@ -3356,7 +3371,7 @@ class MobileSession:
         Cinemas key seats as "row:number". Concerts use a composite string
         ("Фанзона|5000§~§54093386|default") that must be passed back to
         order/create verbatim — it encodes sector, price and ticket id."""
-        key = "scheme_sectors_concert" if kind == "concert" else "scheme_sectors_movie"
+        key = vertical(kind)["sectors_key"]
         data = self._call_read(key, overrides={
             "eventId": str(event_id), "slotId": str(slot_id),
             "objectId": str(object_id)})
@@ -3388,7 +3403,7 @@ class MobileSession:
 
         seats: [{"id": "7:10", "type": "basic"}] for cinemas; concerts take the
         composite seatId and no type."""
-        key = "order_create_concert" if kind == "concert" else "order_create_movie"
+        key = vertical(kind)["create_key"]
         body = {"eventId": str(event_id), "slotId": str(slot_id),
                 "objectId": str(object_id), "seats": seats}
         data = self._call_read(key, body=body)
@@ -3473,7 +3488,7 @@ class MobileSession:
         unpaid reservation has none, and does not need cancelling — it expires."""
         if not payment_id:
             payment_id = self.payment_id_for_order(order_id)
-        key = "order_cancel_movie" if kind == "movie" else "order_cancel"
+        key = vertical(kind)["cancel_key"]
         params = {"orderId": str(order_id)}
         if payment_id:
             params["paymentId"] = str(payment_id)

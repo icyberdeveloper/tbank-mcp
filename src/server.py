@@ -21,7 +21,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from . import trace
-from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
+from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period, vertical
+from .endpoints import VERTICALS
 from .observability import redact_text
 
 mcp = FastMCP("tbank")
@@ -2176,12 +2177,15 @@ def documents(kind: str = "", include_others: bool = False) -> str:
 
 # ── ORDERS ACROSS EVERY VERTICAL ────────────────────────────
 
+# Built from the verticals table rather than typed out, because the failure of a
+# hand-kept tuple is silent: `museum` was missing and every exhibition order fell
+# out of the feed, which reads as «no such order» rather than «this filter does
+# not know that type». Adding a vertical now widens the filter by itself.
+_AFISHA_TYPES = tuple(dict.fromkeys(
+    t for v in VERTICALS.values() for t in v["order_types"]))
 _ORDER_KINDS = {
-    # `museum` is what an exhibition order carries — without it those orders fell
-    # out of the feed silently, which reads as «no such order» rather than «this
-    # filter does not know that type».
-    "афиша": ("cinema", "concerthall", "theatre", "museum", "club", "sports", "other"),
-    "кино": ("cinema",),
+    "афиша": _AFISHA_TYPES,
+    "кино": VERTICALS["movie"]["order_types"],
     "путешествия": ("avia_ticket", "trains_ticket", "hotelBooking"),
     "продукты": ("grocery",),
 }
