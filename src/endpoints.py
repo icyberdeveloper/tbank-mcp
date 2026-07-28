@@ -1533,6 +1533,13 @@ BUILTIN_ENDPOINTS.update({
                                "path": "/api/order/create/spectacle", "params": {}},
     "order_create_exhibition": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                                 "path": "/api/order/create/exhibition", "params": {}},
+    # ?service=&cityId= — the vertical's landing shelves. Its collections[].code
+    # holds the REAL collectionCode ("Segodnya-v_kino_Moskva"), which used to be
+    # guessed by transliterating the city name. The guess only ever worked for the
+    # cities whose code happens to match: the server's own codes spell Moscow three
+    # different ways (Moskva, moscow, msk) depending on the shelf.
+    "events_by_service": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                          "path": "/api/events/by/service", "params": {}},
 })
 
 

@@ -362,6 +362,99 @@ def _normalize_phone(phone: str) -> str:
     return "+" + d
 
 
+# Every afisha listing is scoped by a numeric cityId, and the bank publishes no
+# directory for it — the app has the mapping compiled in. This table was walked
+# live: cityId 1..70 against the venue directory, each id resolved to a name
+# through a venue's own schedule. 65 answered; 20, 41, 48, 65 and 68 are holes,
+# and the run stopped at 70 with the list continuing alphabetically, so this is
+# the popular head rather than everything the bank knows.
+#
+# It is code, not a data file, so it ships inside the wheel. Anything outside it
+# is still reachable — the tools take an explicit city_id — but nothing here is
+# guessed from a name.
+CITY_IDS = {
+    1: "Москва", 2: "Санкт-Петербург", 3: "Краснодар", 4: "Новосибирск",
+    5: "Томск", 6: "Вологда", 7: "Чебоксары", 8: "Тольятти", 9: "Пермь",
+    10: "Екатеринбург", 11: "Красноярск", 12: "Ростов-на-Дону", 13: "Сочи",
+    14: "Ижевск", 15: "Тула", 16: "Набережные Челны", 17: "Казань",
+    18: "Хабаровск", 19: "Ульяновск", 21: "Улан-Удэ", 22: "Иркутск", 23: "Уфа",
+    24: "Белгород", 25: "Волгоград", 26: "Тюмень", 27: "Ейск", 28: "Кемерово",
+    29: "Севастополь", 30: "Нижний Новгород", 31: "Самара", 32: "Челябинск",
+    33: "Омск", 34: "Воронеж", 35: "Саратов", 36: "Химки", 37: "Зеленоград",
+    38: "Балашиха", 39: "Домодедово", 40: "Красногорск", 42: "Сергиев Посад",
+    43: "Люберцы", 44: "Наро-Фоминск", 45: "Мытищи", 46: "Щелково",
+    47: "Гатчина", 49: "Барнаул", 50: "Абакан", 51: "Альметьевск",
+    52: "Армавир", 53: "Архангельск", 54: "Астрахань", 55: "Балаково",
+    56: "Бийск", 57: "Биробиджан", 58: "Брянск", 59: "Великий Новгород",
+    60: "Владивосток", 61: "Владикавказ", 62: "Владимир", 63: "Волгодонск",
+    64: "Грозный", 66: "Иваново", 67: "Йошкар-Ола", 69: "Калининград",
+    70: "Калуга",
+}
+
+
+def _norm_city(s: str) -> str:
+    return str(s).strip().lower().replace("ё", "е")
+
+
+_CITY_BY_NAME = {_norm_city(n): i for i, n in CITY_IDS.items()}
+# What people actually type.
+_CITY_BY_NAME.update({"спб": 2, "питер": 2, "санкт петербург": 2, "мск": 1,
+                      "екб": 10, "нижний": 30, "ростов": 12, "н.новгород": 30})
+
+
+def city_id_of(city: str = "", city_id: int | str = 0) -> str:
+    """Numeric cityId for an afisha call, as the string the bodies carry.
+
+    An explicit city_id always wins — it is the escape hatch for a city outside
+    the table. A name that is not in the table RAISES rather than falling back to
+    Moscow: a Moscow listing answering a question about Kazan looks entirely
+    plausible and is entirely wrong, which is the one failure mode worth an error."""
+    if str(city_id).strip() not in ("", "0"):
+        return str(city_id).strip()
+    if not str(city).strip():
+        raise TbankApiError("CITY_REQUIRED",
+                            "не назван город; передай city или city_id")
+    found = _CITY_BY_NAME.get(_norm_city(city))
+    if found:
+        return str(found)
+    near = [n for n in CITY_IDS.values()
+            if _norm_city(city)[:4] and _norm_city(city)[:4] in _norm_city(n)]
+    raise TbankApiError(
+        "UNKNOWN_CITY",
+        f"города {city!r} нет в таблице cityId"
+        + (f"; похожие: {', '.join(near[:5])}" if near else "")
+        + ". Если он есть в банке, передай city_id числом.")
+
+
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya", " ": "_",
+    "-": "-",
+}
+
+
+def translit_city(s: str) -> str:
+    """City name in the spelling the `Segodnya-v_kino_*` shelf codes use.
+
+    This is a reconstruction of the server's own convention, not a guess at a
+    name: the live shelf lists hand back exactly Segodnya-v_kino_Sankt-Peterburg,
+    Segodnya-v_kino_Sochi, Skoro-v_kino_Kazan. It stays only as the fallback for
+    when the shelf list comes back empty — which the Moscow one does when that
+    backend is having a moment, and Moscow is the last city where guessing wrong
+    would be noticed late.
+
+    It does NOT generalise to other shelf families: those spell the same city
+    Moskva, moscow and msk depending on the shelf, so nothing but the server's
+    own list can be trusted for them."""
+    out = "".join(_TRANSLIT.get(ch, _TRANSLIT.get(ch.lower(), ch))
+                  if not ch.isascii() else ch for ch in s)
+    return re.sub(r"(^|[_\-])([a-z])",
+                  lambda m: m.group(1) + m.group(2).upper(), out)
+
+
 def vertical(kind: str) -> dict:
     """The VERTICALS row for `kind`, or an error naming what is accepted.
 
@@ -3272,31 +3365,46 @@ class MobileSession:
 
     # ---- cinema ----------------------------------------------------------
 
-    _TRANSLIT = {
-        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
-        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya", " ": "_",
-        "-": "-",
-    }
-
-    @classmethod
-    def _translit(cls, s: str) -> str:
-        out = "".join(cls._TRANSLIT.get(ch, cls._TRANSLIT.get(ch.lower(), ch))
-                      if not ch.isascii() else ch for ch in s)
-        # each word capitalised, separators kept: Москва→Moskva,
-        # Санкт-Петербург→Sankt-Peterburg, Нижний Новгород→Nizhniy_Novgorod
-        return re.sub(r"(^|[_\-])([a-z])",
-                      lambda m: m.group(1) + m.group(2).upper(), out)
-
     PAGE = 30                      # what the collection endpoint returns per page
 
-    def cinema_movies(self, city: str = "Москва", query: str = "",
-                      max_pages: int = 8) -> tuple[list[dict], int, int]:
+    def afisha_collection_code(self, prefix: str, kind: str = "movie",
+                               city: str = "", city_id: int | str = 0) -> str:
+        """The server's own collectionCode for a shelf, e.g. "Segodnya-v_kino_".
+
+        This used to be built by transliterating the city name, which is a guess
+        that happens to be right for Moscow. The server publishes the codes, and
+        its own spelling is not consistent — the same city appears as Moskva,
+        moscow and msk across different shelves — so nothing derived from the name
+        could have covered them all."""
+        cid = city_id_of(city, city_id)
+        # `getattr(...) or {}` would be a bug here: an EMPTY memo is falsy, so the
+        # fallback would hand back a fresh dict every call and cache nothing.
+        memo = getattr(self, "_memo", None)
+        if memo is None:
+            memo = self._memo = {}
+        shelves = memo.setdefault("afisha_shelves", {})
+        key = (vertical(kind)["service"], cid)
+        if key not in shelves:
+            data = self._call_read("events_by_service", overrides={
+                "service": key[0], "cityId": cid})
+            shelves[key] = [c for c in ((data or {}).get("collections") or [])
+                            if isinstance(c, dict)]
+        found = next((str(c.get("code")) for c in shelves[key]
+                      if str(c.get("code") or "").startswith(prefix)), "")
+        if found:
+            return found
+        # An empty shelf list is a live condition, not a contract: Moscow's came
+        # back empty while Petersburg's was full. Fall back to the convention the
+        # server itself uses for this family rather than reporting no cinema.
+        name = city or CITY_IDS.get(int(cid) if str(cid).isdigit() else -1, "")
+        return prefix + translit_city(name) if name else ""
+
+    def cinema_movies(self, city: str = "", query: str = "",
+                      max_pages: int = 8,
+                      city_id: int | str = 0) -> tuple[list[dict], int, int]:
         """Movies playing today in `city`, as (matches, scanned, listing_total).
 
-        The collection code is city-derived ("Segodnya-v_kino_Moskva"); it is only a
+        The collection code comes from the server's own shelf list; it is only a
         way to reach an eventId, which is itself city-independent and is what the
         schedule endpoint wants.
 
@@ -3309,7 +3417,13 @@ class MobileSession:
 
         `scanned` is returned so the caller can tell "these are all of them" from
         "these are all of them among the first N" when max_pages binds."""
-        code = "Segodnya-v_kino_" + self._translit(city)
+        code = self.afisha_collection_code("Segodnya-v_kino_", "movie",
+                                           city=city, city_id=city_id)
+        if not code:
+            raise TbankApiError(
+                "NO_TODAY_SHELF",
+                f"у города {city or city_id} нет полки «сегодня в кино» — "
+                "возможно, в нём нет проката")
         q = query.lower().replace("ё", "е") if query else ""
 
         def matches(e):
@@ -3344,14 +3458,22 @@ class MobileSession:
         "Казань": (55.7963, 49.1088),
     }
 
-    def cinema_schedule(self, event_id: str, date: str, city: str = "Москва",
+    def cinema_schedule(self, event_id: str, date: str, city: str = "",
                         latitude: float = 0.0, longitude: float = 0.0) -> list[dict]:
         """Showtimes for one movie on one date (YYYY-MM-DD), one entry per cinema.
+
+        This endpoint takes the city as a NAME, not as the numeric cityId the rest
+        of the afisha uses — the captured bodies carry "city": "Москва". It is not
+        defaulted: a Moscow listing is a plausible-looking answer to a question
+        about another city, so an empty city is an error instead.
 
         The location only sorts by distance — the whole city is returned either way.
         Pass latitude/longitude to sort around a real point; omitted, the centre of
         `city` is used, and for a city not in CITY_CENTRES the distance sort is
         dropped rather than anchored somewhere arbitrary."""
+        if not str(city).strip():
+            raise TbankApiError("CITY_REQUIRED",
+                                "не назван город; cinema_schedule требует city")
         body = {"date": date, "eventId": str(event_id), "city": city}
         if not (latitude or longitude):
             latitude, longitude = self.CITY_CENTRES.get(city, (0.0, 0.0))

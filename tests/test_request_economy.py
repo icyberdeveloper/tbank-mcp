@@ -342,6 +342,12 @@ def listing(named: dict, amount: int = 120, per_page: int = 30):
     return page
 
 
+# The shelf list the client now reads the real collectionCode from, instead of
+# transliterating the city name into a guess.
+SHELVES = {"collections": [{"code": "Skoro-v_kino_Moskva"},
+                           {"code": "Segodnya-v_kino_Moskva"}]}
+
+
 def test_a_named_film_search_sees_every_page():
     """The listing has no server-side search, so a name is matched by us — which
     means every page has to be looked at.
@@ -352,8 +358,9 @@ def test_a_named_film_search_sees_every_page():
     own partial count as the total. Speed comes from fetching the pages at once."""
     # Two prints of the same film, pages 1 and 4. Early exit returned exactly one.
     s = CountingSession({"events_collection": listing({(1, 0): "Майкл",
-                                                       (4, 7): "Майкл. Финал"})})
-    hits, scanned, total = s.cinema_movies(query="майкл")
+                                                       (4, 7): "Майкл. Финал"}),
+                         "events_by_service": SHELVES})
+    hits, scanned, total = s.cinema_movies(query="майкл", city="Москва")
     check(len(hits) == 2,
           f"a match on a later page was dropped: got {len(hits)} of 2 "
           f"({[h['name'] for h in hits]})")
@@ -363,30 +370,52 @@ def test_a_named_film_search_sees_every_page():
           f"four pages of 30 in a listing of 120: {s.count('events_collection')}")
 
     # A film only on the LAST page — the case the early exit could never reach.
-    s2 = CountingSession({"events_collection": listing({(4, 5): "Поздний"})})
-    late, _, _ = s2.cinema_movies(query="поздний")
+    s2 = CountingSession({"events_collection": listing({(4, 5): "Поздний"}),
+                          "events_by_service": SHELVES})
+    late, _, _ = s2.cinema_movies(query="поздний", city="Москва")
     check(len(late) == 1, f"a match on the last page was not found: {len(late)}")
 
     # No query → the whole listing, unchanged.
-    s3 = CountingSession({"events_collection": listing({})})
-    everything, scanned3, total3 = s3.cinema_movies()
+    s3 = CountingSession({"events_collection": listing({}),
+                          "events_by_service": SHELVES})
+    everything, scanned3, total3 = s3.cinema_movies(city="Москва")
     check(len(everything) == 120, f"expected the full listing, got {len(everything)}")
     check(scanned3 == total3 == 120, f"scanned {scanned3} of {total3}")
 
     # Pages are read concurrently, so four of them cost about one round trip.
-    slow = CountingSession({"events_collection": listing({})}, delay=0.05)
+    slow = CountingSession({"events_collection": listing({}),
+                            "events_by_service": SHELVES}, delay=0.05)
     started = time.monotonic()
-    slow.cinema_movies()
+    slow.cinema_movies(city="Москва")
     elapsed = time.monotonic() - started
-    check(elapsed < 0.05 * 3,
+    # shelf + page 1 + pages 2..4 as one concurrent batch = three waits, not six.
+    check(elapsed < 0.05 * 4,
           f"pages 2..4 still look sequential: {elapsed:.2f}s for 4 × 0.05s")
+
+    # The shelf list is per (service, city) and does not change between searches,
+    # so a second search on the same session must not pay for it again.
+    slow.cinema_movies(city="Москва", query="что-то")
+    check(slow.count("events_by_service") == 1,
+          f"the shelf list was re-fetched: {slow.count('events_by_service')} times")
 
     # And when the page cap binds, the caller is told the afisha was NOT fully seen —
     # otherwise "нет такого фильма" and "не смотрели" become the same answer.
-    capped = CountingSession({"events_collection": listing({}, amount=300)})
-    _, scanned4, total4 = capped.cinema_movies(max_pages=2)
+    capped = CountingSession({"events_collection": listing({}, amount=300),
+                              "events_by_service": SHELVES})
+    _, scanned4, total4 = capped.cinema_movies(max_pages=2, city="Москва")
     check(scanned4 == 60 and total4 == 300,
           f"a capped scan must report what it actually saw: {scanned4} of {total4}")
+    # The shelf list is a live thing, not a contract: Moscow's came back EMPTY
+    # while Petersburg's was full, and Kazan's held only the «coming soon» shelf.
+    # Falling back to the convention the server uses for this family is what keeps
+    # «what is on in Moscow» from answering «no cinema here».
+    thin = CountingSession({"events_collection": listing({}),
+                            "events_by_service": {"collections": []}})
+    code = thin.afisha_collection_code("Segodnya-v_kino_", "movie", city="Казань")
+    check(code == "Segodnya-v_kino_Kazan",
+          f"an empty shelf list must fall back to the convention, got {code!r}")
+    _, _, total5 = thin.cinema_movies(city="Казань", max_pages=1)
+    check(total5 == 120, f"the listing must still be reachable: {total5}")
     print("  cinema_search: every page is seen, concurrently, and a capped scan says so")
 
 

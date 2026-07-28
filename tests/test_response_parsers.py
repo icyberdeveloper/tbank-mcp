@@ -658,8 +658,48 @@ def test_free_seating_counts_choices_not_tickets():
     print("  free seating: sector count, one line per choice, not per ticket")
 
 
+def test_a_city_is_resolved_or_refused_never_assumed():
+    """cityId used to be Moscow and only Moscow, and the collection code was built
+    by transliterating the city name — a guess that is right for Moscow and wrong
+    wherever the server spells it differently (its own shelves say Moskva, moscow
+    and msk). Both are gone; what replaces them must never quietly answer about
+    Moscow when asked about somewhere else."""
+    from src.client import city_id_of, CITY_IDS, TbankApiError
+
+    check(city_id_of("Москва") == "1", "Moscow must resolve to 1")
+    check(city_id_of("санкт-петербург") == "2", "case must not matter")
+    check(city_id_of("СПб") == "2", "the alias people actually type must work")
+    check(city_id_of("Ростов-на-Дону") == "12", "hyphenated names must resolve")
+    check(len(CITY_IDS) > 60,
+          f"the table should carry the whole walked range, has {len(CITY_IDS)}")
+
+    # An explicit id is the escape hatch for a city outside the table, and it wins.
+    check(city_id_of("Москва", 77) == "77", "an explicit city_id must win")
+    check(city_id_of("", 77) == "77", "an explicit city_id needs no name")
+
+    # The two refusals. Neither may fall back to Moscow.
+    for bad, why in ((("Атлантида", 0), "an unknown city"),
+                     (("", 0), "no city at all")):
+        try:
+            city_id_of(*bad)
+            check(False, f"{why} was accepted instead of refused")
+        except TbankApiError as e:
+            check("1" != str(e), "must not be a silent Moscow")
+            check(e.result_code in ("UNKNOWN_CITY", "CITY_REQUIRED"),
+                  f"{why}: wrong code {e.result_code}")
+
+    # A near miss should hand back something to try rather than just «no».
+    try:
+        city_id_of("Казан")
+        check(False, "a near miss was accepted")
+    except TbankApiError as e:
+        check("Казань" in str(e), f"the refusal should suggest the real name: {e}")
+    print("  cities: names, aliases and explicit ids resolve; unknown refuses")
+
+
 def main():
     print("response parsers:")
+    test_a_city_is_resolved_or_refused_never_assumed()
     test_search_keeps_the_venues_it_used_to_drop()
     test_free_seating_counts_choices_not_tickets()
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
