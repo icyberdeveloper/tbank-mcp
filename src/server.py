@@ -121,6 +121,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "ticket_cancel": ("Отмена заказа", WRITE),
     # search
     "search_app": ("Поиск по приложению", READ),
+    "shop_search": ("Поиск товаров в маркетплейсе", READ),
+    "shop_cart": ("Корзины маркетплейса", READ),
     # messenger
     "messenger_conversations": ("Чаты", READ),
     "messenger_messages": ("История чата", READ),
@@ -2836,6 +2838,76 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return _err(e)
 
 @mcp.tool()
+def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
+    """Поиск товаров в маркетплейсе Т-Банка (Город → Шопинг).
+
+    Пагинация СЕРВЕРНАЯ: offset листает выдачу, всего результатов видно в шапке.
+    Печатает skuId, pointId и shopId — эту тройку принимает корзина.
+
+    Оформить и оплатить заказ отсюда НЕЛЬЗЯ: в захвате нет подтверждённого шага
+    размещения, только расчёт доставки. Собранную корзину пользователь
+    оформляет в приложении."""
+    try:
+        s = _require(); s.ensure_fresh()
+        size = limit if limit > 0 else 20
+        products, partners, total = s.shop_search(query, offset=offset, size=size)
+        if not products:
+            return f"По запросу «{query}» товаров не найдено."
+        by_shop = {str(p.get("id")): p.get("name") for p in partners}
+
+        def render(p):
+            price, old = p.get("price"), p.get("oldPrice")
+            money = f"{price} ₽" if price else "цена не указана"
+            if old and old != price:
+                money += f" (было {old}, {p.get('discount') or ''})".rstrip(", )") + ")"
+            seller = by_shop.get(str(p.get("dolyameShopId")), "")
+            rating = p.get("rating") or 0
+            return (f"- {money} | {_cut(p.get('name', '?'), 52)}"
+                    + (f" | {seller}" if seller else "")
+                    + (f" | ★{rating} ({p.get('totalRatings')})" if rating else "")
+                    + ("" if p.get("available", True) else " | НЕТ В НАЛИЧИИ")
+                    + f" | skuId={p.get('skuId') or p.get('id')}"
+                    + f" pointId={p.get('pointId', '?')}"
+                    + f" shopId={p.get('dolyameShopId', '?')}")
+
+        nxt = (f"Следующая страница: offset={offset + len(products)}."
+               if offset + len(products) < total else "")
+        return _rows_out(products, render, limit=size, total=total,
+                         header=f"Товары по запросу «{query}»",
+                         more_hint=nxt or "Это всё.")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def shop_cart() -> str:
+    """Корзины маркетплейса — по одной на продавца.
+
+    Оформление заказа через MCP не поддерживается: подтверждённого шага
+    размещения в захвате нет. Корзину видно, оплатить её надо в приложении."""
+    try:
+        s = _require(); s.ensure_fresh()
+        carts = s.shop_carts()
+        if not carts:
+            return "Корзины маркетплейса пусты."
+        out = []
+        for c in carts:
+            items = c.get("items") or c.get("goods") or []
+            out.append(f"{c.get('merchantName') or c.get('shoppingMerchantId') or '?'}"
+                       f" | позиций: {len(items)}"
+                       + (f" | cartId={c['cartId']}" if c.get("cartId") else ""))
+            for it in items[:20]:
+                kop = it.get("totalPriceInKopecks")
+                money = f"{kop / 100:.0f} ₽" if kop else ""
+                out.append(f"  - {_cut(it.get('name', '?'), 46)} × "
+                           f"{it.get('quantity', '?')}"
+                           + (f" = {money}" if money else ""))
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
 def ticket_qr(order_id: str) -> str:
     """Сам билет по оплаченному заказу: код брони, QR и ссылка на PDF.
 
@@ -3262,6 +3334,7 @@ _FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "docs", "FLOWS.md")
 # addition to the section title, so a Russian request finds an English heading.
 _FLOW_KEYWORDS = {
     "bootstrap": "логин вход авторизация otp смс пароль пин первый login",
+    "marketplace": "маркетплейс шопинг товар товары купить магазин продавец корзина",
     "session": "сессия токен refresh keepalive expired протух",
     "read accounts": "счета счёт баланс операции покупки траты расходы категории",
     "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",

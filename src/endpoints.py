@@ -1682,3 +1682,39 @@ VERTICAL_ALIASES = {
     "выставка": "exhibition", "музей": "exhibition",
     "exhibition": "exhibition", "museum": "exhibition",
 }
+
+
+# ---- marketplace (Шопинг) --------------------------------------------------
+# webview.t-bank-app.ru serves the shopping webview, and it is not the native
+# app: across 179 captured requests there is not one Authorization header. It
+# authorises on cookies whose sessionID and sso_api_session both carry the very
+# access_token the mobile session already holds — hence no_bearer, and the cookie
+# is assembled in MobileSession._cookie_for. It also wants none of the native
+# query context: appName, appVersion and platform=webview_ios, nothing else.
+#
+# The search parameter is `search`, NOT `query` — the sibling media endpoint uses
+# `query`, which is exactly the kind of near-miss worth writing down.
+_SHOP = {"appName": "mobile", "appVersion": "7.31.6", "platform": "webview_ios"}
+_SHOP_LEAN = {"no_base_params": True, "no_bearer": True}
+
+BUILTIN_ENDPOINTS.update({
+    # The delivery address, and the only source of the lat/lon that search wants.
+    "shop_address": {"method": "GET", "host": "https://webview.t-bank-app.ru",
+                     "path": "/mybank/api/shopping/mobile/v1/addresses/get",
+                     "params": dict(_SHOP), **_SHOP_LEAN},
+    # ?search=&size=&offset=&latitude=&longitude= — server-side paging, real
+    # totalHits. Products carry skuId/pointId/dolyameShopId, which is the triple a
+    # cart write needs.
+    "shop_search": {"method": "GET", "host": "https://webview.t-bank-app.ru",
+                    "path": "/mybank/api/shopping/mobile/v5/search/multi-search",
+                    "params": {**_SHOP, "size": "20", "offset": "0",
+                               "withFacets": "true", "showRating": "false",
+                               "withCorrection": "true", "showUnavailable": "true",
+                               "addUtm": "true", "useAutoFilters": "true"},
+                    **_SHOP_LEAN},
+    # Empty body with Content-Length: 0 — body=None, not {}.
+    "shop_carts": {"method": "POST", "host": "https://webview.t-bank-app.ru",
+                   "path": "/mybank/api/shopping/mobile/v1/carts/get-user-carts",
+                   "params": dict(_SHOP),
+                   "headers": {"Content-Type": "application/json"}, **_SHOP_LEAN},
+})

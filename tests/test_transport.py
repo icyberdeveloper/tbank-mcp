@@ -423,8 +423,11 @@ def test_a_lean_host_gets_only_what_the_app_sends_it():
               f"a lean host got extra query params: {sorted(lean['params'])}")
         check("Authorization" not in lean["headers"],
               f"a lean host must get no Bearer: {sorted(lean['headers'])}")
-        check(lean["headers"].get("Cookie") == "SSO_SESSION=x",
-              f"the cookie is how it authorises: {lean['headers'].get('Cookie')!r}")
+        cookie = lean["headers"].get("Cookie") or ""
+        # This host authorises on the access_token carried as sessionID, not on
+        # the SSO cookie every other host takes — sending the wrong one is a 400.
+        check("sessionID=tok" in cookie and "SSO_SESSION" not in cookie,
+              f"the shopping host needs its own cookie: {cookie!r}")
 
         # The default is unchanged: everything else still carries the full context.
         s2 = session()

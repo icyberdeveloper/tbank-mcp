@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **66 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **68 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -356,6 +356,25 @@ hits carry the venue's `objectId` — the same id `cinema_schedule(object_id=…
 and the venue endpoints take. They used to be dropped by the parser, so a search
 for a cinema by name answered with nothing; if a query that should match a venue
 still returns none, that is the bank's index, not ours.
+
+## 13. Marketplace — searching Шопинг
+
+`shop_search(query, limit, offset)` and `shop_cart()`. Paging here is the
+SERVER's — offset/size are real and totalHits is honest — unlike the afisha
+listings, where a name is matched locally and every page has to be read first.
+Products print the skuId/pointId/shopId triple a cart write needs, and the seller
+comes from a separate `partners` list keyed by the product's dolyameShopId.
+
+The host is not the native app: 179 captured requests, not one Authorization
+header. It authorises on cookies carrying the access_token the mobile session
+already holds, and wants none of the native query context — which is what the
+`no_bearer` / `no_base_params` template flags are for. The search parameter is
+`search`, not `query`; the sibling media endpoint uses `query`.
+
+> **Placing an order is NOT supported.** `process-order` returns delivery options
+> and a price and nothing in any capture goes further, so there is no confirmed
+> step that places or pays for a marketplace order and none is invented. Search
+> and read the cart here; finish in the app.
 
 ## Notes
 

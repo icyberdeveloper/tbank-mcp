@@ -1075,6 +1075,14 @@ class MobileSession:
             # Minted on demand from the access_token via issueTokenBySSO.
             self._ensure_tmsg()
             return f"tmsgSessionID={self.tmsg_session_id}" if self.tmsg_session_id else ""
+        if "webview.t-bank-app.ru" in host:
+            # The shopping webview sends no Authorization at all — 179 captured
+            # requests, not one Bearer — and authorises on cookies whose sessionID
+            # and sso_api_session both hold the very access_token we already have.
+            # deviceId rides uppercase there, as the app writes it.
+            return (f"sessionID={self.access_token}; "
+                    f"sso_api_session={self.access_token}; "
+                    f"deviceId={(self.device_id or '').upper()}")
         return self.cookie_str or ""
 
     def _ensure_tmsg(self) -> None:
@@ -3598,6 +3606,43 @@ class MobileSession:
             q = _norm_city(query)
             uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
         return uniq, amount
+
+    # ---- marketplace (Шопинг) ---------------------------------------------
+
+    def shop_geo(self) -> dict:
+        """The delivery address, memoised. Search wants its lat/lon, and asking
+        for it per search would double the cost of every query."""
+        memo = getattr(self, "_memo", None)
+        if memo is None:
+            memo = self._memo = {}
+        if "shop_geo" not in memo:
+            memo["shop_geo"] = self._call_read("shop_address") or {}
+        return memo["shop_geo"]
+
+    def shop_search(self, query: str, offset: int = 0,
+                    size: int = 20) -> tuple[list[dict], list[dict], int]:
+        """Marketplace products, as (products, partners, total_hits).
+
+        Paging is the server's here — offset/size are real — unlike the afisha
+        listings where a name has to be matched locally.
+
+        The seller lives in a separate `partners` list, keyed by the product's
+        dolyameShopId; the product itself only carries the id."""
+        geo = self.shop_geo()
+        ov = {"search": query, "offset": str(max(0, offset)), "size": str(size)}
+        if geo.get("latitude") and geo.get("longitude"):
+            ov["latitude"] = str(geo["latitude"])
+            ov["longitude"] = str(geo["longitude"])
+        data = self._call_read("shop_search", overrides=ov) or {}
+        return ([p for p in (data.get("products") or []) if isinstance(p, dict)],
+                [p for p in (data.get("partners") or []) if isinstance(p, dict)],
+                int(data.get("totalHits") or 0))
+
+    def shop_carts(self) -> list[dict]:
+        """Carts, one per seller. body=None: the captured call sends
+        Content-Length: 0, and body={} would put a literal `{}` on the wire."""
+        data = self._call_read("shop_carts") or {}
+        return [c for c in (data.get("carts") or []) if isinstance(c, dict)]
 
     def ticket_artifacts(self, order_id: str) -> dict:
         """What is actually presented at the door, for one order.
