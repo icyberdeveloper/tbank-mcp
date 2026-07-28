@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **61 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **64 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -294,6 +294,16 @@ skill. The order here is the part you must not improvise:
    Only after the user confirms a concrete sum and concrete seats. The tool
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
+
+> **Venue first.** `afisha_places(kind, city)` is the only way to an objectId
+> without going through some event that plays there — it lists cinemas, halls,
+> theatres and museums with their ids. There is no server-side search on it, so a
+> name is matched locally and every page is read first; a 204 means that vertical
+> is not serving, which is a different answer from «no venues here». With an id in
+> hand, `cinema_schedule(object_id=…, date=…)` returns a cinema's WHOLE day in one
+> request, and `place_schedule(object_id)` does the same for concerts, theatre and
+> exhibitions. `place_info` completes the card — its address field comes back empty,
+> so pass `with_halls=True` to get one.
 
 > **Which vertical.** `kind` selects it: `кино` | `концерт` | `театр` | `выставка`
 > (the API's own `movie`/`concert`/`spectacle`/`exhibition` are accepted too). They

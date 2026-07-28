@@ -108,6 +108,9 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     # tickets
     "cinema_search": ("Поиск фильма", READ),
     "cinema_schedule": ("Расписание сеансов", READ),
+    "afisha_places": ("Площадки города", READ),
+    "place_schedule": ("Афиша площадки", READ),
+    "place_info": ("Карточка площадки", READ),
     "cinema_seats": ("Свободные места", READ),
     "concert_schedule": ("Показы концерта", READ),
     "concert_hall": ("Секторы концертной площадки", READ),
@@ -2569,22 +2572,34 @@ def cinema_search(query: str = "", city: str = "", limit: int = 20,
         return _err(e)
 
 @mcp.tool()
-def cinema_schedule(event_id: str, date: str, cinema: str = "",
+def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
                     around: str = "", window_min: int = 90,
-                    city: str = "") -> str:
-    """Сеансы фильма на дату. event_id — из cinema_search(), date — YYYY-MM-DD.
+                    city: str = "", object_id: str = "") -> str:
+    """Сеансы кино на дату. date — YYYY-MM-DD.
+
+    Три режима:
+    - object_id БЕЗ event_id — ВЕСЬ репертуар кинотеатра на день, один запрос.
+      Так и надо отвечать на «что идёт завтра в этом кинотеатре»: перебирать
+      афишу города по фильму и дорого, и неполно — сегодняшний список не знает
+      о фильме, который идёт только завтра.
+    - event_id + object_id — один фильм в одном кинотеатре.
+    - event_id + city — этот фильм по всему городу, с сортировкой по расстоянию.
+
+    objectId кинотеатра берётся из afisha_places() или из search_app().
     cinema — подстрока названия кинотеатра ("каро 11"), around — время "17:00",
     window_min — допуск в минутах вокруг него.
-    city — город, ОБЯЗАТЕЛЕН и передаётся именем (этот эндпоинт берёт название,
-    а не числовой cityId). Он же задаёт точку, от которой считается расстояние
-    до кинотеатров, поэтому передавай тот же город, что и в cinema_search():
-    расписание Петербурга, отсортированное от центра Москвы, выглядит
-    правдоподобно и бессмысленно.
+    city — обязателен, ЕСЛИ не задан object_id, и передаётся именем (этот
+    эндпоинт берёт название, а не числовой cityId). Он же задаёт точку, от
+    которой считается расстояние до кинотеатров, поэтому передавай тот же город,
+    что и в cinema_search(): расписание Петербурга, отсортированное от центра
+    Москвы, выглядит правдоподобно и бессмысленно. С object_id город не нужен —
+    площадка его уже задаёт.
     Отдаёт objectId площадки и slotId каждого сеанса — оба нужны для
     cinema_seats() и cinema_book(), поодиночке бесполезны."""
     try:
         s = _require(); s.ensure_fresh()
-        venues = s.cinema_schedule(event_id, date, city=city)
+        venues = s.cinema_schedule(event_id, date, city=city,
+                                    object_id=object_id)
         want = cinema.lower().replace("ё", "е").split()
         target = None
         if around:
@@ -2612,19 +2627,28 @@ def cinema_schedule(event_id: str, date: str, cinema: str = "",
                     continue
                 shown += 1
                 km = (geo.get("distance") or 0) / 1000.0
-                # objectId identifies the VENUE and is required by cinema_seats /
-                # cinema_book alongside the slotId. Without it the documented flow
-                # dead-ends: the agent holds a slotId it cannot use and has no other
-                # tool that yields a cinema objectId. concert_schedule already prints it.
-                lines.append(f"{name} — {geo.get('address','')}"
-                             + (f"  [{km:.1f} км]" if km else "")
-                             + f" | objectId={info.get('objectId','?')}")
+                # Two different questions share this response. Asked about a FILM,
+                # each entry is a different cinema and the venue is the heading.
+                # Asked about a CINEMA, every entry carries the SAME venue and what
+                # varies is the film — printing the venue each time reads as «24
+                # площадок» for one address.
+                if object_id:
+                    if not lines:
+                        lines.append(f"{name} — {geo.get('address','')}"
+                                     f" | objectId={info.get('objectId','?')}")
+                    lines.append(f"  {ev.get('eventName') or '?'}")
+                else:
+                    lines.append(f"{name} — {geo.get('address','')}"
+                                 + (f"  [{km:.1f} км]" if km else "")
+                                 + f" | objectId={info.get('objectId','?')}")
                 lines += [f"    {x}" for x in slots]
         if not lines:
             hint = f", фильтр «{cinema}»" if cinema else ""
             hint += f", около {around} ±{window_min} мин" if around else ""
             return (f"Сеансов на {date} не найдено ({len(venues)} кинотеатров в выдаче{hint}).")
-        return f"{shown} площадок с подходящими сеансами на {date}:\n" + "\n".join(lines)
+        head = (f"{shown} фильмов в этом кинотеатре на {date}:" if object_id
+                else f"{shown} площадок с подходящими сеансами на {date}:")
+        return head + "\n" + "\n".join(lines)
     except Exception as e:
         return _err(e)
 
@@ -2808,6 +2832,117 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return "\n".join(out)
     except Exception as e:
         return _err(e)
+
+@mcp.tool()
+def afisha_places(kind: str = "movie", city: str = "", query: str = "",
+                  city_id: int = 0, limit: int = 20, pages: int = 4) -> str:
+    """Площадки города: кинотеатры, залы, театры, музеи — с их objectId.
+
+    Это единственный способ узнать objectId площадки, не заходя через какое-то
+    событие в ней. Дальше objectId принимают cinema_schedule(object_id=…) —
+    весь репертуар кинотеатра на день, — place_schedule() и place_info().
+
+    kind — "кино" | "концерт" | "театр" | "выставка". city обязателен (или
+    city_id числом).
+    query — фильтр по названию. Он МЕСТНЫЙ: у банка текстового поиска по
+    площадкам нет, поэтому страницы читаются целиком до фильтрации.
+    pages — сколько страниц по 100 прочитать."""
+    try:
+        s = _require(); s.ensure_fresh()
+        places, total = s.afisha_places(kind=kind, city=city, city_id=city_id,
+                                        query=query, max_pages=pages)
+        if not places:
+            return (f"Площадок не найдено ({kind}, {city or city_id}"
+                    + (f", запрос «{query}»" if query else "") + ").")
+
+        def render(o):
+            metro = ", ".join(m.get("name", "") for m in (o.get("subways") or []) if m)
+            return (f"- {_cut(o.get('name', '?'), 44)} | "
+                    f"{_cut(o.get('address') or '—', 46)}"
+                    + (f" | м. {_cut(metro, 28)}" if metro else "")
+                    + f" | objectId={o.get('id', '?')}")
+
+        head = f"Площадки ({kind}, {city or city_id})"
+        if query:
+            head += f", совпадений с «{query}»"
+        return _rows_out(places, render, limit=limit,
+                         total=len(places) if query else total, header=head,
+                         more_hint=f"Передай limit={len(places)}, чтобы увидеть все.")
+    except Exception as e:
+        # A 204 here is «this vertical is not serving», not «no venues» — live,
+        # only cinema answers while concert, theatre and exhibition all 204.
+        msg = _err(e)
+        if "204" in msg:
+            msg += (f"\nЭто не «площадок нет»: раздел «{kind}» сейчас не отвечает. "
+                    "Живьём отвечает только кино.")
+        return msg
+
+
+@mcp.tool()
+def place_schedule(object_id: str, limit: int = 20, page: int = 1,
+                   count: int = 50) -> str:
+    """Что идёт на площадке: концерты, спектакли, выставки.
+
+    КИНО здесь НЕТ — репертуар кинотеатра берётся
+    cinema_schedule(object_id=…, date=…).
+    object_id — из afisha_places() или search_app()."""
+    try:
+        s = _require(); s.ensure_fresh()
+        events, total = s.place_schedule(object_id, page=page, count=count)
+        if not events:
+            return (f"На площадке {object_id} ничего не найдено. Если это "
+                    "кинотеатр — cinema_schedule(object_id=…, date=…).")
+
+        def render(e):
+            dates = e.get("dates") or []
+            when = str(dates[0])[:10] if dates else str(e.get("date") or "")[:10]
+            pr = e.get("prices") or (e.get("fields") or {}).get("prices") or {}
+            lo, hi = pr.get("min"), pr.get("max")
+            money = (f"{lo:.0f}–{hi:.0f} ₽" if lo and hi and lo != hi
+                     else f"от {lo:.0f} ₽" if lo else "цена не указана")
+            return (f"- {_cut(e.get('eventName') or e.get('name') or '?', 46)} | "
+                    f"{when or '—'} | {money} | eventId={e.get('eventId', '?')}")
+
+        return _rows_out(events, render, limit=limit, total=total,
+                         header=f"Афиша площадки {object_id}",
+                         more_hint=f"Передай limit={total} или page={page + 1}.")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def place_info(object_id: str, with_halls: bool = False) -> str:
+    """Карточка площадки: название, город, метро, залы.
+
+    Адрес в самой карточке приходит ПУСТЫМ — во всех захваченных ответах, — так
+    что with_halls=True дочитывает залы, где адрес есть."""
+    try:
+        s = _require(); s.ensure_fresh()
+        d = s.place_info(object_id, with_halls=with_halls)
+        if not d:
+            return f"Площадка {object_id} не найдена."
+        info = d.get("info") if isinstance(d.get("info"), dict) else d
+        geo = info.get("geo") or {}
+        metro = ", ".join(m.get("name", "") for m in (info.get("subways") or []) if m)
+        out = [f"{info.get('objectName') or info.get('name') or '?'} "
+               f"| objectId={object_id}"]
+        if geo.get("city"):
+            out.append(f"Город: {geo['city']}")
+        if geo.get("address"):
+            out.append(f"Адрес: {geo['address']}")
+        if metro:
+            out.append(f"Метро: {metro}")
+        halls = d.get("halls") or []
+        for h in halls[:10]:
+            hgeo = h.get("geo") or {}
+            out.append(f"- зал {h.get('hallName') or h.get('name') or '?'}"
+                       + (f" — {hgeo.get('address')}" if hgeo.get("address") else ""))
+        if not geo.get("address") and not halls:
+            out.append("Адрес в карточке пуст — вызови с with_halls=True.")
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
 
 @mcp.tool()
 def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,

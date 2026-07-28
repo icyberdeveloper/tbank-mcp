@@ -1540,6 +1540,32 @@ BUILTIN_ENDPOINTS.update({
     # different ways (Moskva, moscow, msk) depending on the shelf.
     "events_by_service": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
                           "path": "/api/events/by/service", "params": {}},
+
+    # ---- venues -----------------------------------------------------------
+    # ?service=&cityId=&page=&count=&include=all — the venue directory, and the
+    # only way to learn an objectId without going through some event that plays
+    # there. count tops out at 100: 116 answers 400, so Moscow's 116 cinemas are
+    # two pages. There is NO text search — no q/query/name/title in any captured
+    # request — so matching a name is the client's job and every page has to be
+    # read before filtering. service is a validated enum: cinema/concert/theatre/
+    # exhibition are accepted (spectacle and museum answer 400), but only cinema
+    # returns data right now; the other three answer 204, which is «this vertical
+    # is not serving» and must not be printed as «no venues here».
+    "events_places": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                      "path": "/api/events/objects",
+                      "params": {"include": "all", "page": "1", "count": "100"}},
+    # ?objectId&page&count — what is on at one venue. Covers concert, theatre and
+    # exhibition; cinemas are NOT here, their repertoire comes from schedule/movie
+    # with an objectId and a date.
+    "place_schedule": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                       "path": "/api/events/place/schedule",
+                       "params": {"page": "1", "count": "50"}},
+    # ?objectId — the venue card. geo.address came back EMPTY in all seven captured
+    # calls, so the address has to be read from place_halls instead.
+    "place_info": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                   "path": "/api/events/place/info", "params": {}},
+    "place_halls": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
+                    "path": "/api/events/place/halls", "params": {}},
 })
 
 

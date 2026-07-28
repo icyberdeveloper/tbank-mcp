@@ -159,7 +159,7 @@ class ScheduleSession(MobileSession):
     def ensure_fresh(self, *a, **kw):
         return None
 
-    def cinema_schedule(self, event_id, date, city="Москва"):
+    def cinema_schedule(self, event_id="", date="", city="", object_id="", **kw):
         return self.venues
 
 

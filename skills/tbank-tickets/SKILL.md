@@ -28,7 +28,10 @@ MCP работает с настоящей афишей Т-Банка: брон�
 |---|---|---|
 | `search_app(query, screen="afisha")` | Поиск по афише: кино, концерты, театр, выставки. Отдаёт `eventId` | нет |
 | `cinema_search(query, city, city_id)` | Только фильмы в сегодняшнем прокате города. `city` ОБЯЗАТЕЛЕН | нет |
-| `cinema_schedule(event_id, date, cinema, around, window_min, city)` | Сеансы фильма на дату. Отдаёт `slotId`, `objectId`, цену, зал. `city` — ОБЯЗАТЕЛЕН и тот же, что в `cinema_search`: задаёт и город, и точку сортировки по расстоянию | нет |
+| `cinema_schedule(event_id, date, cinema, around, window_min, city, object_id)` | Сеансы фильма на дату. Отдаёт `slotId`, `objectId`, цену, зал. `city` — ОБЯЗАТЕЛЕН и тот же, что в `cinema_search`: задаёт и город, и точку сортировки по расстоянию | нет |
+| `afisha_places(kind, city, query, city_id, limit, pages)` | Площадки города с их `objectId`: кинотеатры, залы, театры, музеи. Поиск по названию МЕСТНЫЙ | нет |
+| `place_schedule(object_id, limit, page)` | Что идёт на площадке (концерт/театр/выставка; кино — нет) | нет |
+| `place_info(object_id, with_halls)` | Карточка площадки; адрес есть только в залах | нет |
 | `concert_schedule(event_id, kind, object_id)` | Показы концерта, спектакля или выставки: площадка, дата, `slotId`, `objectId`. Даты в запросе нет — приходит всё будущее | нет |
 | `cinema_seats(event_id, slot_id, object_id, row, max_price, kind, limit, sector_id)` | Свободные места с ценами; `sector_id` сужает до одного сектора; хвост «…ещё N» снимается `limit` | нет |
 | `concert_hall(event_id, slot_id, object_id, kind)` | Секторы со свободной рассадкой (входные, фан-зоны). Только концерт и театр | нет |

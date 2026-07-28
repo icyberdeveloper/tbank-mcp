@@ -697,9 +697,65 @@ def test_a_city_is_resolved_or_refused_never_assumed():
     print("  cities: names, aliases and explicit ids resolve; unknown refuses")
 
 
+def test_a_cinema_repertoire_reads_as_films_not_as_venues():
+    """Two questions share one response. Asked about a FILM, each entry is another
+    cinema and the venue is the heading. Asked about a CINEMA, every entry carries
+    the SAME venue and what varies is the film — so heading each one printed the
+    address twenty-four times and announced «24 площадок» for one building.
+
+    The request differs too: with a venue there is no city, and none is demanded."""
+    from src.client import TbankApiError
+
+    venue = {"objectId": "10587", "objectName": "Каро 11 Октябрь",
+             "geo": {"address": "Н.Арбат, 24"}}
+    answer = [
+        {"info": venue, "events": [{"eventName": "Майкл", "slots": [
+            {"startTime": "20:20", "prices": {"fix": 660}, "hallName": "ЗАЛ №7",
+             "slotId": "1"}]}]},
+        {"info": venue, "events": [{"eventName": "Холоп 3", "slots": [
+            {"startTime": "18:00", "prices": {"fix": 660}, "hallName": "ЗАЛ №9",
+             "slotId": "2"}]}]},
+    ]
+
+    class Sched(Stub):
+        def __init__(self):
+            super().__init__()
+            self.body = None
+
+        def cinema_schedule(self, event_id="", date="", city="", object_id="", **kw):
+            self.body = {"event_id": event_id, "city": city, "object_id": object_id}
+            return answer
+
+    s = Sched()
+    out = run(server.cinema_schedule, s, "", "2026-07-29", "", "", 90, "", "10587")
+    check("24 площадок" not in out and "2 площадок" not in out,
+          f"a venue's day must not be counted in venues: {out!r}")
+    check("2 фильмов" in out, f"the heading must count films: {out!r}")
+    check(out.count("Н.Арбат, 24") == 1,
+          f"the address belongs once, got {out.count('Н.Арбат, 24')}: {out!r}")
+    check("Майкл" in out and "Холоп 3" in out, f"film names missing: {out!r}")
+    check(s.body["city"] == "" and s.body["object_id"] == "10587",
+          f"a venue query must not carry a city: {s.body}")
+
+    # Asked about a film across a city, the venue stays the heading.
+    s2 = Sched()
+    city_out = run(server.cinema_schedule, s2, "103693", "2026-07-29", "", "", 90,
+                   "Москва", "")
+    check("площадок" in city_out, f"film mode must still count venues: {city_out!r}")
+
+    # Neither a film nor a venue is not a question anyone can answer.
+    try:
+        MobileSession.cinema_schedule(Stub(), date="2026-07-29")
+        check(False, "a schedule with no target was accepted")
+    except TbankApiError as e:
+        check(e.result_code == "NO_TARGET", f"wrong refusal: {e}")
+    print("  schedule: a venue's day lists films, a film's day lists venues")
+
+
 def main():
     print("response parsers:")
     test_a_city_is_resolved_or_refused_never_assumed()
+    test_a_cinema_repertoire_reads_as_films_not_as_venues()
     test_search_keeps_the_venues_it_used_to_drop()
     test_free_seating_counts_choices_not_tickets()
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()

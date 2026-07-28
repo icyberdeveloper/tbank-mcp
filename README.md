@@ -4,7 +4,7 @@
 
 ## Features
 
-- **61 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **64 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
 - **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
   transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
@@ -276,7 +276,7 @@ present the tests additionally check the fixtures have not drifted from it.
   confirmation of a specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 45 are `readOnlyHint: true` and
+  rather than defaulting to anything. Three kinds: 48 are `readOnlyHint: true` and
   may run without a prompt; 12 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
   `destructiveHint: false`; 4 debit an account — `transfer`, `grocery_checkout`,

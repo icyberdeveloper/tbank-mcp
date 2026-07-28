@@ -3458,23 +3458,48 @@ class MobileSession:
         "Казань": (55.7963, 49.1088),
     }
 
-    def cinema_schedule(self, event_id: str, date: str, city: str = "",
-                        latitude: float = 0.0, longitude: float = 0.0) -> list[dict]:
-        """Showtimes for one movie on one date (YYYY-MM-DD), one entry per cinema.
+    def cinema_schedule(self, event_id: str = "", date: str = "", city: str = "",
+                        latitude: float = 0.0, longitude: float = 0.0,
+                        object_id: str = "") -> list[dict]:
+        """Showtimes on one date (YYYY-MM-DD). Three shapes, all capture-shaped:
 
-        This endpoint takes the city as a NAME, not as the numeric cityId the rest
-        of the afisha uses — the captured bodies carry "city": "Москва". It is not
-        defaulted: a Moscow listing is a plausible-looking answer to a question
-        about another city, so an empty city is an error instead.
+        * object_id alone — EVERYTHING that cinema plays that day, in one request.
+          This is the only way to a cinema's repertoire: no other endpoint answers
+          «what is on at this venue» for film, and the alternative is asking the
+          schedule of every film in the city one by one. Verified live against Каро
+          11: 24 films, 48 showings, one call — and one of those films was missing
+          from the city listing entirely, because that listing is today's and the
+          film only ran the next day.
+        * event_id + object_id — one film at one cinema.
+        * event_id + city — that film across the city, sorted by distance.
+
+        The city rides as a NAME here, not as the numeric cityId the rest of the
+        afisha uses; the captured bodies carry "city": "Москва". It is not
+        defaulted, because a Moscow listing is a plausible-looking answer to a
+        question about somewhere else. With object_id the city is not sent at all —
+        the venue already fixes it.
 
         The location only sorts by distance — the whole city is returned either way.
         Pass latitude/longitude to sort around a real point; omitted, the centre of
         `city` is used, and for a city not in CITY_CENTRES the distance sort is
         dropped rather than anchored somewhere arbitrary."""
+        if not (event_id or object_id):
+            raise TbankApiError("NO_TARGET",
+                                "нужен event_id (фильм) или object_id (кинотеатр)")
+        body: dict = {"date": date}
+        if object_id:
+            body["objectId"] = str(object_id)
+            if event_id:
+                body["eventId"] = str(event_id)
+            data = self._call_read("schedule_movie", body=body)
+            lst = (data or {}).get("list") if isinstance(data, dict) else data
+            return lst if isinstance(lst, list) else []
         if not str(city).strip():
             raise TbankApiError("CITY_REQUIRED",
-                                "не назван город; cinema_schedule требует city")
-        body = {"date": date, "eventId": str(event_id), "city": city}
+                                "не назван город; cinema_schedule требует city "
+                                "или object_id кинотеатра")
+        body["eventId"] = str(event_id)
+        body["city"] = city
         if not (latitude or longitude):
             latitude, longitude = self.CITY_CENTRES.get(city, (0.0, 0.0))
         if latitude or longitude:
@@ -3483,6 +3508,70 @@ class MobileSession:
         data = self._call_read("schedule_movie", body=body)
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []
+
+    # ---- venues ----------------------------------------------------------
+
+    PLACES_PAGE = 100              # the endpoint's ceiling: 116 answers 400
+
+    def afisha_places(self, kind: str = "movie", city: str = "",
+                      city_id: int | str = 0, query: str = "",
+                      max_pages: int = 4) -> tuple[list[dict], int]:
+        """Venues of one vertical in one city, as (matches, total).
+
+        There is no server-side search here — no captured request carries a name
+        parameter of any kind — so `query` is matched locally, which means every
+        page has to be read before filtering, exactly as with the film listing.
+
+        A 204 from this endpoint means the vertical is not serving, NOT that the
+        city has no venues: live, cinema answers while concert, theatre and
+        exhibition all return 204. The distinction matters — «нет площадок» and
+        «раздел не отвечает» are different answers to the user."""
+        cid = city_id_of(city, city_id)
+        service = vertical(kind)["service"]
+        out: list[dict] = []
+        total = 0
+        for page in range(1, max(1, max_pages) + 1):
+            data = self._call_read("events_places", overrides={
+                "service": service, "cityId": cid, "page": str(page),
+                "count": str(self.PLACES_PAGE)})
+            objs = [o for o in ((data or {}).get("objects") or [])
+                    if isinstance(o, dict)]
+            total = int(((data or {}).get("pagination") or {}).get("totalItems") or 0)
+            out.extend(objs)
+            if len(out) >= total or not objs:
+                break
+        q = _norm_city(query) if query else ""
+        if q:
+            out = [o for o in out if q in _norm_city(o.get("name") or "")]
+        return out, total
+
+    def place_schedule(self, object_id: str, page: int = 1,
+                       count: int = 50) -> tuple[list[dict], int]:
+        """What is on at one venue, as (events, total).
+
+        Concerts, theatre and exhibitions only — a cinema's repertoire lives in
+        cinema_schedule(object_id=…, date=…) instead."""
+        data = self._call_read("place_schedule", overrides={
+            "objectId": str(object_id), "page": str(page), "count": str(count)})
+        payload = data or {}
+        lst = payload.get("list") or payload.get("events") or []
+        return ([e for e in lst if isinstance(e, dict)],
+                int(payload.get("amount") or 0))
+
+    def place_info(self, object_id: str, with_halls: bool = False) -> dict:
+        """Venue card. `geo.address` came back empty in every captured call, so
+        with_halls stitches in the halls answer, which does carry addresses."""
+        data = self._call_read("place_info", overrides={"objectId": str(object_id)})
+        out = data if isinstance(data, dict) else {}
+        if with_halls:
+            try:
+                halls = self._call_read("place_halls",
+                                        overrides={"objectId": str(object_id)})
+                out = dict(out)
+                out["halls"] = (halls or {}).get("list") or (halls or {}).get("halls") or []
+            except TbankApiError:
+                pass
+        return out
 
     # ---- ticket booking (cinema + concerts) ------------------------------
 
