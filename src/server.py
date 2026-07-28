@@ -2177,7 +2177,10 @@ def documents(kind: str = "", include_others: bool = False) -> str:
 # ── ORDERS ACROSS EVERY VERTICAL ────────────────────────────
 
 _ORDER_KINDS = {
-    "афиша": ("cinema", "concerthall", "club", "sports", "other"),
+    # `museum` is what an exhibition order carries — without it those orders fell
+    # out of the feed silently, which reads as «no such order» rather than «this
+    # filter does not know that type».
+    "афиша": ("cinema", "concerthall", "theatre", "museum", "club", "sports", "other"),
     "кино": ("cinema",),
     "путешествия": ("avia_ticket", "trains_ticket", "hotelBooking"),
     "продукты": ("grocery",),
@@ -2449,14 +2452,22 @@ def _search_rows(hits: list[dict]) -> tuple[list[dict], int]:
             continue
         if kind in _SEARCH_NOISE:
             continue
-        name = src.get("eventName") or src.get("name") or ""
+        # A VENUE hit (cinema/concerthall/theatre/museum, and the travel host's
+        # airport/railway_stations) names itself in objectName and carries no
+        # eventName at all — reading only the event keys dropped every one of them,
+        # so searching for a cinema by name returned nothing. Its id sits both on
+        # the hit and in objectSource.objectId.
+        event_name = src.get("eventName") or ""
+        name = event_name or src.get("objectName") or src.get("name") or ""
         note = ""
-        ident = str(src.get("eventId") or src.get("id") or "")
+        ident = str(src.get("eventId") or src.get("objectId")
+                    or src.get("id") or hit.get("id") or "")
         if not name and isinstance(src.get("title"), dict):
             name = src["title"].get("value") or ""
             note = ((src.get("titleDescription") or {}).get("value") or "")
             deeplink = (src.get("link") or {}).get("deeplink") or ""
-            m = re.search(r"[?&](?:movieId|eventId|id)=([^&]+)", deeplink)
+            m = (re.search(r"[?&](?:movieId|eventId|cinemaId|id)=([^&]+)", deeplink)
+                 or re.search(r"/Venue/(\d+)", deeplink))
             ident = m.group(1) if m else ident
         if not name:
             if not ident:
@@ -2464,10 +2475,15 @@ def _search_rows(hits: list[dict]) -> tuple[list[dict], int]:
                 continue
             name = "[без названия]"
         if not note:
-            venue = src.get("objectName") or ""
-            when = src.get("dateForShow") or ""
-            price = src.get("priceForShow") or ""
-            note = " · ".join(x for x in (venue, when, price) if x)
+            if event_name:
+                # For an event, objectName is where it plays.
+                parts = (src.get("objectName") or "", src.get("dateForShow") or "",
+                         src.get("priceForShow") or "")
+            else:
+                # For a venue, objectName is already the name — what locates it is
+                # the address.
+                parts = (src.get("address") or "", src.get("city") or "")
+            note = " · ".join(x for x in parts if x)
         rows.append({"type": kind, "name": name, "note": note, "id": ident})
     return rows, skipped
 

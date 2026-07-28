@@ -2312,7 +2312,14 @@ class MobileSession:
     #   afisha     — the same entertainment set, slightly narrower
     #   movie_main — movies only
     #   grocery    — store catalog (needs applicationId + pointId)
-    SEARCH_SCREENS = ("services", "afisha", "movie_main", "grocery")
+    # The per-vertical screens below were rejected by that probe under other names;
+    # these spellings are the ones the app actually sends (counted in
+    # captures-gorod.xml: exhibition_main 53, concerts_main 26, spectacle_main 22).
+    #   concerts_main   — concerts only (note the plural)
+    #   spectacle_main  — theatre
+    #   exhibition_main — exhibitions
+    SEARCH_SCREENS = ("services", "afisha", "movie_main", "grocery",
+                      "concerts_main", "spectacle_main", "exhibition_main")
 
     def _search_params(self, screen: str, **extra) -> dict:
         """Common query string for the search host."""

@@ -574,8 +574,64 @@ def test_concert_seats_print_the_id_the_booking_tool_demands():
     print("  seats: concerts print the composite seatId, cinemas keep rows")
 
 
+def test_search_keeps_the_venues_it_used_to_drop():
+    """A venue hit names itself in objectName and carries no eventName, so a parser
+    reading only the event keys found neither a name nor an id and counted it as
+    unrecognised. Every cinema, hall and theatre in the results vanished that way —
+    「найди кинотеатр Каро 11」 answered with nothing while the id was right there
+    on the hit. Shapes below are the ones in captures-gorod.xml."""
+    hits = [
+        {"objectType": "cinema", "id": "10587", "objectSource": {
+            "objectId": "10587", "objectName": "Каро 11 Октябрь",
+            "address": "Н.Арбат, 24", "city": "Москва"}},
+        {"objectType": "theatre", "id": "9530", "objectSource": {
+            "objectId": "9530", "objectName": "Театр Российской Армии",
+            "address": "Суворовская пл., 2", "city": "Москва"}},
+        # An event hit must keep rendering exactly as before: objectName is where
+        # it plays, not what it is called.
+        {"objectType": "movie", "objectSource": {
+            "eventId": "103693", "eventName": "Майкл",
+            "objectName": "Каро 11 Октябрь", "dateForShow": "29 июля"}},
+        # Pure scaffolding stays dropped, and silently — it is not a lost result.
+        {"objectType": "masterWidget", "objectSource": {}},
+    ]
+    rows, skipped = server._search_rows(hits)
+    by_name = {r["name"]: r for r in rows}
+    check(len(rows) == 3, f"expected 3 rows, got {len(rows)}: {rows}")
+    check(skipped == 0, f"nothing here is unrecognisable, skipped={skipped}")
+
+    venue = by_name.get("Каро 11 Октябрь")
+    check(venue is not None, f"the cinema was dropped again: {rows}")
+    check(venue and venue["id"] == "10587",
+          f"the venue id must be the objectId a schedule call takes: {venue}")
+    check(venue and "Н.Арбат, 24" in venue["note"],
+          f"a venue is located by its address, not by its own name: {venue}")
+    check(by_name.get("Театр Российской Армии", {}).get("id") == "9530",
+          f"the theatre lost its id: {rows}")
+
+    film = by_name.get("Майкл")
+    check(film and film["id"] == "103693", f"the event id changed: {film}")
+    check(film and "Каро 11 Октябрь" in film["note"],
+          f"an event must still print its venue in the note: {film}")
+
+    # The deeplink forms the app uses for venues, both present in the captures.
+    carded = [
+        {"objectType": "cinema", "objectSource": {
+            "title": {"value": "Каро 11"},
+            "link": {"deeplink": "tinkoffbank://Main/CinemaTickets/Cinemas?cinemaId=10587"}}},
+        {"objectType": "theatre", "objectSource": {
+            "title": {"value": "Ленком"},
+            "link": {"deeplink": "tinkoffbank://Playbill/Venue/12915"}}},
+    ]
+    card_rows, _ = server._search_rows(carded)
+    check([r["id"] for r in card_rows] == ["10587", "12915"],
+          f"venue ids must be read out of both deeplink shapes: {card_rows}")
+    print("  search: venue hits keep their name and objectId; events unchanged")
+
+
 def main():
     print("response parsers:")
+    test_search_keeps_the_venues_it_used_to_drop()
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
     test_concert_seats_print_the_id_the_booking_tool_demands()
     test_a_paid_order_does_not_read_as_unpaid()

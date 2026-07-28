@@ -316,9 +316,16 @@ skill. The order here is the part you must not improvise:
 `search_app(query, screen, limit)` — one full-text search over whatever the given
 screen indexes. `screen` is a strict enum and a wrong value is a 400, not an empty
 result: `services` (banking + everything), `afisha` (cinema/concert/theatre/
-exhibition), `movie_main` (films only), `grocery`. Hits come back grouped by
-`objectType` with their ids; for films the id IS the `eventId` that
-`cinema_schedule` wants, so search → schedule needs no translation step.
+exhibition), `movie_main` (films only), `concerts_main`, `spectacle_main`,
+`exhibition_main`, `grocery`. Hits come back grouped by `objectType` with their
+ids; for films the id IS the `eventId` that `cinema_schedule` wants, so search →
+schedule needs no translation step.
+
+**Venues are searchable too.** `cinema`, `concerthall`, `theatre` and `museum`
+hits carry the venue's `objectId` — the same id `cinema_schedule(object_id=…)`
+and the venue endpoints take. They used to be dropped by the parser, so a search
+for a cinema by name answered with nothing; if a query that should match a venue
+still returns none, that is the bank's index, not ours.
 
 ## Notes
 
