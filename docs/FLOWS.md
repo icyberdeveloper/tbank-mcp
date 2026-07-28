@@ -295,7 +295,9 @@ skill. The order here is the part you must not improvise:
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
 
-7. `ticket_cancel(order_id, kind, payment_id)` → cancels. `orderId` goes in the
+7. `ticket_cancel(order_id, kind, payment_id, force)` → cancels. It reads the
+   order first and, when the bank has flagged it uncancelable, does not send the
+   request at all — `force=True` sends it anyway. `orderId` goes in the
    query, `paymentId` next to it, resolved from the order when the caller omits
    it. What decides the outcome is the order's own `isCancelAvailable`, visible
    in `order_details()`: a flagged-cancelable order settles as

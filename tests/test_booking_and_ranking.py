@@ -308,8 +308,10 @@ CANCEL_ORDER, CANCEL_PAYMENT = "10000000000", "100000000001"
 
 
 def check_cancel_carries_both_ids():
-    """orderId alone is the silent no-op: the host answers 200 "Success", the
-    order stays active and no money comes back. Both ids go in the QUERY."""
+    """Both ids go in the QUERY, and the body stays absent.
+
+    The app sends paymentId, so we send it; the captures give no evidence that
+    omitting it changes the answer — what decides that is isCancelAvailable."""
     s = ReplaySession()
     s.cancel_ticket_order(CANCEL_ORDER, payment_id=CANCEL_PAYMENT)
     check(s.sent_key == "order_cancel_movie", f"wrong template: {s.sent_key!r}")
@@ -348,15 +350,27 @@ def check_cancel_carries_both_ids():
     print("  cancel: orderId + paymentId in the query, empty body, feed lookup")
 
 
-def check_cancel_warns_when_payment_unresolved():
-    """A paid order whose paymentId cannot be found would be cancelled in name
-    only — the tool must not report that as done."""
+def check_cancel_reads_the_order_before_asking():
+    """isCancelAvailable is the only field that predicted the outcome live: the one
+    order flagged true cancelled, seven flagged false were refused and stayed put.
+
+    So a flagged-false order must not be asked at all — sending it is a request we
+    already know the answer to — and a refusal must never read like a cancellation.
+    The previous version of this test asserted the opposite lie (that a missing
+    paymentId gets a silent "Success"), which is why it is gone."""
     from src import server
 
     class CancelSession(ReplaySession):
-        def __init__(self, feed):
+        """Answers the order card and the cancel separately, and records only the
+        cancel — the tool re-reads the card after a success, and that read must not
+        be mistaken for the request under test."""
+
+        def __init__(self, *, available=None, payment_id="", status="CREATED",
+                     verdict=None, feed=()):
             super().__init__()
-            self.feed = feed
+            self.available, self.card_payment_id, self.status = available, payment_id, status
+            self.verdict = verdict if verdict is not None else {"status": "Success"}
+            self.feed, self.cancel_key, self.cancel_query = list(feed), None, None
 
         def ensure_fresh(self, *a, **kw):
             return None
@@ -365,34 +379,62 @@ def check_cancel_warns_when_payment_unresolved():
             return self.feed
 
         def _call_read(self, key, *, overrides=None, body=None, path_override=None):
-            super()._call_read(key, overrides=overrides, body=body)
-            return {"status": "Success"}
+            if key == "order_get":
+                info = {"status": self.status}
+                if self.available is not None:
+                    info["isCancelAvailable"] = self.available
+                return {"orderInfo": info,
+                        "cartInfo": {"paymentId": self.card_payment_id}}
+            self.cancel_key, self.cancel_query = key, dict(overrides or {})
+            return self.verdict
 
     saved = server._require
     try:
-        found = CancelSession([{"orderId": CANCEL_ORDER, "paymentId": CANCEL_PAYMENT}])
-        server._require = lambda: found
+        # 1. The bank says no → nothing is sent, and the answer says why.
+        locked = CancelSession(available=False, status="CREATED")
+        server._require = lambda: locked
         out = server.ticket_cancel(CANCEL_ORDER)
-        check(found.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
-              f"the resolved paymentId never reached the request: {found.sent_overrides}")
-        check("⚠️" not in out, f"a resolved cancel must not warn: {out}")
-        check("Success" in out, f"the host's status must be reported: {out}")
+        check(locked.cancel_key is None,
+              f"a flagged-false order must not be asked, sent {locked.cancel_key!r}")
+        check("isCancelAvailable" in out and "force" in out,
+              f"the refusal must name the field and the escape hatch: {out}")
 
-        missing = CancelSession([{"orderId": "other", "paymentId": "1"}])
-        server._require = lambda: missing
-        warned = server.ticket_cancel(CANCEL_ORDER)
-        check("⚠️" in warned and "paymentId" in warned,
-              f"an unresolved paymentId must be flagged, not swallowed: {warned}")
+        # 2. force=True overrides that — the request goes out.
+        forced = CancelSession(available=False, payment_id=CANCEL_PAYMENT)
+        server._require = lambda: forced
+        server.ticket_cancel(CANCEL_ORDER, force=True)
+        check(forced.cancel_key == "order_cancel_movie",
+              f"force must send the request, sent {forced.cancel_key!r}")
 
-        # Explicit payment_id must win without consulting the feed at all.
-        explicit = CancelSession([])
+        # 3. A business refusal is not a cancellation.
+        refused = CancelSession(available=True,
+                                verdict={"status": "Failed", "code": "1002"})
+        server._require = lambda: refused
+        no = server.ticket_cancel(CANCEL_ORDER)
+        check("ОТКЛОНЕНА" in no and "1002" in no,
+              f"a Failed verdict must read as a refusal with its code: {no}")
+        check("принята" not in no, f"a refusal must not read as accepted: {no}")
+
+        # 4. A success is reported and re-read.
+        ok = CancelSession(available=True, payment_id=CANCEL_PAYMENT,
+                           status="PARTIALLY_CANCELED")
+        server._require = lambda: ok
+        yes = server.ticket_cancel(CANCEL_ORDER)
+        check("принята" in yes, f"a Success must read as accepted: {yes}")
+        check("PARTIALLY_CANCELED" in yes,
+              f"the re-read status must be printed: {yes}")
+        check(ok.cancel_query.get("paymentId") == CANCEL_PAYMENT,
+              f"the card's paymentId never reached the query: {ok.cancel_query}")
+
+        # 5. An explicit payment_id wins over the one on the card.
+        explicit = CancelSession(available=True, payment_id="999")
         server._require = lambda: explicit
         server.ticket_cancel(CANCEL_ORDER, payment_id=CANCEL_PAYMENT)
-        check(explicit.sent_overrides.get("paymentId") == CANCEL_PAYMENT,
-              f"an explicit payment_id was dropped: {explicit.sent_overrides}")
+        check(explicit.cancel_query.get("paymentId") == CANCEL_PAYMENT,
+              f"an explicit payment_id was dropped: {explicit.cancel_query}")
     finally:
         server._require = saved
-    print("  ticket_cancel: resolves paymentId, warns instead of faking success")
+    print("  ticket_cancel: refuses before asking, tells a refusal from a cancellation")
 
 
 class WireSession(MobileSession):
@@ -507,7 +549,7 @@ def main():
     check_ticket_pay_amount_guard()
     test_the_ticket_payment_names_its_calling_system()
     check_cancel_carries_both_ids()
-    check_cancel_warns_when_payment_unresolved()
+    check_cancel_reads_the_order_before_asking()
     fx = fixture()
     check_create(fx["create_movie"], "order/create/movie", "movie",
                  [{"id": "7:10", "type": "basic"}])

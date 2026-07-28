@@ -3403,11 +3403,44 @@ class MobileSession:
         data = self._call_read("payment_gate_pay_mobile", body=body)
         return data if isinstance(data, dict) else {}
 
-    def payment_id_for_order(self, order_id: str) -> str:
-        """paymentId of one order out of the orders() feed, "" if it has none.
+    def order_cancel_context(self, order_id: str) -> dict:
+        """What is worth knowing BEFORE cancelling, from one order_details() call:
+        {"available": bool|None, "status": str, "payment_id": str, "found": bool}.
 
-        Only ~60% of captured order records carry one; an unpaid reservation
-        never does."""
+        `available` is the bank's own isCancelAvailable and is the only field that
+        predicted the outcome across every observed attempt: the one order flagged
+        true cancelled, the seven flagged false were refused and stayed put. None
+        means the field was absent — that is not a refusal, just no signal.
+
+        Read `status`, not `paidFor`: an unpaid reservation carries paidFor=true as
+        well, so that field says nothing about payment. Unpaid ones sit under the
+        same `orderInfo` key and never appear in the orders() feed at all."""
+        try:
+            data = self.order_details(order_id)
+        except TbankApiError:
+            return {"available": None, "status": "", "payment_id": "", "found": False}
+        info = data.get("orderInfo") if isinstance(data.get("orderInfo"), dict) else data
+        cart = data.get("cartInfo") if isinstance(data.get("cartInfo"), dict) else {}
+        avail = info.get("isCancelAvailable")
+        return {
+            "available": avail if isinstance(avail, bool) else None,
+            "status": str(info.get("status") or ""),
+            "payment_id": str(cart.get("paymentId") or ""),
+            "found": bool(info),
+        }
+
+    def payment_id_for_order(self, order_id: str) -> str:
+        """paymentId of one order, "" if it has none.
+
+        The order's own cartInfo carries it and is one request; the orders() feed
+        is the fallback, because a record there can hold a paymentId the card does
+        not return. An unpaid reservation has neither."""
+        try:
+            cart = self.order_details(order_id).get("cartInfo") or {}
+            if isinstance(cart, dict) and cart.get("paymentId"):
+                return str(cart["paymentId"])
+        except TbankApiError:
+            pass
         return next((str(o.get("paymentId")) for o in self.orders()
                      if str(o.get("orderId")) == str(order_id) and o.get("paymentId")),
                     "")

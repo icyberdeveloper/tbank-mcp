@@ -2827,7 +2827,8 @@ def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
         return _err(e)
 
 @mcp.tool()
-def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "") -> str:
+def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "",
+                  force: bool = False) -> str:
     """Отменить заказ билета. kind — "movie" или "concert".
 
     Отменяется заказ, у которого банк сам выставил isCancelAvailable=true — это
@@ -2839,7 +2840,11 @@ def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "") -> s
     отвечает status=Failed с кодом и НИЧЕГО не меняет. Повторять такой вызов
     бессмысленно.
 
-    payment_id подставляется из orders(), если его не передать; он же лежит в
+    Тул сначала читает заказ и, если банк отменять не даёт, НЕ ходит в хост
+    вовсе — такой запрос всё равно ничего бы не изменил. force=True отправляет
+    его всё равно.
+
+    payment_id подставляется из заказа, если его не передать; он же лежит в
     ответе ticket_pay(). У неоплаченной брони его нет — её и не нужно отменять,
     она истекает сама.
 
@@ -2848,20 +2853,39 @@ def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "") -> s
     приложение."""
     try:
         s = _require(); s.ensure_fresh()
-        # Resolved here, not left to the client, so the warning below can tell the
-        # caller a paid order went unmatched — and so orders() is fetched once.
-        payment_id = payment_id or s.payment_id_for_order(order_id)
+        # One read gives all three: the bank's own verdict on whether cancelling is
+        # possible, the order status to print, and the paymentId — which used to
+        # cost a scan of the whole orders feed.
+        ctx = s.order_cancel_context(order_id)
+        if ctx["available"] is False and not force:
+            return (f"Заказ {order_id} (status={ctx['status'] or '?'}) банк отменять не "
+                    "даёт: isCancelAvailable=false. Запрос не отправлен — он вернул бы "
+                    "status=Failed и ничего не изменил.\nОтменяй через приложение или "
+                    "поддержку. force=True — отправить всё равно.")
+        payment_id = payment_id or ctx["payment_id"]
         res = s.cancel_ticket_order(order_id, kind=kind, payment_id=payment_id)
-        st = (res or {}).get("status") if isinstance(res, dict) else ""
-        head = (f"Отмена заказа {order_id} принята (status={st})."
-                if st else f"Отмена заказа {order_id} принята.")
-        if not payment_id:
-            # Silent no-op territory: say so instead of reporting a cancellation.
-            head += ("\n⚠️ paymentId не найден в orders() — для ОПЛАЧЕННОГО заказа "
-                     "такой запрос ничего не отменяет. Передай payment_id явно.")
+        st = str((res or {}).get("status") or "") if isinstance(res, dict) else ""
+        code = str((res or {}).get("code") or "") if isinstance(res, dict) else ""
+        if st.lower() == "success":
+            head = f"Отмена заказа {order_id} принята (status=Success)."
+            try:
+                after = s.order_cancel_context(order_id)
+                head += f"\nПерепроверка: status={after['status'] or '?'}"
+            except Exception:
+                head += "\nПерепроверка не удалась — проверь orders(\"афиша\")."
+        elif st:
+            # A refusal, not a failure: the envelope was Ok, the backend simply
+            # said no. Retrying sends the same request to the same answer.
+            head = (f"Отмена заказа {order_id} ОТКЛОНЕНА банком: status={st}"
+                    + (f", code={code}" if code else "")
+                    + ". Заказ не изменился, повторять бессмысленно.")
+        else:
+            head = (f"Отмена заказа {order_id} не подтверждена: в ответе нет status. "
+                    "Статус НЕИЗВЕСТЕН.")
         return head + "\nПроверь статус и возврат: orders(\"афиша\") + list_operations()."
     except Exception as e:
-        return (_err(e) + f"\nСтатус заказа {order_id} НЕИЗВЕСТЕН — проверь orders(\"афиша\"). "
+        return (_err(e) + f"\nЭто ошибка запроса, а не отказ банка — запрос мог и дойти. "
+                f"Статус заказа {order_id} НЕИЗВЕСТЕН, проверь orders(\"афиша\"). "
                 "Если он всё ещё активен, отмени через приложение.")
 
 
