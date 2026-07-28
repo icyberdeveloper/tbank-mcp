@@ -121,6 +121,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "ticket_cancel": ("Отмена заказа", WRITE),
     # search
     "search_app": ("Поиск по приложению", READ),
+    "train_search": ("Поиск поездов", READ),
+    "train_calendar": ("Даты продажи ЖД", READ),
     "flight_search": ("Поиск авиабилетов", READ),
     "flight_history": ("История авиапоисков", READ),
     "shop_search": ("Поиск товаров в маркетплейсе", READ),
@@ -2844,6 +2846,77 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return _err(e)
 
 @mcp.tool()
+def train_search(origin: str, destination: str, date: str, adults: int = 1,
+                 children: int = 0, limit: int = 15) -> str:
+    """Поиск поездов. origin/destination — ЧИСЛОВЫЕ коды станций банка
+    (2000000 — Москва, 2004000 — Санкт-Петербург), date — YYYY-MM-DD.
+
+    Резолвера «название станции → код» у банка нет. Если кода не знаешь,
+    проверить пару можно train_calendar(origin, destination): она скажет, какие
+    даты вообще в продаже, и на неверной паре ответит пусто.
+
+    Купить билет через MCP нельзя: оплата уходит в webview, который headless не
+    закрывается. Это поиск и сравнение."""
+    try:
+        s = _require(); s.ensure_fresh()
+        ways, _ = s.train_search(origin, destination, date, adults=adults,
+                                 children=children)
+        if not ways:
+            return (f"Поездов {origin}→{destination} на {date} не найдено. "
+                    "Проверь коды станций через train_calendar().")
+
+        def render(w):
+            seg = (w.get("segments") or [{}])[0]
+            o, d = seg.get("origin") or {}, seg.get("destination") or {}
+            dep = str(seg.get("departureDateTime") or "")[11:16]
+            arr = str(seg.get("arrivalDateTime") or "")[11:16]
+            # The price is nested under refundablePrice.price, and the seat count
+            # under places.total — neither is a flat field on the car group.
+            def price_of(c):
+                try:
+                    return float((c.get("refundablePrice") or {}).get("price") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            cars = [c for c in (seg.get("carGroups") or []) if price_of(c) > 0]
+            best = min(cars, key=price_of, default=None)
+            seats = sum(int((c.get("places") or {}).get("total") or 0) for c in cars)
+            money = (f"от {price_of(best):.0f} ₽ ({best.get('carTypeName') or ''}"
+                     + (f", мест {seats}" if seats else "") + ")"
+                     if best else "мест нет")
+            return (f"- {dep}→{arr} | № {seg.get('displayTrainNumber', '?')} "
+                    f"{_cut(seg.get('brandName') or seg.get('description') or '', 20)} | "
+                    f"{_cut(o.get('stationName', ''), 22)} → "
+                    f"{_cut(d.get('stationName', ''), 22)} | {money}")
+
+        return _rows_out(ways, render, limit=limit, total=len(ways),
+                         header=f"Поезда {origin}→{destination} на {date}",
+                         order_note="как отдал банк",
+                         more_hint=f"Передай limit={len(ways)}.")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def train_calendar(origin: str, destination: str, limit: int = 30) -> str:
+    """Даты, на которые открыта продажа по направлению.
+
+    Заодно дешёвая проверка пары кодов станций: на неверной паре ответ пуст."""
+    try:
+        s = _require(); s.ensure_fresh()
+        dates = s.train_calendar(origin, destination)
+        if not dates:
+            return (f"По направлению {origin}→{destination} дат в продаже нет — "
+                    "либо коды станций неверные, либо продажа закрыта.")
+        return _rows_out(dates, lambda d: f"- {d.get('date', '?')}",
+                         limit=limit, total=len(dates),
+                         header=f"Даты в продаже {origin}→{destination}",
+                         order_note="по возрастанию")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
 def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
                   children: int = 0, infants: int = 0,
                   only_bookable: bool = True, limit: int = 15,
@@ -3447,6 +3520,7 @@ _FLOW_KEYWORDS = {
     "bootstrap": "логин вход авторизация otp смс пароль пин первый login",
     "marketplace": "маркетплейс шопинг товар товары купить магазин продавец корзина",
     "flights": "самолёт самолет авиа авиабилет перелёт перелет рейс аэропорт",
+    "rail": "поезд поезда ржд купе плацкарт сапсан вокзал станция",
     "session": "сессия токен refresh keepalive expired протух",
     "read accounts": "счета счёт баланс операции покупки траты расходы категории",
     "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",

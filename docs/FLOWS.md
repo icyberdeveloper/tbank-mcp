@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **70 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **72 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -400,6 +400,27 @@ out of the app.
 > is the one place a code comes back with its name; take codes from there rather
 > than guessing. And buying is not supported — no confirmed booking or payment
 > step exists, so this searches and compares, nothing more.
+
+## 15. Rail — searching trains
+
+`train_search(origin, destination, date)` and `train_calendar(origin, destination)`.
+
+This host keeps its own session, and getting it is one request: GET
+https://trains.t-bank-app.ru/ with the ordinary mobile Bearer answers with
+Set-Cookie, and the search API accepts those cookies. No redirect chain, no
+browser — the older note calling rail unreachable was reading a different
+bootstrap path. The mint happens in an ISOLATED jar, because that same response
+also clears the cookie for the tbank.ru domain and doing it in the shared jar
+would race every other host mid-flight.
+
+origin/destination are the bank's NUMERIC station codes (2000000 is Moscow) and
+nothing in the captures resolves a name to one, so the tools take codes.
+`train_calendar` doubles as the cheap check that a pair is valid: a wrong pair
+comes back empty.
+
+> **Buying is not supported.** `orders/pay` hands back a tpay webview URL that
+> cannot be completed headlessly, and creating an order needs passenger passport
+> data. This searches and compares.
 
 ## Notes
 

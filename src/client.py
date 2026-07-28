@@ -499,6 +499,8 @@ class MobileSession:
     sso_login_cookie: str = ""      # the LOGIN (auth_code) cookie set incl. SSO_SESSION (long-lived) — for silent re-login
     auth_step_fingerprint: str = "" # the static fingerprint blob sent at auth/step (silent re-login)
     tmsg_session_id: str = ""       # messenger JWT cookie (tm.t-bank-app.ru)
+    trains_cookie: str = ""         # rail host cookie (trains.t-bank-app.ru)
+    trains_cookie_at: float = 0.0   # when it was minted (unix seconds)
     token_url: str = DEFAULT_TOKEN_URL
     # read request templates, per endpoint key (verbatim from capture)
     read_templates: dict = field(default_factory=dict)
@@ -1075,6 +1077,9 @@ class MobileSession:
             # Minted on demand from the access_token via issueTokenBySSO.
             self._ensure_tmsg()
             return f"tmsgSessionID={self.tmsg_session_id}" if self.tmsg_session_id else ""
+        if "trains.t-bank-app.ru" in host:
+            self._ensure_trains()
+            return self.trains_cookie
         if "webview.t-bank-app.ru" in host:
             # The shopping webview sends no Authorization at all — 179 captured
             # requests, not one Bearer — and authorises on cookies whose sessionID
@@ -1084,6 +1089,44 @@ class MobileSession:
                     f"sso_api_session={self.access_token}; "
                     f"deviceId={(self.device_id or '').upper()}")
         return self.cookie_str or ""
+
+    TRAINS_TTL = 3600.0     # the Set-Cookie expiry runs ~2h; re-mint well inside it
+
+    def _ensure_trains(self) -> None:
+        """Mint the rail host's own cookie, in an ISOLATED jar.
+
+        One request does it: GET https://trains.t-bank-app.ru/ with the ordinary
+        mobile Bearer answers with Set-Cookie carrying sessionID and the travel
+        session id, and the search API accepts those.
+
+        The isolation is not tidiness. That same response also clears the cookie
+        for the tbank.ru domain, so minting this inside the shared jar would race
+        every other host mid-flight."""
+        if self.trains_cookie and time.time() - self.trains_cookie_at < self.TRAINS_TTL:
+            return
+        jar = requests.Session()
+        try:
+            from . import tls as _tls
+            _tls.rebuild_bundle()
+            jar.mount("https://", _tls.RobustTLSAdapter())
+            jar.verify = _tls.BUNDLE
+        except Exception:
+            pass
+        jar.get("https://trains.t-bank-app.ru/",
+                params={"iswebview": "true", "os": "ios", "language": "ru",
+                        "appName": self.app_name, "appVersion": self.app_version},
+                headers={"Authorization": "Bearer " + self.access_token,
+                         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                         "User-Agent": self._mobile_ua() or "okhttp/4.12.0"},
+                timeout=30, allow_redirects=True)
+        got = jar.cookies.get_dict()
+        wanted = [f"{k}={v}" for k, v in got.items()
+                  if k in ("sessionID", "SSO_ID", "_T_travel_session_id",
+                           "SSO_ID_TOKEN", "SSO_VALIDATION")]
+        if wanted:
+            self.trains_cookie = "; ".join(wanted)
+            self.trains_cookie_at = time.time()
+            self._persist()
 
     def _ensure_tmsg(self) -> None:
         """Ensure a valid tmsg for messenger. If missing/expired, do a silent
@@ -3606,6 +3649,33 @@ class MobileSession:
             q = _norm_city(query)
             uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
         return uniq, amount
+
+    # ---- rail --------------------------------------------------------------
+
+    def train_search(self, origin: str, destination: str, date: str,
+                     adults: int = 1, children: int = 0) -> tuple[list[dict], str]:
+        """Trains for one direction on one date, as (ways, trainSearchId).
+
+        origin/destination are the bank's NUMERIC station codes (2000000 is
+        Moscow). Nothing in the captures turns a city name into one, so the code
+        is the caller's to supply — guessing it would send someone to the wrong
+        city with a plausible-looking answer."""
+        body = {"directions": [{"origin": str(origin),
+                                "destination": str(destination),
+                                "departureDate": date}],
+                "adultsCount": adults, "childrenCount": children}
+        data = self._call_read("train_search", body=body) or {}
+        dirs = data.get("directions") or []
+        ways = (dirs[0] or {}).get("ways") if dirs else []
+        return ([w for w in (ways or []) if isinstance(w, dict)],
+                str(data.get("trainSearchId") or ""))
+
+    def train_calendar(self, origin: str, destination: str) -> list[dict]:
+        """Which dates are on sale for a direction — a cheap way to check a pair
+        of station codes is valid before searching a date that has no trains."""
+        data = self._call_read("train_calendar", overrides={
+            "origin": str(origin), "destination": str(destination)}) or {}
+        return [d for d in (data.get("dates") or []) if isinstance(d, dict)]
 
     # ---- flights -----------------------------------------------------------
 

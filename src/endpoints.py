@@ -1751,3 +1751,31 @@ BUILTIN_ENDPOINTS.update({
                        "path": "/api/travel/flight/history/getSearchHistoryBySession",
                        "params": {}, **_TRAVEL_MB},
 })
+
+
+# ---- rail (trains.t-bank-app.ru) -------------------------------------------
+# This host keeps its own session: GET https://trains.t-bank-app.ru/ with the
+# ordinary mobile Bearer answers with Set-Cookie, and the search API accepts
+# those cookies. One request, no redirect chain, no browser — the earlier note
+# calling it unreachable was reading the wrong bootstrap path.
+#
+# It takes none of the native query context and no Bearer on the API calls; the
+# cookie is what authorises, and MobileSession._ensure_trains mints it in an
+# ISOLATED jar because the bootstrap response also clears the tbank.ru cookie.
+_RAIL = {"no_base_params": True, "no_bearer": True,
+         "headers": {"Content-Type": "application/json",
+                     "Origin": "https://trains.t-bank-app.ru",
+                     "Referer": "https://trains.t-bank-app.ru/"}}
+
+BUILTIN_ENDPOINTS.update({
+    # {"directions":[{"origin","destination","departureDate"}],
+    #  "adultsCount","childrenCount"} — origin/destination are NUMERIC station
+    # codes (2000000 = Moscow), and nothing in the captures resolves a name to
+    # one, so the tools take codes and say where to get them.
+    "train_search": {"method": "POST", "host": "https://trains.t-bank-app.ru",
+                     "path": "/api/search/trains", "params": {}, **_RAIL},
+    # ?origin=&destination= — which dates are on sale at all.
+    "train_calendar": {"method": "GET", "host": "https://trains.t-bank-app.ru",
+                       "path": "/api/search/sale-calendar", "params": {},
+                       "no_base_params": True, "no_bearer": True},
+})
