@@ -4,7 +4,7 @@
 
 ## Features
 
-- **59 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **61 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
 - **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
   transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
@@ -272,19 +272,19 @@ present the tests additionally check the fixtures have not drifted from it.
     stays JSON → `www.tbank.ru` → the three lifestyle shelf paths. A regression has
     one signature: `_unwrap` raising `HTTP_200` because the body no longer parses.
     Compare `debug_report()` before and after each step.
-- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) require confirmation of a
-  specific amount — "buy it" is not a confirmation.
+- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`, `pay_bill`) require
+  confirmation of a specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 44 are `readOnlyHint: true` and
-  may run without a prompt; 11 write something that costs nothing (a cart, a
+  rather than defaulting to anything. Three kinds: 45 are `readOnlyHint: true` and
+  may run without a prompt; 12 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
-  `destructiveHint: false`; 3 debit an account — `transfer`, `grocery_checkout`,
-  `ticket_pay` — and are the only ones carrying `destructiveHint`, which is what
-  forces a confirmation dialog. The line is drawn at money on purpose: a booking
-  expires by itself and a cart line is a rewrite away, so confirming those is
+  `destructiveHint: false`; 4 debit an account — `transfer`, `grocery_checkout`,
+  `ticket_pay`, `pay_bill` — and are the only ones carrying `destructiveHint`, which
+  is what forces a confirmation dialog. The line is drawn at money on purpose: a
+  booking expires by itself and a cart line is a rewrite away, so confirming those is
   friction that teaches people to click through the one dialog that matters.
-  The 11 writers are not marked read-only, because they do modify things and that
+  The 12 writers are not marked read-only, because they do modify things and that
   flag states the opposite — if your client still prompts on them, allow them once
   in the client rather than changing what the server claims.
 

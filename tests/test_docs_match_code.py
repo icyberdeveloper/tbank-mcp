@@ -17,6 +17,7 @@ character count.
 import os
 import re
 import sys
+from collections import Counter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -281,6 +282,47 @@ def test_a_new_tool_cannot_ship_unclassified():
     print("  annotations: an unclassified tool is refused at import, not defaulted")
 
 
+def test_the_documented_counts_match_the_registry():
+    """Every count printed in a doc is derived here from the LIVE registry.
+
+    These numbers were hand-maintained and drifted three times: README said 59 tools
+    and «3 debit an account» while the table held 61 and four, and FLOWS said 62. A
+    reader has no way to tell a stale count from a real one, and `pay_bill` was
+    missing from the money list — the one enumeration where an omission matters."""
+    kinds = server.TOOL_KINDS
+    counts = Counter(kind for _, kind in kinds.values())
+    live = len(tool_names())
+
+    readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+    flows = open(os.path.join(ROOT, "docs", "FLOWS.md"), encoding="utf-8").read()
+
+    claims = [
+        ("README **N tools**", readme, r"\*\*(\d+) tools\*\*", live),
+        ("FLOWS **N MCP tools**", flows, r"\*\*(\d+) MCP tools\*\*", live),
+        ("README readOnlyHint count", readme,
+         r"(\d+) are `readOnlyHint: true`", counts[server.READ]),
+        ("README write count", readme, r"(\d+) write something", counts[server.WRITE]),
+        ("README money count", readme, r"(\d+) debit an account", counts[server.MONEY]),
+    ]
+    for label, blob, pattern, expected in claims:
+        found = re.search(pattern, blob)
+        if not found:
+            check(False, f"{label}: the claim is gone — the ratchet cannot check it")
+            continue
+        check(int(found.group(1)) == expected,
+              f"{label}: doc says {found.group(1)}, registry says {expected}")
+
+    # The money enumeration is the one place an omission is dangerous: a reader
+    # takes the list as exhaustive and assumes anything unlisted cannot spend.
+    money = sorted(n for n, (_, k) in kinds.items() if k == server.MONEY)
+    unlisted = [n for n in money if f"`{n}`" not in readme]
+    check(not unlisted,
+          f"money tools missing from the README enumeration: {', '.join(unlisted)}")
+    print(f"  counts: {live} tools = {counts[server.READ]} read / "
+          f"{counts[server.WRITE]} write / {counts[server.MONEY]} money, "
+          f"all {len(money)} money tools named")
+
+
 def test_every_tool_is_documented():
     """A tool no document mentions is a tool no agent will find."""
     tools = tool_names()
@@ -415,6 +457,7 @@ def main():
     test_documented_tools_exist()
     test_every_tool_declares_what_it_does_to_the_world()
     test_a_new_tool_cannot_ship_unclassified()
+    test_the_documented_counts_match_the_registry()
     test_every_tool_is_documented()
     test_every_tool_is_reachable_from_a_skill()
     test_plugin_ships_every_skill()
