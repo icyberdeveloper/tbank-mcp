@@ -1541,6 +1541,28 @@ BUILTIN_ENDPOINTS.update({
     "events_by_service": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
                           "path": "/api/events/by/service", "params": {}},
 
+    # ---- vertical catalogues ----------------------------------------------
+    # POST {"cityId":"1","count":20,"page":1,
+    #       "date":{"from":"…T00:00:00+03:00","to":"…T23:59:59+03:00"}}
+    #
+    # The app only ever sends a single day because its calendar picks one, but the
+    # server takes a RANGE — probed live: one day in Moscow is 83 films, eight days
+    # is 197 unique ones, and the extra titles are real (TheatreHD and Globe
+    # screenings that run on specific later dates). The time inside the bounds is
+    # ignored; an evening window returns the whole day.
+    #
+    # movie behaves differently from the other two and the difference is not
+    # cosmetic: it ignores count/page and returns the vertical whole, and its slots
+    # come back EMPTY — the showings are in schedule/movie. concert and spectacle
+    # paginate server-side and do carry slots. There is no /api/events/exhibition
+    # in any capture, so exhibitions have no catalogue of their own.
+    "events_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                     "path": "/api/events/movie", "params": {}},
+    "events_concert": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                       "path": "/api/events/concert", "params": {}},
+    "events_spectacle": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
+                         "path": "/api/events/spectacle", "params": {}},
+
     # ---- venues -----------------------------------------------------------
     # ?service=&cityId=&page=&count=&include=all — the venue directory, and the
     # only way to learn an objectId without going through some event that plays
@@ -1597,6 +1619,7 @@ VERTICALS = {
         "cancel_key": "order_cancel_movie",   # the only cancel segment in any capture
         "seat_type": "basic",        # seats[].type — ONLY movie sends it
         "seat_render": "grid",       # numbered rows vs a flat list
+        "catalog_key": "events_movie", "catalog_paged": False,
     },
     "concert": {
         "ru": "концерт",
@@ -1611,6 +1634,7 @@ VERTICALS = {
         "cancel_key": "order_cancel",
         "seat_type": "",
         "seat_render": "list",
+        "catalog_key": "events_concert", "catalog_paged": True,
     },
     "spectacle": {
         "ru": "театр",
@@ -1628,6 +1652,7 @@ VERTICALS = {
         "cancel_key": "order_cancel",
         "seat_type": "",
         "seat_render": "list",
+        "catalog_key": "events_spectacle", "catalog_paged": True,
     },
     "exhibition": {
         "ru": "выставка",
@@ -1642,6 +1667,7 @@ VERTICALS = {
         "cancel_key": "order_cancel",
         "seat_type": "",
         "seat_render": "list",
+        "catalog_key": "", "catalog_paged": False,
     },
 }
 

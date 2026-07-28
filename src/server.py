@@ -108,6 +108,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     # tickets
     "cinema_search": ("Поиск фильма", READ),
     "cinema_schedule": ("Расписание сеансов", READ),
+    "afisha_catalog": ("Афиша за период", READ),
     "afisha_places": ("Площадки города", READ),
     "place_schedule": ("Афиша площадки", READ),
     "place_info": ("Карточка площадки", READ),
@@ -2832,6 +2833,58 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return "\n".join(out)
     except Exception as e:
         return _err(e)
+
+@mcp.tool()
+def afisha_catalog(kind: str = "movie", city: str = "", date_from: str = "",
+                   date_to: str = "", query: str = "", city_id: int = 0,
+                   limit: int = 20, pages: int = 8) -> str:
+    """Афиша вертикали за ПЕРИОД дат: что идёт с date_from по date_to.
+
+    kind — "кино" | "концерт" | "театр". У выставок каталога по датам нет —
+    для них search_app(screen="afisha") или place_schedule().
+    city обязателен (или city_id числом), даты — YYYY-MM-DD; одна дата = один
+    день.
+
+    Диапазон реально работает: неделя показывает заметно больше, чем сутки, —
+    туда попадают разовые показы, которых в однодневной выдаче нет.
+
+    У кино сеансы здесь НЕ приходят: их даёт cinema_schedule(event_id, date).
+    У концертов и спектаклей ближайшие слоты видно сразу.
+    query — фильтр по названию, местный."""
+    try:
+        s = _require(); s.ensure_fresh()
+        events, amount = s.afisha_catalog(kind=kind, city=city, city_id=city_id,
+                                          date_from=date_from, date_to=date_to,
+                                          query=query, max_pages=pages)
+        if not events:
+            return (f"Ничего не найдено ({kind}, {city or city_id}, "
+                    f"{date_from or '?'}..{date_to or date_from or '?'}"
+                    + (f", запрос «{query}»" if query else "") + ").")
+
+        def render(e):
+            f = e.get("fields") or {}
+            rating = (f.get("rating") or {}).get("value")
+            slots = e.get("slots") or []
+            when = str((slots[0] or {}).get("startDateTime") or "")[:16] if slots else ""
+            return (f"- {_cut(e.get('eventName', '?'), 46)}"
+                    + (f" [{f.get('ageRestriction')}]" if f.get("ageRestriction") else "")
+                    + (f" | ★{rating}" if rating else "")
+                    + (f" | {', '.join(e.get('genres') or [])[:34]}"
+                       if e.get("genres") else "")
+                    + (f" | ближайший {when}" if when else "")
+                    + f" | eventId={e.get('eventId', '?')}")
+
+        head = (f"Афиша ({kind}, {city or city_id}, "
+                f"{date_from or date_to}..{date_to or date_from})")
+        if query:
+            head += f", совпадений с «{query}»"
+        return _rows_out(events, render, limit=limit,
+                         total=len(events) if query else max(amount, len(events)),
+                         header=head,
+                         more_hint=f"Передай limit={len(events)}, чтобы увидеть все.")
+    except Exception as e:
+        return _err(e)
+
 
 @mcp.tool()
 def afisha_places(kind: str = "movie", city: str = "", query: str = "",

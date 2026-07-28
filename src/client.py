@@ -3509,6 +3509,74 @@ class MobileSession:
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []
 
+    CATALOG_PAGE = 20
+
+    @staticmethod
+    def _date_bounds(date_from: str, date_to: str) -> dict:
+        """{from, to} covering whole days. The +03:00 is a literal: the afisha runs
+        on Moscow time and the captured bodies say so, so deriving it from the host
+        clock would move the window on a machine in another zone."""
+        a = str(date_from or date_to or "").strip()
+        b = str(date_to or date_from or "").strip()
+        if not a:
+            raise TbankApiError("DATE_REQUIRED", "нужна дата: date_from (и date_to)")
+        return {"from": f"{a}T00:00:00+03:00", "to": f"{b}T23:59:59+03:00"}
+
+    def afisha_catalog(self, kind: str = "movie", city: str = "",
+                       date_from: str = "", date_to: str = "",
+                       city_id: int | str = 0, query: str = "",
+                       count: int = 0, max_pages: int = 8) -> tuple[list[dict], int]:
+        """Everything of one vertical playing in a date RANGE, as (events, amount).
+
+        The app only asks for one day because its calendar picks one, but the
+        server takes a range — an eight-day window in Moscow answers with 197
+        unique films against 83 for a single day, and the extra titles are real
+        one-off screenings. An event repeats across the days it runs, so results
+        are deduplicated on eventId, first occurrence winning.
+
+        Two shapes hide behind one call. movie ignores count/page and hands back
+        the vertical whole, with EMPTY slots — the showings live in
+        cinema_schedule. concert and spectacle paginate for real and do carry
+        slots. Exhibitions have no catalogue at all; nothing in the captures posts
+        to /api/events/exhibition, so this refuses rather than inventing a path.
+
+        `query` is matched here, not by the server, which is why the pages are all
+        read before filtering."""
+        v = vertical(kind)
+        if not v["catalog_key"]:
+            raise TbankApiError(
+                "NO_CATALOG",
+                f"у вертикали «{kind}» нет каталога по датам; смотри "
+                "search_app(screen=\"afisha\") или place_schedule()")
+        cid = city_id_of(city, city_id)
+        window = self._date_bounds(date_from, date_to)
+        size = count if count > 0 else self.CATALOG_PAGE
+
+        def fetch(page: int) -> tuple[list, int]:
+            data = self._call_read(v["catalog_key"], body={
+                "cityId": cid, "count": size, "page": page, "date": window})
+            lst = [e for e in ((data or {}).get("list") or []) if isinstance(e, dict)]
+            return lst, int((data or {}).get("amount") or 0)
+
+        out, amount = fetch(1)
+        if v["catalog_paged"] and len(out) < amount:
+            pages = min(max(1, max_pages), -(-amount // size))
+            if pages > 1:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(4, pages - 1)) as pool:
+                    for events, _ in pool.map(fetch, range(2, pages + 1)):
+                        out.extend(events)
+        seen, uniq = set(), []
+        for e in out:
+            key = str(e.get("eventId") or id(e))
+            if key not in seen:
+                seen.add(key)
+                uniq.append(e)
+        if query:
+            q = _norm_city(query)
+            uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
+        return uniq, amount
+
     # ---- venues ----------------------------------------------------------
 
     PLACES_PAGE = 100              # the endpoint's ceiling: 116 answers 400

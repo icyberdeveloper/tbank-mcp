@@ -348,6 +348,64 @@ SHELVES = {"collections": [{"code": "Skoro-v_kino_Moskva"},
                            {"code": "Segodnya-v_kino_Moskva"}]}
 
 
+def test_the_catalogue_spans_days_and_paginates_only_where_it_can():
+    """A range is the point of this endpoint — eight days in Moscow answer with 205
+    films against 93 for one — and an event repeats on every day it runs, so the
+    same title must not come back once per day.
+
+    The two shapes behind the one call also have to be respected: cinema ignores
+    count/page and returns the vertical whole, so paging it is pure waste, while
+    concerts and plays paginate for real."""
+    from src.client import TbankApiError
+
+    class Catalog(CountingSession):
+        """Pages that overlap, the way the days of a range do."""
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            self.calls.append(key)
+            self.writes.append((key, body))
+            page = (body or {}).get("page", 1)
+            # Every page repeats event 1; the rest are its own.
+            evs = [{"eventId": "1", "eventName": "Повтор"}] + [
+                {"eventId": f"{page}-{i}", "eventName": f"Событие {page}-{i}"}
+                for i in range(19)]
+            return {"amount": 60, "list": evs}
+
+    concert = Catalog({})
+    events, amount = concert.afisha_catalog(kind="концерт", city="Москва",
+                                            date_from="2026-07-30",
+                                            date_to="2026-08-06")
+    check(concert.count("events_concert") == 3,
+          f"60 at 20 a page is three pages: {concert.count('events_concert')}")
+    ids = [e["eventId"] for e in events]
+    check(ids.count("1") == 1,
+          f"an event running every day must appear once, got {ids.count('1')}")
+    check(len(events) == 58, f"expected 1 shared + 57 own, got {len(events)}")
+    check(amount == 60, f"the server's own total must survive: {amount}")
+
+    # The window is whole days in Moscow time, both bounds inclusive.
+    sent = concert.sent("events_concert")[0]
+    check(sent["date"] == {"from": "2026-07-30T00:00:00+03:00",
+                           "to": "2026-08-06T23:59:59+03:00"},
+          f"the range was not sent as whole days: {sent['date']}")
+    check(sent["cityId"] == "1", f"the city must ride as its id: {sent}")
+
+    # Cinema ignores paging, so asking for page 2 is a request that buys nothing.
+    film = Catalog({})
+    film.afisha_catalog(kind="кино", city="Москва", date_from="2026-07-30")
+    check(film.count("events_movie") == 1,
+          f"cinema must not be paged: {film.count('events_movie')} requests")
+
+    # Exhibitions have no catalogue at all — no path is invented for them.
+    try:
+        Catalog({}).afisha_catalog(kind="выставка", city="Москва",
+                                   date_from="2026-07-30")
+        check(False, "an exhibition catalogue was invented")
+    except TbankApiError as e:
+        check(e.result_code == "NO_CATALOG", f"wrong refusal: {e}")
+    print("  catalogue: a range dedupes by event, cinema is fetched once")
+
+
 def test_a_named_film_search_sees_every_page():
     """The listing has no server-side search, so a name is matched by us — which
     means every page has to be looked at.
@@ -638,6 +696,7 @@ def main():
     test_documents_resolves_the_contact_id_once()
     test_nutrition_is_fetched_concurrently()
     test_grocery_search_sees_the_whole_page_before_ranking()
+    test_the_catalogue_spans_days_and_paginates_only_where_it_can()
     test_a_named_film_search_sees_every_page()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()

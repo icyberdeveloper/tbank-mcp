@@ -29,6 +29,7 @@ MCP работает с настоящей афишей Т-Банка: брон�
 | `search_app(query, screen="afisha")` | Поиск по афише: кино, концерты, театр, выставки. Отдаёт `eventId` | нет |
 | `cinema_search(query, city, city_id)` | Только фильмы в сегодняшнем прокате города. `city` ОБЯЗАТЕЛЕН | нет |
 | `cinema_schedule(event_id, date, cinema, around, window_min, city, object_id)` | Сеансы фильма на дату. Отдаёт `slotId`, `objectId`, цену, зал. `city` — ОБЯЗАТЕЛЕН и тот же, что в `cinema_search`: задаёт и город, и точку сортировки по расстоянию | нет |
+| `afisha_catalog(kind, city, date_from, date_to, query, city_id, limit, pages)` | Афиша вертикали за ПЕРИОД дат, а не только на сегодня. У выставок каталога нет | нет |
 | `afisha_places(kind, city, query, city_id, limit, pages)` | Площадки города с их `objectId`: кинотеатры, залы, театры, музеи. Поиск по названию МЕСТНЫЙ | нет |
 | `place_schedule(object_id, limit, page)` | Что идёт на площадке (концерт/театр/выставка; кино — нет) | нет |
 | `place_info(object_id, with_halls)` | Карточка площадки; адрес есть только в залах | нет |

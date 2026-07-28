@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **64 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **65 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -294,6 +294,14 @@ skill. The order here is the part you must not improvise:
    Only after the user confirms a concrete sum and concrete seats. The tool
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
+
+> **A period, not a day.** `afisha_catalog(kind, city, date_from, date_to)` lists
+> a vertical over a date RANGE. The app only ever asks for one day because its
+> calendar picks one, but the server takes a window — eight days in Moscow answer
+> with 197 films against 83 for one, and the extra titles are real one-off
+> screenings. Cinema is the odd one: it ignores paging, returns the vertical whole
+> and carries no showings, so times still come from `cinema_schedule`. Exhibitions
+> have no catalogue of their own and the tool says so instead of guessing a path.
 
 > **Venue first.** `afisha_places(kind, city)` is the only way to an objectId
 > without going through some event that plays there — it lists cinemas, halls,
