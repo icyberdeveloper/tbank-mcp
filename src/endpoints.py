@@ -1433,11 +1433,16 @@ BUILTIN_ENDPOINTS.update({
     },
 })
 
-# Travel order detail. Only the hotel host is reachable from a mobile session:
-# it authorizes on the Bearer alone (verified live). Trains and flights each need
-# a one-time link token that this client cannot mint —
-# `tsocial…/auth/game/link-token` answers B002D965 and `/v1/travel_link_auth_token`
-# answers INSUFFICIENT_PRIVILEGES even on a CLIENT-level session. See docs/FLOWS.md.
+# Travel order detail. Only the hotel host is wired up here: it authorizes on the
+# Bearer alone (verified live).
+#
+# Trains and flights are NOT unreachable — that earlier reading was wrong, and the
+# captures-gorod.xml traffic shows why. `/v1/travel_link_auth_token` answers 200
+# there (the INSUFFICIENT_PRIVILEGES seen before was a session that had lapsed to
+# ANONYMOUS), and trains bootstrap from `trains-front/papi/auth/link-token`, not
+# from the `tsocial…/auth/game` path that returned B002D965. Both hosts want their
+# own cookie jar, which is why they are not templates yet rather than because the
+# bank refuses us. See docs/FLOWS.md.
 BUILTIN_ENDPOINTS.update({
     # path is parameterized: /api/v1/hotels/bookings/{bookingId}
     "hotel_booking": {"method": "GET", "host": "https://hotels.t-bank-app.ru",
@@ -1465,9 +1470,15 @@ BUILTIN_ENDPOINTS.update({
                            "path": "/api/order/create/movie", "params": {}},
     "order_create_concert": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                              "path": "/api/order/create/concert", "params": {}},
-    # POST ?orderId=&paymentId= with an EMPTY body. BOTH ids or nothing happens:
-    # orderId alone still answers 200 {"status":"Success"} and leaves the order
-    # active — see cancel_ticket_order().
+    # POST ?orderId=[&paymentId=] with an EMPTY body. What decides the outcome is
+    # the order's own isCancelAvailable, not the parameter set: the one captured
+    # success (delete-order.xml, a PAID order the bank had flagged cancelable) came
+    # back 200 {"status":"Success"} and the order moved to PARTIALLY_CANCELED. Seven
+    # attempts on fresh UNPAID reservations answered 200 with a BUSINESS refusal
+    # — {"status":"Failed","code":…}, codes 400/500/1002/1009 observed live — and
+    # changed nothing. Content-Type and Accept do not move that needle: both forms
+    # were tried on the same orders and answered identically. paymentId is sent
+    # because the app sends it, not because its absence is a silent no-op.
     # Empty body with Content-Type: application/json — same as the grocery flavour
     # below. The client must pass body=None; body={} would put a literal `{}` on the
     # wire, which no captured cancel sends.

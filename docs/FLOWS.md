@@ -295,17 +295,19 @@ skill. The order here is the part you must not improvise:
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats.
 
-7. `ticket_cancel(order_id, kind, payment_id)` → cancels. `paymentId` goes in the
-   query **next to** `orderId` and is resolved from `orders()` when the caller
-   omits it. With it missing the host still answers `200 {"status":"Success"}`
-   while the order stays active and nothing is refunded — a success message is
-   not evidence of a cancellation. A paid order settles as
-   **PARTIALLY_CANCELED**: tickets refunded, service fee kept.
+7. `ticket_cancel(order_id, kind, payment_id)` → cancels. `orderId` goes in the
+   query, `paymentId` next to it, resolved from the order when the caller omits
+   it. What decides the outcome is the order's own `isCancelAvailable`, visible
+   in `order_details()`: a flagged-cancelable order settles as
+   **PARTIALLY_CANCELED** — tickets refunded, service fee kept — while an order
+   flagged `false` answers `status=Failed` with a code (400/500/1002/1009 seen
+   live) and changes nothing. Retrying that is pointless; the request form is not
+   the reason, the same call as form-urlencoded behaves identically. An unpaid
+   reservation has no `paymentId`, never reaches `orders()`, and expires by itself.
 
 > On error the order status is UNKNOWN, not "still booked" — check
 > `orders("афиша")` and the refund in `list_operations()` before doing anything
-> else, and never retry blind. (The earlier 500s in `captures.xml` read as a
-> broken endpoint; the path works, it was the missing `paymentId`.)
+> else, and never retry blind.
 
 ## 12. Global search across the app
 

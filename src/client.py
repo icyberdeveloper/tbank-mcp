@@ -3414,19 +3414,23 @@ class MobileSession:
 
     def cancel_ticket_order(self, order_id: str, kind: str = "movie",
                             payment_id: str = "") -> Any:
-        """Cancel a ticket order. `paymentId` rides in the query NEXT TO `orderId`:
-        both, empty body, form-urlencoded content type. Sending orderId alone is
-        the quiet failure mode — the host answers 200 {"status":"Success"} and
-        does nothing, so the order stays active and no money comes back. (The
-        earlier 500s in captures.xml read as "endpoint broken"; the real app's
-        request in delete-order.xml differs only by this parameter.)
+        """Cancel a ticket order. `orderId` rides in the query, `paymentId` next to
+        it when the order has one, and the body stays empty.
 
-        A paid order lands in PARTIALLY_CANCELED, not CANCELED: the tickets are
-        refunded, the service fee is not.
+        What decides the outcome is the order's own `isCancelAvailable`. The single
+        captured success (delete-order.xml) cancelled a PAID order the bank had
+        flagged cancelable: 200 {"status":"Success"}, and it moved to
+        PARTIALLY_CANCELED — tickets refunded, service fee not. Seven live attempts
+        on orders flagged `isCancelAvailable: false` answered 200 with a business
+        refusal ({"status":"Failed","code":…}) and changed nothing; sending the same
+        request as form-urlencoded made no difference.
 
-        payment_id is looked up from orders() when the caller hasn't got it. An
-        unpaid reservation has none — it cancels on orderId alone, and expires by
-        itself regardless."""
+        Read the verdict from the payload, not from the transport: this returns
+        normally for a business refusal (the outer envelope is "Ok") and only raises
+        when the request itself failed.
+
+        payment_id is looked up from the order when the caller hasn't got it. An
+        unpaid reservation has none, and does not need cancelling — it expires."""
         if not payment_id:
             payment_id = self.payment_id_for_order(order_id)
         key = "order_cancel_movie" if kind == "movie" else "order_cancel"

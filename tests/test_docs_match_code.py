@@ -323,6 +323,47 @@ def test_the_documented_counts_match_the_registry():
           f"all {len(money)} money tools named")
 
 
+# Claims the captures disprove. Each one was stated as fact in several files at
+# once, which is how a wrong reading survives: you fix the docstring, the skill
+# still teaches it. Regexes are narrow on purpose — the underlying error codes are
+# real and may be quoted as history; what is banned is asserting them as the reason.
+RETIRED_CLAIMS = [
+    (r"orderId alone still answers",
+     "«orderId alone answers Success and does nothing» — no such response exists in "
+     "any capture; a refusal comes back as status=Failed with a code"),
+    (r'answers 200 \{"status":"Success"\} and\s+does nothing',
+     "same claim in the client docstring"),
+    (r"хост отвечает 200 «Success»",
+     "same claim in the ticket_cancel docstring"),
+    (r"Без `paymentId` хост отвечает",
+     "same claim in the tickets skill"),
+    (r"With it missing the host still answers",
+     "same claim in FLOWS"),
+    (r"500s in `?captures\.xml",
+     "captures.xml holds no cancel requests at all — the 500s were in the other two"),
+    (r"тот отвечает INSUFFICIENT_PRIVILEGES\s+даже на CLIENT",
+     "travel_link_auth_token answers 200 in captures-gorod.xml; the earlier refusal "
+     "was a lapsed session, not a permission wall"),
+]
+
+
+def test_disproven_claims_do_not_come_back():
+    """A wrong reading that lived in five files is easy to reintroduce in one."""
+    scanned = list(doc_files())
+    scanned += [os.path.join(ROOT, "src", f) for f in os.listdir(os.path.join(ROOT, "src"))
+                if f.endswith(".py")]
+    for d in sorted(os.listdir(os.path.join(ROOT, "skills"))):
+        p = os.path.join(ROOT, "skills", d, "SKILL.md")
+        if os.path.exists(p):
+            scanned.append(p)
+    for pattern, why in RETIRED_CLAIMS:
+        hits = [os.path.relpath(p, ROOT) for p in scanned
+                if re.search(pattern, open(p, encoding="utf-8").read())]
+        check(not hits, f"retired claim is back in {', '.join(hits)}: {why}")
+    print(f"  {len(RETIRED_CLAIMS)} disproven claims stay retired across "
+          f"{len(scanned)} files")
+
+
 def test_every_tool_is_documented():
     """A tool no document mentions is a tool no agent will find."""
     tools = tool_names()
@@ -458,6 +499,7 @@ def main():
     test_every_tool_declares_what_it_does_to_the_world()
     test_a_new_tool_cannot_ship_unclassified()
     test_the_documented_counts_match_the_registry()
+    test_disproven_claims_do_not_come_back()
     test_every_tool_is_documented()
     test_every_tool_is_reachable_from_a_skill()
     test_plugin_ships_every_skill()
