@@ -3607,6 +3607,64 @@ class MobileSession:
             uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
         return uniq, amount
 
+    # ---- flights -----------------------------------------------------------
+
+    def flight_history(self) -> list[dict]:
+        """Past flight searches. Also the only place an airport code comes back
+        WITH its name — nothing in the captures resolves a name to an IATA code,
+        so this is where an agent can learn that Москва is MOW."""
+        data = self._call_read("flight_history")
+        return [h for h in (data or []) if isinstance(h, dict)]
+
+    def flight_search(self, from_code: str, to_code: str, date: str,
+                      adults: int = 1, children: int = 0, infants: int = 0,
+                      cabin: str = "Y", only_bookable: bool = False,
+                      max_batches: int = 8, deadline_s: float = 45.0) -> dict:
+        """Flights, as {searchId, flights, offers, complete, batches}.
+
+        The search STREAMS: the first call returns a batch and nextBatch blocks
+        until the following one is ready, setting isOver on the last. Measured on
+        one route: 4 batches, 757 flights, 4348 offers, the last batch alone
+        adding 2836 — so an unbounded loop is a minute and a five-figure list.
+
+        offers[].flights index the CONCATENATION of all batches, not the batch
+        they arrived in (757 flights, highest index 756), so nothing can be
+        resolved until the stream is stitched — and a caller that stops early
+        must be told, which is what `complete` is for.
+
+        only_bookable stops after the first batch. Only vendor == "Tinkoff" offers
+        can be bought inside the bank, and on that route all 101 of them arrived
+        in that first batch, so the other three round trips buy nothing but
+        partner listings that lead out of the app."""
+        body = {"segments": [{"from": from_code.upper(), "to": to_code.upper(),
+                              "date": date}],
+                "passengers": {"adults": adults, "children": children,
+                               "infants": infants},
+                "cabin": cabin, "composite": 0, "groupsLimit": 4000,
+                "aviasales": True}
+        first = self._call_read("flight_search_start", body=body) or {}
+        search_id = str(first.get("searchId") or "")
+        flights = list(first.get("flights") or [])
+        offers = list(first.get("offers") or [])
+        complete = bool(first.get("isOver")) or only_bookable
+        batches = 1
+        if not complete and search_id:
+            started = time.monotonic()
+            while batches < max(1, max_batches):
+                if time.monotonic() - started > deadline_s:
+                    break
+                nxt = self._call_read("flight_search_next",
+                                      body={"searchId": search_id}) or {}
+                batches += 1
+                flights.extend(nxt.get("flights") or [])
+                offers.extend(nxt.get("offers") or [])
+                if nxt.get("isOver"):
+                    complete = True
+                    break
+        return {"searchId": search_id, "flights": flights, "offers": offers,
+                "complete": complete, "batches": batches,
+                "info": first.get("info") or {}}
+
     # ---- marketplace (Шопинг) ---------------------------------------------
 
     def shop_geo(self) -> dict:

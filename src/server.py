@@ -121,6 +121,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "ticket_cancel": ("Отмена заказа", WRITE),
     # search
     "search_app": ("Поиск по приложению", READ),
+    "flight_search": ("Поиск авиабилетов", READ),
+    "flight_history": ("История авиапоисков", READ),
     "shop_search": ("Поиск товаров в маркетплейсе", READ),
     "shop_cart": ("Корзины маркетплейса", READ),
     # messenger
@@ -360,7 +362,8 @@ def _json_out(data, limit: int = 5000) -> str:
             f"количестве.{dropped}\n{text[:limit]}")
 
 
-def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: str = "") -> str:
+def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: str = "",
+              order_note: str = "новые сверху") -> str:
     """Render a list of rows with an honest header.
 
     list_operations used to print `for o in ops[:50]` with no count and no limit
@@ -374,7 +377,10 @@ def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: s
     shown = rows[:limit] if limit > 0 else rows
     head = f"{header}: {total} всего, показано {len(shown)}"
     if len(shown) < total:
-        head += f" (новые сверху). {more_hint or f'Передай limit={total}, чтобы увидеть все.'}"
+        # Not every list is chronological — flights come out cheapest first, and
+        # telling the agent otherwise invites it to read the top row as "latest".
+        head += (f" ({order_note}). " if order_note else " ")
+        head += more_hint or f"Передай limit={total}, чтобы увидеть все."
     return "\n".join([head] + [render(r) for r in shown])
 
 
@@ -2838,6 +2844,110 @@ def concert_schedule(event_id: str, kind: str = "concert",
         return _err(e)
 
 @mcp.tool()
+def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
+                  children: int = 0, infants: int = 0,
+                  only_bookable: bool = True, limit: int = 15,
+                  max_batches: int = 8) -> str:
+    """Поиск авиабилетов. from_code/to_code — коды IATA (MOW, LED, SVO),
+    date — YYYY-MM-DD.
+
+    Резолвера «название города → код» у банка нет. Коды вместе с названиями
+    отдаёт flight_history() — оттуда их и бери, а не угадывай.
+
+    only_bookable=True (по умолчанию) — только те предложения, что бронируются
+    внутри банка; их отдаёт первый же батч, поэтому поиск быстрый. False
+    дочитывает весь поток: это десятки секунд и тысячи предложений, почти все —
+    от партнёров, которые уводят на свой сайт.
+
+    Купить билет через MCP нельзя: подтверждённого шага бронирования и оплаты
+    нет. Это поиск и сравнение, покупка — в приложении."""
+    try:
+        s = _require(); s.ensure_fresh()
+        res = s.flight_search(from_code, to_code, date, adults=adults,
+                              children=children, infants=infants,
+                              only_bookable=only_bookable, max_batches=max_batches)
+        flights, offers = res["flights"], res["offers"]
+        if only_bookable:
+            offers = [o for o in offers if str(o.get("vendor")) == "Tinkoff"]
+        if not offers:
+            return (f"Рейсов {from_code}→{to_code} на {date} не найдено"
+                    + (" среди бронируемых в банке (попробуй only_bookable=False)."
+                       if only_bookable else "."))
+        def money(o):
+            # price is {"amount": "19076.41", "currency": "RUB"}, not a number.
+            try:
+                return float((o.get("price") or {}).get("amount") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        offers = sorted(offers, key=lambda o: money(o) or 1e12)
+        names = ((res.get("info") or {}).get("carrierNames") or {})
+
+        def leg(i):
+            f = flights[i] if 0 <= i < len(flights) else {}
+            segs = f.get("flightSegments") or []
+            if not segs:
+                return ""
+            dep, arr = segs[0].get("departure") or {}, segs[-1].get("arrival") or {}
+            car = (segs[0].get("carriers") or {}).get("marketing") or ""
+            hop = f", {len(segs) - 1} пересадка" if len(segs) > 1 else " прямой"
+            dur = f.get("duration") or 0
+            return (f"{names.get(car, car)} {dep.get('airport', '')}→{arr.get('airport', '')}"
+                    f" {str(dep.get('time') or '')[11:16]}"
+                    + (f" ({dur // 60}ч{dur % 60:02d}м{hop})" if dur else hop))
+
+        def render(o):
+            idx = o.get("flights") or []
+            route = " / ".join(x for x in (leg(i) for i in idx[:2]) if x)
+            bag = "с багажом" if o.get("withBaggage") else "только ручная кладь"
+            ref = "возврат" if o.get("refundable") else "невозвратный"
+            return (f"- {money(o):.0f} ₽ | {route or '—'} | {bag} | {ref}"
+                    + (f" | offerId={o.get('offerId')}" if o.get("offerId") else ""))
+
+        head = (f"Рейсы {from_code}→{to_code} на {date}"
+                + (" (бронируемые в банке)" if only_bookable else ""))
+        tail = "" if res["complete"] else (
+            f"\n⚠️ Поток оборван на {res['batches']} батчах — это НЕ вся выдача. "
+            "Подними max_batches, если нужно всё.")
+        return _rows_out(offers, render, limit=limit, total=len(offers),
+                         header=head, order_note="дешёвые сверху",
+                         more_hint=f"Передай limit={len(offers)}.") + tail
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def flight_history() -> str:
+    """История авиапоисков — и единственный источник кодов IATA с названиями.
+
+    Резолвера «название → код» у банка нет, поэтому если пользователь называет
+    город словами, ищи код здесь, а не подставляй по памяти."""
+    try:
+        s = _require(); s.ensure_fresh()
+        rows = s.flight_history()
+        if not rows:
+            return ("История авиапоисков пуста — кодов IATA взять неоткуда. "
+                    "Попроси пользователя назвать код (MOW, LED, SVO).")
+
+        def place(p):
+            p = p or {}
+            name = (p.get("city_name") or {}).get("ru") or (p.get("name") or {}).get("ru", "")
+            code = p.get("code") or p.get("city_code") or "?"
+            return f"{name} ({code})"
+
+        def render(h):
+            pax = h.get("passengers") or {}
+            return (f"- {str(h.get('searchTime') or '')[:10]} | "
+                    f"{place(h.get('from'))} → {place(h.get('to'))}"
+                    + (f" | взрослых {pax.get('adults')}" if pax.get("adults") else ""))
+
+        return _rows_out(rows, render, limit=0, total=len(rows),
+                         header="История авиапоисков")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
 def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
     """Поиск товаров в маркетплейсе Т-Банка (Город → Шопинг).
 
@@ -2874,6 +2984,7 @@ def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
                if offset + len(products) < total else "")
         return _rows_out(products, render, limit=size, total=total,
                          header=f"Товары по запросу «{query}»",
+                         order_note="как отдал магазин",
                          more_hint=nxt or "Это всё.")
     except Exception as e:
         return _err(e)
@@ -3335,6 +3446,7 @@ _FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "docs", "FLOWS.md")
 _FLOW_KEYWORDS = {
     "bootstrap": "логин вход авторизация otp смс пароль пин первый login",
     "marketplace": "маркетплейс шопинг товар товары купить магазин продавец корзина",
+    "flights": "самолёт самолет авиа авиабилет перелёт перелет рейс аэропорт",
     "session": "сессия токен refresh keepalive expired протух",
     "read accounts": "счета счёт баланс операции покупки траты расходы категории",
     "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",

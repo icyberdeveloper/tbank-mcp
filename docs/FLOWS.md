@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **68 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **70 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -375,6 +375,31 @@ already holds, and wants none of the native query context — which is what the
 > and a price and nothing in any capture goes further, so there is no confirmed
 > step that places or pays for a marketplace order and none is invented. Search
 > and read the cart here; finish in the app.
+
+## 14. Flights — searching, and only searching
+
+`flight_search(from_code, to_code, date, only_bookable)` plus `flight_history()`.
+
+The captured traffic runs this under a web session behind a multi-step bridge,
+which reads as unreachable from a mobile one. It is not: probed live, the same
+endpoints answer under the plain mobile Bearer with `X-Travel-Context: mb` and
+the session in `sessionId`. No bridge is built, because none is needed.
+
+The search STREAMS. `startStreaming` returns the first batch; `nextBatch` blocks
+for the next and sets `isOver` on the last. Measured on one route: 4 batches, 757
+flights, 4348 offers, the final batch alone adding 2836. `offers[].flights` index
+the CONCATENATION of every batch — 757 flights, highest index 756 — so nothing
+resolves until the stream is stitched, and a caller that stops early is told.
+
+`only_bookable` (the default) stops after the first batch: only `vendor ==
+"Tinkoff"` offers are buyable inside the bank, and all 101 of them arrived in
+that first batch, so the other three round trips buy partner listings that lead
+out of the app.
+
+> **There is no name→IATA resolver anywhere in the captures.** `flight_history()`
+> is the one place a code comes back with its name; take codes from there rather
+> than guessing. And buying is not supported — no confirmed booking or payment
+> step exists, so this searches and compares, nothing more.
 
 ## Notes
 

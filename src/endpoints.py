@@ -1718,3 +1718,36 @@ BUILTIN_ENDPOINTS.update({
                    "params": dict(_SHOP),
                    "headers": {"Content-Type": "application/json"}, **_SHOP_LEAN},
 })
+
+
+# ---- flights (www.tbank.ru /api/travel) ------------------------------------
+# The captured traffic runs these under a WEB session (a psid cookie from a
+# multi-step bridge), which read as «unreachable from a mobile session». It is
+# not: probed live, the same endpoints answer under the plain mobile Bearer with
+# the session in `sessionId` and X-Travel-Context: mb. No bridge, no new
+# credential — so the whole psid apparatus the plan budgeted for is not built.
+#
+# The search streams. startStreaming opens it and returns the first batch;
+# nextBatch blocks until the next one is ready and sets isOver on the last.
+# offers[].flights are indices into the CONCATENATION of every batch, not into
+# the batch they arrived in — measured: 757 flights, highest offer index 756 — so
+# a flight can only be resolved after the whole stream is stitched.
+_TRAVEL_MB = {"session_param": "sessionId",
+              "headers": {"X-Travel-Context": "mb"}}
+_TRAVEL_MB_POST = {"session_param": "sessionId",
+                   "headers": {"Content-Type": "application/json",
+                               "X-Travel-Context": "mb"}}
+
+BUILTIN_ENDPOINTS.update({
+    "flight_search_start": {"method": "POST", "host": "https://www.tbank.ru",
+                            "path": "/api/travel/flight/search/startStreaming",
+                            "params": {}, **_TRAVEL_MB_POST},
+    "flight_search_next": {"method": "POST", "host": "https://www.tbank.ru",
+                           "path": "/api/travel/flight/search/nextBatch",
+                           "params": {}, **_TRAVEL_MB_POST},
+    # Past searches, and the only place codes come back WITH their names — there
+    # is no name→IATA resolver anywhere in the captures.
+    "flight_history": {"method": "GET", "host": "https://www.tbank.ru",
+                       "path": "/api/travel/flight/history/getSearchHistoryBySession",
+                       "params": {}, **_TRAVEL_MB},
+})
