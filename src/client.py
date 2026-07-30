@@ -29,7 +29,7 @@ from urllib.parse import urlparse, parse_qsl
 
 import requests
 
-from .endpoints import BUILTIN_ENDPOINTS, VERTICALS, VERTICAL_ALIASES
+from .endpoints import BUILTIN_ENDPOINTS, VERTICALS, VERTICAL_ALIASES, APP_VERSION
 from .observability import _redact_value
 
 MOBILE_BASE = "https://api.t-bank-app.ru"
@@ -73,7 +73,7 @@ def _builtin_fingerprint(device_id: str) -> str:
         "tDeviceId": device_id,
         "mobileDeviceOs": "iOS",
         "systemVersion": "17.5.1",
-        "appVersion": "7.31.6",
+        "appVersion": APP_VERSION,
         "bundleId": "com.idamob.tinkoff.android",
         "timeZoneName": "Europe/Moscow",
         "language": "ru",
@@ -1215,7 +1215,7 @@ class MobileSession:
         if not code:
             raise TbankApiError("NO_CODE", f"step: {json.dumps(r2j)[:200]}")
         tb = (f"device_id={self.device_id}&client_version={self.client_version}"
-              f"&grant_type=authorization_code&appVersion={self.app_version or '7.31.6'}"
+              f"&grant_type=authorization_code&appVersion={self.app_version or APP_VERSION}"
               f"&origin={self.origin}&vendor={self.vendor}&code={code}"
               f"&platform={self.platform}&appName={self.app_name}"
               f"&redirect_uri=mobile%3A%2F%2F")
@@ -1320,7 +1320,7 @@ class MobileSession:
             raise TbankApiError("NEXT_STEP", _next_step_hint(rj))
         # exchange the code for the mobile session
         tb = (f"device_id={self.device_id}&client_version={self.client_version}"
-              f"&grant_type=authorization_code&appVersion={self.app_version or '7.31.6'}"
+              f"&grant_type=authorization_code&appVersion={self.app_version or APP_VERSION}"
               f"&origin={self.origin}&vendor={self.vendor}&code={code}"
               f"&platform={self.platform}&appName={self.app_name}"
               f"&redirect_uri=mobile%3A%2F%2F")

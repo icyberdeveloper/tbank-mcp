@@ -2,6 +2,11 @@
 Generated from the API surface; the live sessionid/deviceId/access_token/cookies + per-call
 args (account, start/end, ...) are added at runtime by MobileSession. NO user secrets here."""
 
+# The app version string captured across every template below, plus the few
+# spots in client.py/server.py/checkout.py that need it outside a template.
+# One literal, not five copies of it.
+APP_VERSION = "7.31.6"
+
 BUILTIN_ENDPOINTS = {
  "accounts_light": {
   "method": "GET",
@@ -11,7 +16,7 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform",
    "inache": "drivetransitt",
    "ccc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "appName": "mobile",
    "platform": "ios",
@@ -30,7 +35,7 @@ BUILTIN_ENDPOINTS = {
    # mistakenly baked in as a default.
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "ccc": "true",
    "cpswc": "true",
@@ -48,7 +53,7 @@ BUILTIN_ENDPOINTS = {
    "groupBy": "category",
    "timeZone": "+03:00",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "inache": "drivetransitt",
    "ccc": "true",
@@ -62,7 +67,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/list_regular_payments_v2",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "origin": "mobile,ib5,loyalty,platform",
    "appName": "mobile",
    "connectionType": "WiFi",
@@ -77,7 +82,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/active_loans",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt",
    "connectionType": "WiFi",
    "appName": "mobile",
@@ -96,7 +101,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "appName": "mobile",
    "connectionType": "WiFi",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "ccc": "true",
    "platform": "ios"
@@ -107,7 +112,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/payments_credit_accounts",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform",
    "inache": "drivetransitt",
@@ -126,7 +131,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "origin": "mobile,ib5,loyalty,platform",
    "appName": "mobile",
    "inache": "drivetransitt"
@@ -142,7 +147,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "ccc": "true",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "appName": "mobile"
   }
@@ -159,7 +164,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "ca_operations": {
@@ -174,7 +179,7 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "purchased_securities": {
@@ -189,7 +194,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "session_status": {
@@ -217,7 +222,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/api-gateway/social/notification/v1/notification/count",
   "params": {
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "cpswc": "true",
    "ccc": "true",
@@ -231,7 +236,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://social-api.t-bank-app.ru",
   "path": "/api-gateway/social/profile/v1/profile/own/lite",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "platform": "ios",
    "connectionType": "WiFi",
@@ -246,7 +251,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://shopping.t-bank-app.ru",
   "path": "/api/v1/favorites",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "ios"
   }
@@ -257,7 +262,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/mybank/api/shopping/mobile/v1/carts/get-user-carts",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -269,7 +274,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "cpswc": "true",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "connectionType": "WiFi",
    "platform": "ios",
@@ -283,7 +288,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
@@ -302,7 +307,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "origin": "mobile,ib5,loyalty,platform"
   }
  },
@@ -314,7 +319,7 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi",
    "platform": "ios",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
    "ccc": "true",
@@ -332,7 +337,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt"
   }
  },
@@ -343,7 +348,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "connectionType": "WiFi",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
@@ -359,7 +364,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "platform": "ios",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "connectionType": "WiFi",
@@ -372,7 +377,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/cm/invoices_to_pay",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
@@ -387,7 +392,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/get_invoices",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
@@ -402,7 +407,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/cm/my_invoices",
   "params": {
    "cpswc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "appName": "mobile",
    "platform": "ios",
@@ -417,7 +422,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/available_cards",
   "params": {
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "ios",
    "ccc": "true",
@@ -434,7 +439,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "cpswc": "true",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "connectionType": "WiFi",
@@ -452,7 +457,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi"
   }
  },
@@ -465,7 +470,7 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform",
    "inache": "drivetransitt",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "ccc": "true",
    "connectionType": "WiFi"
@@ -480,7 +485,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "inache": "drivetransitt",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform"
@@ -495,7 +500,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "inache": "drivetransitt",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform"
@@ -508,7 +513,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
@@ -527,7 +532,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi"
   }
  },
@@ -539,7 +544,7 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "appName": "mobile",
    "ccc": "true",
@@ -555,7 +560,7 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "origin": "mobile,ib5,loyalty,platform",
    "appName": "mobile",
    "inache": "drivetransitt"
@@ -570,7 +575,7 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "inache": "drivetransitt",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform"
@@ -584,7 +589,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "platform": "ios",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "connectionType": "WiFi",
@@ -596,7 +601,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/gift/for_recipient",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "platform": "ios",
    "connectionType": "WiFi",
@@ -611,7 +616,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/finhealth/v2/metric/balance/total",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
@@ -626,7 +631,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/finhealth/v2/metric/balance/turnover",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
@@ -641,7 +646,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/finhealth/v2/metric/invest/turnover",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
@@ -657,7 +662,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/p2panybank/countries",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
@@ -677,7 +682,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt"
   }
  },
@@ -689,7 +694,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "ios",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
@@ -706,7 +711,7 @@ BUILTIN_ENDPOINTS = {
    "cpswc": "true",
    "platform": "ios",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "appName": "mobile"
   }
@@ -721,7 +726,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "appName": "mobile",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "connectionType": "WiFi"
   }
@@ -738,7 +743,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "invest_offers": {
@@ -753,7 +758,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "bundles_all": {
@@ -763,7 +768,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "ccc": "true",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "connectionType": "WiFi",
@@ -780,7 +785,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "appName": "mobile",
    "connectionType": "WiFi",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "ccc": "true",
    "platform": "ios"
@@ -794,7 +799,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "inache": "drivetransitt",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "cpswc": "true",
    "connectionType": "WiFi",
@@ -807,7 +812,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/v1/list_shared_resources",
   "params": {
    "ccc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform",
    "platform": "ios",
@@ -825,7 +830,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "connectionType": "WiFi",
    "ccc": "true"
@@ -837,7 +842,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/providers/providers/groups/filter",
   "params": {
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "ios",
    "ccc": "true",
@@ -864,7 +869,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "pageSize": "100",
    "page": "1",
    "frontendFeatureFlag": "SHAWithSubs"
@@ -875,7 +880,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/atm_withdrawal_qrs",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "ccc": "true",
    "platform": "ios",
@@ -890,7 +895,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://api.t-bank-app.ru",
   "path": "/v1/check_rating",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true",
@@ -911,7 +916,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt"
   }
  },
@@ -926,7 +931,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "appName": "mobile",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt"
   }
  },
@@ -939,7 +944,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "appName": "mobile",
    "connectionType": "WiFi",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "cpswc": "true",
    "platform": "ios"
@@ -952,7 +957,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "inache": "drivetransitt",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "ccc": "true",
@@ -967,7 +972,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "inache": "drivetransitt",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "ccc": "true",
@@ -986,7 +991,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios",
    "ccc": "true",
    "cpswc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi"
   }
  },
@@ -998,7 +1003,7 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi",
    "inache": "drivetransitt",
    "cpswc": "true",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
@@ -1017,7 +1022,7 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform",
    "ccc": "true",
    "cpswc": "true",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "grocery_order_create": {
@@ -1026,7 +1031,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/api/supreme/lifestyle/api/grocery/order/create",
   "params": {
    "appName": "grocery_evo",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -1036,7 +1041,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/api/supreme/lifestyle/api/grocery/deliveries",
   "params": {
    "appName": "grocery_evo",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -1046,7 +1051,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/api/supreme/lifestyle/api/grocery/address/set",
   "params": {
    "appName": "grocery_evo",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -1055,7 +1060,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://lifestyle.t-bank-app.ru",
   "path": "/api/grocery/retailers",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "inache": "drivetransitt",
    "connectionType": "WiFi",
    "platform": "ios",
@@ -1074,7 +1079,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "cpswc": "true",
    "platform": "ios",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "ccc": "true",
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform"
@@ -1090,7 +1095,7 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "inache": "drivetransitt"
   }
@@ -1103,7 +1108,7 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "platform": "ios",
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "connectionType": "WiFi",
    "origin": "mobile,ib5,loyalty,platform",
    "inache": "drivetransitt",
@@ -1122,7 +1127,7 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi",
    "inache": "drivetransitt",
    "cpswc": "true",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "grocery_unseen_orders": {
@@ -1134,7 +1139,7 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform",
    "ccc": "true",
    "inache": "drivetransitt",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "connectionType": "WiFi",
    "appName": "mobile"
@@ -1168,7 +1173,7 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi",
    "ccc": "true",
    "cpswc": "true",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "shopping_change_qty": {
@@ -1176,7 +1181,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://webview.t-bank-app.ru",
   "path": "/mybank/api/shopping/mobile/v1/carts/change-items-quantity",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "webview_ios"
   }
@@ -1187,7 +1192,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/mybank/api/shopping/mobile/v1/carts/cart-detail-info",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -1196,7 +1201,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://webview.t-bank-app.ru",
   "path": "/mybank/api/shopping/mobile/v1/store-products",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "webview_ios"
   }
@@ -1206,7 +1211,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://webview.t-bank-app.ru",
   "path": "/mybank/api/shopping/mobile/v1/product",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "webview_ios"
   }
@@ -1216,7 +1221,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://webview.t-bank-app.ru",
   "path": "/mybank/api/shopping/mobile/v4/store-categories",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "webview_ios"
   }
@@ -1228,7 +1233,7 @@ BUILTIN_ENDPOINTS = {
   "params": {
    "appName": "mobile",
    "platform": "webview_ios",
-   "appVersion": "7.31.6"
+   "appVersion": APP_VERSION
   }
  },
  "grocery_goods": {
@@ -1236,7 +1241,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://lifestyle.t-bank-app.ru",
   "path": "/api/grocery/goods",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "ios",
    "inache": "drivetransitt",
    "sortBy": "DEFAULT",
@@ -1253,7 +1258,7 @@ BUILTIN_ENDPOINTS = {
   "host": "https://webview.t-bank-app.ru",
   "path": "/mybank/api/shopping/mobile/v6/payment-methods",
   "params": {
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "appName": "mobile",
    "platform": "webview_ios"
   }
@@ -1268,7 +1273,7 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "appName": "mobile",
    "connectionType": "WiFi",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "cpswc": "true",
    "origin": "mobile,ib5,loyalty,platform"
   }
@@ -1279,7 +1284,7 @@ BUILTIN_ENDPOINTS = {
   "path": "/mybank/api/shopping/mobile/v1/checkout/process-order",
   "params": {
    "appName": "mobile",
-   "appVersion": "7.31.6",
+   "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
  },
@@ -1694,7 +1699,7 @@ VERTICAL_ALIASES = {
 #
 # The search parameter is `search`, NOT `query` — the sibling media endpoint uses
 # `query`, which is exactly the kind of near-miss worth writing down.
-_SHOP = {"appName": "mobile", "appVersion": "7.31.6", "platform": "webview_ios"}
+_SHOP = {"appName": "mobile", "appVersion": APP_VERSION, "platform": "webview_ios"}
 _SHOP_LEAN = {"no_base_params": True, "no_bearer": True}
 
 BUILTIN_ENDPOINTS.update({

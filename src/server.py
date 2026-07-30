@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from . import trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period, vertical
-from .endpoints import VERTICALS
+from .endpoints import VERTICALS, APP_VERSION
 from .observability import redact_text, _redact_value
 
 mcp = FastMCP("tbank")
@@ -196,7 +196,7 @@ def _blank_session():
     return _with_persist(MobileSession(mobile_sessionid="", refresh_token="",
         client_id="gorod-app", client_version="112.0.0",
         vendor="t_ios", origin="mobile,ib5,loyalty,platform",
-        platform="ios", app_name="mobile", app_version="7.31.6"))
+        platform="ios", app_name="mobile", app_version=APP_VERSION))
 
 
 def _with_persist(s):

@@ -40,10 +40,11 @@ import time
 
 from . import journal
 from . import observability as obs
+from .endpoints import APP_VERSION
 
 # Shared web-checkout query string (capture-verified) for every grocery web fetch.
 # Single source of truth — bump here, not in 5 separate JS template strings.
-GROCERY_WEB_QS = "appName=grocery_evo&appVersion=7.31.6&platform=webview_ios"
+GROCERY_WEB_QS = f"appName=grocery_evo&appVersion={APP_VERSION}&platform=webview_ios"
 
 
 def _cut(s, n: int) -> str:
