@@ -69,7 +69,7 @@ PAID_ORDER = {"payload": {"order": {
 
 
 def test_a_paid_order_does_not_read_as_unpaid():
-    out = run(server.grocery_order_status, Stub(grocery_order_get=PAID_ORDER), "70123456")
+    out = run(server.grocery_order_status, Stub(grocery_order_get=PAID_ORDER), "70123456", "204")
     check("paid=yes" in out, f"an order with a paymentId must read as paid: {out}")
     check("sum=1600.2" in out, f"the sum must come from cart.sum: {out}")
     check("CREATED_DYNAMIC" in out,
@@ -80,15 +80,22 @@ def test_a_paid_order_does_not_read_as_unpaid():
     # No paymentId → honestly unpaid, and the sum still resolves.
     unpaid = {"payload": {"order": {"id": "70123457", "status": "NEW",
                                     "cart": {"goodsSum": 500.0}}}}
-    out2 = run(server.grocery_order_status, Stub(grocery_order_get=unpaid), "70123457")
+    out2 = run(server.grocery_order_status, Stub(grocery_order_get=unpaid), "70123457", "204")
     check("paid=no" in out2, f"an order without a paymentId is unpaid: {out2}")
     check("sum=500.0" in out2, f"goodsSum must be the fallback: {out2}")
 
     # An empty/odd payload must degrade, not raise.
     for junk in ({}, {"payload": None}, {"payload": {"order": "nope"}}):
-        got = run(server.grocery_order_status, Stub(grocery_order_get=junk), "x")
+        got = run(server.grocery_order_status, Stub(grocery_order_get=junk), "x", "204")
         check("Traceback" not in got and got.strip(),
               f"a malformed order payload must degrade gracefully: {got!r}")
+
+    # app_id is required in practice (the live API 400s without it) despite its
+    # empty-string default in the signature — omitting it must say so plainly
+    # instead of making the call and surfacing the bank's generic 400.
+    no_app_id = run(server.grocery_order_status, Stub(grocery_order_get=PAID_ORDER), "70123456")
+    check("app_id" in no_app_id and "обязателен" in no_app_id,
+          f"omitting app_id must explain why, not hit the API blind: {no_app_id!r}")
     print("  grocery_order_status: paid/unpaid, sum and status read from the real schema")
 
 

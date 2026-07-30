@@ -1058,9 +1058,17 @@ def grocery_attempts(limit: int = 15) -> str:
 @mcp.tool()
 def grocery_order_status(order_id: str, app_id: str = "") -> str:
     """Reconciliation: статус grocery-заказа по orderId (GET /api/grocery/order).
-    Read-only. Проверь после UNKNOWN checkout, создался/оплатился ли заказ на бэкенде."""
+    Read-only. Проверь после UNKNOWN checkout, создался/оплатился ли заказ на бэкенде.
+
+    app_id ОБЯЗАТЕЛЕН несмотря на пустой дефолт в схеме: без него банк отвечает
+    сырым 400 вместо понятной причины. Магазин заказа известен из orders() (по
+    имени) — соответствующий appId возьми из grocery_stores()."""
     try:
         s = _require(); s.ensure_fresh()
+        if not app_id:
+            return ("app_id обязателен. Магазин этого заказа виден в orders() по "
+                    "имени — найди его appId через grocery_stores() и передай "
+                    "сюда явно.")
         r = s.grocery_order_get(order_id=order_id, app_id=app_id)
         payload = r.get("payload", r) if isinstance(r, dict) else {}
         order = payload.get("order", payload) if isinstance(payload, dict) else {}
