@@ -2181,6 +2181,10 @@ def documents(kind: str = "", include_others: bool = False) -> str:
         except Exception:
             own_bd = None
         want = kind.lower().strip()
+
+        def _norm_doc_num(v):
+            return re.sub(r"\s+", "", str(v)) if v else v
+
         out = []
         for code, entries in sorted(docs.items()):
             title = _DOC_TITLES.get(code, code)
@@ -2196,20 +2200,30 @@ def documents(kind: str = "", include_others: bool = False) -> str:
                 # the same document repeats across sources; MERGE the copies. The
                 # old «richest copy wins» compared field counts, so a field present
                 # only in the smaller copy was silently lost with it.
-                key = (f.get("serial"), f.get("number") or f.get("serialAndNumber"),
-                       f.get("person.lastName"), bd)
+                # ИНН has no serial/number/serialAndNumber — its identifier lives in
+                # `inn` — and formatting of the same real number can differ between
+                # sources ("9950 007133" vs "9950007133"), so both are normalized
+                # (whitespace stripped) before use. Once a document has a strong
+                # numeric identifier (serial+number, serialAndNumber, or inn), that
+                # alone is the key: a copy missing person.lastName/birthDate (as one
+                # of the two ИНН copies did) must still merge with the copy that has
+                # them, not read as a second document.
+                ident = (_norm_doc_num(f.get("serial")) if f.get("serial") else None,
+                         _norm_doc_num(f.get("number") or f.get("serialAndNumber") or f.get("inn")))
+                has_strong_ident = bool(ident[0] or ident[1])
+                key = ident if has_strong_ident else (None, None, f.get("person.lastName"), bd)
                 cur = seen.setdefault(key, {"_mine": mine})
                 for k, v in f.items():
                     cur.setdefault(k, v)
             for f in seen.values():
                 who = "" if f.get("_mine") else "  ⚠ не ваш документ"
-                num = " ".join(str(f[k]) for k in ("serial", "number", "serialAndNumber")
+                num = " ".join(str(f[k]) for k in ("serial", "number", "serialAndNumber", "inn")
                                if f.get(k))
                 head = f"{title}: {num or '—'}{who}"
                 # `name` usually duplicates the catalogue title, but for a code
                 # _DOC_TITLES does not know, the raw code IS the title — then the
                 # dropped name was the only human-readable label.
-                hide = {"serial", "number", "serialAndNumber", "_mine"}
+                hide = {"serial", "number", "serialAndNumber", "inn", "_mine"}
                 if str(f.get("name", "")) == title:
                     hide.add("name")
                 rest = [f"    {k} = {v}" for k, v in sorted(f.items())

@@ -209,6 +209,40 @@ def test_documents_merge_and_lists():
     print("  documents: list fields kept, duplicates merged, unknown codes keep their name")
 
 
+def test_inn_header_shows_the_number_and_duplicate_copies_merge():
+    """ИНН has no serial/number/serialAndNumber — its value lives in `inn` — so the
+    header used to always print «ИНН: —» even though the real number was right
+    there in the body. Two real copies of the same ИНН (one with person fields,
+    one without) also failed to merge: the old key required person.lastName/
+    birthDate to match, and the person-less copy has neither."""
+    wrap = lambda v: {"isEntered": True, "value": v}          # noqa: E731
+    docs = {
+        "RusINN": [
+            {"value": {"inn": wrap("744922535413"),
+                       "person": {"birthDate": wrap("1990-01-01"),
+                                  "lastName": wrap("Исламов")}}},
+            # Same ИНН from another source: no person fields at all.
+            {"value": {"inn": wrap("744922535413")}},
+        ],
+    }
+
+    class DocStub(Stub):
+        def ensure_client_session(self, *a, **kw):
+            return None
+
+    out = run(server.documents, DocStub(
+        identity_documents=docs,
+        identity_brief={"birthDate": {"value": "1990-01-01"}}))
+    check("ИНН: 744922535413" in out,
+          f"the header must show the real inn, not a bare '—': {out!r}")
+    check(out.count("ИНН:") == 1,
+          f"the person-less copy must merge with the one that has fields, not "
+          f"read as a second document: {out!r}")
+    check("inn = 744922535413" not in out,
+          f"inn is already in the header — it must not also repeat in the body: {out!r}")
+    print("  documents: ИНН header shows the number, and person-less duplicates merge")
+
+
 def test_grocery_search_header_is_honest():
     """The tool header must separate three different numbers: shown, matched, and
     what the store returned at all — «10 товаров» that silently came out of 25
@@ -911,6 +945,7 @@ def main():
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
     test_documents_merge_and_lists()
+    test_inn_header_shows_the_number_and_duplicate_copies_merge()
     test_grocery_search_header_is_honest()
     test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
