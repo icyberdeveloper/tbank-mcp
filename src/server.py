@@ -691,8 +691,9 @@ def grocery_stores(sort_by: str = "", order: str = "asc") -> str:
                     f"{', '.join(STORE_SORT_KEYS)} (или пусто — порядок банка).")
         stores = s.grocery_stores()
         if not stores:
-            return ("Магазинов не найдено — вероятно, не задан адрес доставки в "
-                    "приложении. Без магазина grocery-тулы работать не будут.")
+            return ("Магазинов для этого адреса не нашлось — похоже, в этой зоне "
+                    "доставки честно нет ни одного ритейлера. Адрес доставки можно "
+                    "посмотреть и сменить в приложении Т-Банка (Город).")
         rows = _rank_rows(stores, STORE_SORT_KEYS.get(key, ""), order)
 
         def render(st):
@@ -1348,7 +1349,11 @@ def messenger_unread() -> str:
                 off += len(page)
                 if all(str(i) in names for i in ids):
                     break
-        except Exception:
+        except (KeyError, TypeError, AttributeError):
+            # a shape surprise in the resolve loop only costs chat names, not the
+            # unread count itself — but a real session/auth error (e.g.
+            # SessionExpired) must still propagate to the outer handler below,
+            # not be reported as "(чат без названия)".
             pass
         lines = [f"Непрочитано в {len(ids)} чатах:"]
         for cid in ids:

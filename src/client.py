@@ -1980,12 +1980,8 @@ class MobileSession:
         # The delivery address, through the shared accessor rather than a second
         # hand-rolled request to the same URL: a cold-start add_to_cart resolves the
         # address here AND in _grocery_delivery, which was two identical calls.
-        addrs = []
-        try:
-            addrs = ((self.grocery_client_info().get("deliveryInfo") or {})
-                     .get("addresses") or [])
-        except TbankApiError:
-            pass
+        addrs = ((self.grocery_client_info().get("deliveryInfo") or {})
+                 .get("addresses") or [])
         if not addrs:
             raise TbankApiError("NO_DELIVERY_ADDRESS",
                 "У аккаунта нет сохранённого адреса доставки. Добавь адрес в приложении "
@@ -2009,36 +2005,35 @@ class MobileSession:
                   "tabsBlockType": "RECOMMENDATION", "v": "2"}
         r = self._http.get("https://lifestyle.t-bank-app.ru/api/grocery/retailers",
                           params=params, headers=base, timeout=30)
+        payload = self._unwrap(r)
         stores = []
-        try:
-            for cat in r.json().get("payload", {}).get("categories", []):
-                for ret in cat.get("retailers", []):
-                    app_id = str(ret.get("appId", ""))
-                    name = (ret.get("info", {}) or {}).get("name", "")
-                    point_id = str((ret.get("delivery", {}) or {}).get("pointId", ""))
-                    min_sum = (ret.get("delivery", {}) or {}).get("minOrderSum", 0)
-                    nearest = (ret.get("delivery", {}) or {}).get("nearestTime", {})
-                    cashback = (ret.get("info", {}) or {}).get("cashback", {})
-                    # areaId identifies the retailer's delivery zone for this address.
-                    # Retailers that have one (ВкусВилл, Лента) REQUIRE it in the
-                    # cart/set body — omitting it makes the backend reject the cart.
-                    # This is the only endpoint that ever returns it.
-                    area_id = str((ret.get("delivery", {}) or {}).get("areaId", "") or "")
-                    eta, window = delivery_eta(nearest)
-                    if app_id and name:
-                        # address/addressCount: the store list is built for ONE
-                        # profile address (the first), and the answer never said
-                        # which — with several saved addresses the agent could not
-                        # tell what «доставка за 30 мин» was relative to.
-                        stores.append({"appId": app_id, "name": name, "areaId": area_id,
-                                       "pointId": point_id, "minOrderSum": min_sum,
-                                       "etaMin": eta, "deliveryWindow": window,
-                                       "deliveryPrice": nearest.get("price", 0),
-                                       "cashback": cashback.get("value", ""),
-                                       "category": cat.get("name", ""),
-                                       "address": addr, "addressCount": len(addrs)})
-        except Exception:
-            pass
+        categories = payload.get("categories", []) if isinstance(payload, dict) else []
+        for cat in categories:
+            for ret in cat.get("retailers", []):
+                app_id = str(ret.get("appId", ""))
+                name = (ret.get("info", {}) or {}).get("name", "")
+                point_id = str((ret.get("delivery", {}) or {}).get("pointId", ""))
+                min_sum = (ret.get("delivery", {}) or {}).get("minOrderSum", 0)
+                nearest = (ret.get("delivery", {}) or {}).get("nearestTime", {})
+                cashback = (ret.get("info", {}) or {}).get("cashback", {})
+                # areaId identifies the retailer's delivery zone for this address.
+                # Retailers that have one (ВкусВилл, Лента) REQUIRE it in the
+                # cart/set body — omitting it makes the backend reject the cart.
+                # This is the only endpoint that ever returns it.
+                area_id = str((ret.get("delivery", {}) or {}).get("areaId", "") or "")
+                eta, window = delivery_eta(nearest)
+                if app_id and name:
+                    # address/addressCount: the store list is built for ONE
+                    # profile address (the first), and the answer never said
+                    # which — with several saved addresses the agent could not
+                    # tell what «доставка за 30 мин» was relative to.
+                    stores.append({"appId": app_id, "name": name, "areaId": area_id,
+                                   "pointId": point_id, "minOrderSum": min_sum,
+                                   "etaMin": eta, "deliveryWindow": window,
+                                   "deliveryPrice": nearest.get("price", 0),
+                                   "cashback": cashback.get("value", ""),
+                                   "category": cat.get("name", ""),
+                                   "address": addr, "addressCount": len(addrs)})
         # dedupe by (appId, pointId) — the retailers list can repeat a store (#14)
         seen = set()
         uniq = []
@@ -2251,12 +2246,9 @@ class MobileSession:
         dropped; otherwise it keeps looking and falls back to the best seen."""
         fallback = None
         for variant in self._query_variants(query):
-            try:
-                # limit=0: _pick_candidate must see every match, not the top ten.
-                r, _, _ = self.grocery_search(variant, app_id=app_id,
-                                              point_id=point_id, limit=0)
-            except Exception:
-                continue
+            # limit=0: _pick_candidate must see every match, not the top ten.
+            r, _, _ = self.grocery_search(variant, app_id=app_id,
+                                          point_id=point_id, limit=0)
             quals = self._qualifier_stems(query, variant)
             best = self._pick_candidate(r, variant, qualifiers=quals)
             if not best:
@@ -2301,10 +2293,7 @@ class MobileSession:
             return out
 
         def one(q):
-            try:
-                return q, self._search_best(q, app_id, point_id)
-            except Exception:
-                return q, None
+            return q, self._search_best(q, app_id, point_id)
 
         workers = max(1, min(max_workers, len(queries)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -2522,10 +2511,8 @@ class MobileSession:
                                      "User-Agent": "okhttp/4.12.0",
                                      "Authorization": "Bearer " + self.access_token},
                             timeout=30)
-        try:
-            return r.json().get("payload") or {}
-        except ValueError:
-            return {}
+        payload = self._unwrap(r)
+        return payload if isinstance(payload, dict) else {}
 
     def app_search(self, text: str, screen: str = "services",
                    limit: int = 20) -> list[dict]:
@@ -2573,11 +2560,8 @@ class MobileSession:
                            params=params, json=search_body,
                            headers={**base, "Authorization": "Bearer " + self.access_token},
                            timeout=30)
-        try:
-            data = r.json()
-        except Exception:
-            return [], 0, 0
-        hits = data.get("payload", {}).get("sortedByScoreObjects", [])
+        payload = self._unwrap(r)
+        hits = payload.get("sortedByScoreObjects", []) if isinstance(payload, dict) else []
         results = []
         fetched = 0
         for hit in hits:
