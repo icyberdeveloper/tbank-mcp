@@ -2973,8 +2973,11 @@ class MobileSession:
           pay body is capture-verified (providerFields.pointerType='8276', pointer
           '+7XXXXXXXXXX'). paymentType='Transfer' belongs to payment_commission,
           NOT to pay — no real pay body carries it.
-        between own accounts (provider='transfer-inner'): to_account = target account;
-          providerFields = {'bankContract': to_account}.
+        between own accounts (provider='transfer-inner'): NOT supported for the
+          PAYMENT. providerFields = {'bankContract': to_account} is a plausible
+          envelope, but unlike p2p-anybank (capture-verified) there is no captured
+          /v1/pay for this provider to check it against — refused until one exists.
+          Transfer between own accounts in the app in the meantime.
         by details (provider='transfer-legal'): NOT supported for the PAYMENT. The
           providerFields shape IS known — four captured payment_commission bodies
           carry all nine keys (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/
@@ -2999,7 +3002,17 @@ class MobileSession:
         ALWAYS confirm with the user. Returns the bank's payload (paymentId, …)."""
         src = account or self._source_account()
         if provider == "transfer-inner":
-            pf = {"bankContract": to_account}
+            # providerFields={'bankContract': to_account} would be the plausible
+            # envelope, but no captured /v1/pay exists for this provider to check
+            # it against — unlike p2p-anybank, which has direct capture references.
+            # Refused rather than sent unverified against real money.
+            raise TbankApiError("NOT_SUPPORTED",
+                "Перевод между своими счетами (provider='transfer-inner') через "
+                "MCP не реализован. Тело providerFields={'bankContract': "
+                "to_account} выглядит правдоподобно, но ни разу не сверено с "
+                "реальным перехваченным /v1/pay для этого провайдера — угадывать "
+                "конверт на платеже нельзя. Перевод между своими счетами — в "
+                "приложении.")
         elif provider == "transfer-legal":
             # The refusal stands, but its stated reason was false: four captured
             # payment_commission requests carry the full 9-key providerFields shape

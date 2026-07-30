@@ -125,7 +125,9 @@ You normally just call a read tool; the above runs under the hood. Call
    `from_account` picks the debited account; omitted, it falls back to the first
    Current RUB, which is a guess. If the member fields are omitted, the recipient is
    AUTO-resolved (default bank, or single match; several-without-default →
-   `RECIPIENT_MULTIPLE_BANKS`). `provider="transfer-inner"` for between-own-accounts.
+   `RECIPIENT_MULTIPLE_BANKS`). `provider="transfer-inner"` (between own accounts)
+   raises `NOT_SUPPORTED` — the body is plausible but has no captured `/v1/pay` to
+   verify it against; transfer between own accounts in the app instead.
    Returns `paymentId` — the only handle for `payment_receipt()`, unavailable later.
    An unconfirmed outcome BLOCKS the next identical transfer; `force=True` retries
    with the same `userPaymentId` so the bank sees a repeat, not a second payment.

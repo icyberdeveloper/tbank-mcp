@@ -583,6 +583,23 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
     print("  outcomes: refusals and rejections say the money is safe; only transport is unknown")
 
 
+def test_transfer_inner_is_refused_until_captured():
+    """provider='transfer-inner' builds a plausible body ({'bankContract':
+    to_account}) but no captured /v1/pay exists to check it against — unlike
+    p2p-anybank, which this whole file's fixture is verified against. Refused,
+    not sent, until that capture exists."""
+    from src.client import TbankApiError
+    s = CaptureSession()
+    try:
+        s.transfer(1000, "40817810000000000000", provider="transfer-inner")
+        check(False, "transfer-inner must be refused, not sent")
+    except TbankApiError as e:
+        check(e.result_code == "NOT_SUPPORTED",
+              f"transfer-inner should raise NOT_SUPPORTED, got {e.result_code!r}")
+    check(s.url is None, "a refused transfer-inner must never reach the wire")
+    print("  transfer-inner: refused until a real /v1/pay capture exists")
+
+
 def test_the_recipient_bank_the_user_picked_is_the_one_used():
     """The gate required three fields while every agent-facing string promises two, so
     an agent that followed the docs had its chosen SBP bank silently replaced."""
@@ -811,6 +828,7 @@ def main():
     test_a_lost_transfer_blocks_the_next_identical_one()
     test_the_result_carries_what_the_agent_needs_next()
     test_the_reported_commission_is_the_commission()
+    test_transfer_inner_is_refused_until_captured()
     test_bill_sections_raise_the_session_level_before_asking()
     test_filter_sections_refuse_to_pretend()
     test_payment_commission_rejects_a_body_it_cannot_use()
