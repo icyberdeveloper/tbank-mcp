@@ -136,13 +136,16 @@ Russian and so is the person reading the answer.
 | **Reads** | `list_accounts`, `list_operations`, `spending_categories`, `operations_histogram`, `get_data` |
 | **Cards & accounts** | `list_cards`, `card_limits`, `card_requisites`, `card_operations`, `account_requisites` |
 | **Documents** | `documents`, `bank_documents`, `insurance_policies`, `payment_receipt` |
-| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status` |
+| **Grocery** | `grocery_stores`, `grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `grocery_set_cart`, `grocery_cart`, `grocery_checkout`, `grocery_attempts`, `grocery_order_status`, `grocery_order_cancel` |
 | **Nutrition** | `grocery_good_info`, `grocery_rank` |
 | **Orders** | `orders`, `order_details`, `travel_order_details` |
-| **Tickets** | `cinema_search`, `cinema_schedule`, `cinema_seats`, `concert_schedule`, `concert_hall`, `cinema_book`, `ticket_pay`, `ticket_cancel` |
+| **Afisha** | `afisha_catalog`, `afisha_places`, `place_schedule`, `place_info` |
+| **Tickets** | `cinema_search`, `cinema_schedule`, `cinema_seats`, `concert_schedule`, `concert_hall`, `cinema_book`, `ticket_pay`, `ticket_cancel`, `ticket_qr` |
 | **Search** | `search_app` |
+| **Travel search** | `train_search`, `train_calendar`, `flight_search`, `flight_history` |
+| **Marketplace** | `shop_search`, `shop_cart` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
-| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission` |
+| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission`, `pay_bill`, `payment_providers` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
 
@@ -157,7 +160,7 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank` | **Entry point** — what the bank can do and which skill handles it |
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
-| `tbank-bill-pay` | Topping up a phone (a P2P transfer). Service bills — utilities, taxes, fines — are **not** implemented; the skill says so and points at the app |
+| `tbank-bill-pay` | Service bills — utilities, taxes, fines: catalogue → provider fields → commission preview → pay |
 | `tbank-transfer-money` | P2P, SBP (СБП), account transfers |
 | `tbank-cards-documents` | Cards, limits, requisites, passport and other documents |
 | `tbank-messenger` | Bank chats and support |
