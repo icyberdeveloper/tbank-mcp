@@ -20,6 +20,7 @@ description: |
 | `refresh_session()` | Обновить сессию без OTP (refresh_token → silent re-login). Единый тул — агент не знает про внутренний fallback. |
 | `session_status()` | Проверить жива ли сессия. |
 | `keepalive()` | Пинг — продлевает сессию (~2ч TTL). |
+| `push_unread_count()` | Число непрочитанных push-уведомлений. |
 
 ## Флоу первого логина
 

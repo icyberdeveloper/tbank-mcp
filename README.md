@@ -4,7 +4,7 @@
 
 ## Features
 
-- **72 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **73 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
 - **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
   transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
@@ -132,7 +132,7 @@ Russian and so is the person reading the answer.
 | Group | Tools |
 |---|---|
 | **Login** | `login`, `confirm_otp`, `confirm_password`, `confirm_pin` |
-| **Session** | `refresh_session`, `session_status`, `keepalive` |
+| **Session** | `refresh_session`, `session_status`, `keepalive`, `push_unread_count` |
 | **Reads** | `list_accounts`, `list_operations`, `spending_categories`, `operations_histogram`, `get_data` |
 | **Cards & accounts** | `list_cards`, `card_limits`, `card_requisites`, `card_operations`, `account_requisites` |
 | **Documents** | `documents`, `bank_documents`, `insurance_policies`, `payment_receipt` |
@@ -279,7 +279,7 @@ present the tests additionally check the fixtures have not drifted from it.
   confirmation of a specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 56 are `readOnlyHint: true` and
+  rather than defaulting to anything. Three kinds: 57 are `readOnlyHint: true` and
   may run without a prompt; 12 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
   `destructiveHint: false`; 4 debit an account — `transfer`, `grocery_checkout`,

@@ -72,6 +72,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "refresh_session": ("Обновление сессии", WRITE),
     "session_status": ("Статус сессии", READ),
     "keepalive": ("Продление сессии", READ),
+    "push_unread_count": ("Число непрочитанных push-уведомлений", READ),
     # accounts and operations
     "list_accounts": ("Счета", READ),
     "list_operations": ("Операции по счёту", READ),
@@ -516,6 +517,16 @@ def keepalive() -> str:
         # that tried to parse the answer got invalid JSON, and the character cut
         # could sever it mid-key.
         return _json_out(_require().keepalive(), 1000)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def push_unread_count() -> str:
+    """Число непрочитанных push-уведомлений."""
+    try:
+        s = _require(); s.ensure_fresh()
+        return _json_out(s.push_unread_count(), 500)
     except Exception as e:
         return _err(e)
 
@@ -1065,9 +1076,17 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
         status = order.get("status") or "?"
         summ = cart.get("sum") or cart.get("goodsSum") or "?"
         pay_id = order.get("paymentId") or ""
-        return (f"order={order_id} | status={status} | sum={summ} | "
+        goods = cart.get("goods") or []
+        head = (f"order={order_id} | status={status} | sum={summ} | "
                 f"app={app.get('name') or app.get('id') or '-'} | "
                 f"paymentId={pay_id or '-'} | paid={'yes' if pay_id else 'no payment id'}")
+        if not goods:
+            return head
+        body = "\n".join(
+            f"- {(g.get('name') or '')[:35]} | x{g.get('count', 1)} "
+            f"| {(g.get('price') or {}).get('value', '?')}₽"
+            for g in goods)
+        return f"{head}\n{body}"
     except Exception as e:
         return _err(e)
 
@@ -2944,7 +2963,12 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
     от партнёров, которые уводят на свой сайт.
 
     Купить билет через MCP нельзя: подтверждённого шага бронирования и оплаты
-    нет. Это поиск и сравнение, покупка — в приложении."""
+    нет. Это поиск и сравнение, покупка — в приложении.
+
+    Технический нюанс: заголовок X-Travel-Context='mb', который делает этот
+    эндпоинт доступным по мобильной сессии, не встречался в пассивном перехвате
+    трафика — он был подобран пробой вживую. Если банк когда-нибудь изменит
+    поведение этого хоста, это первое место, куда стоит посмотреть."""
     try:
         s = _require(); s.ensure_fresh()
         res = s.flight_search(from_code, to_code, date, adults=adults,
@@ -3005,7 +3029,11 @@ def flight_history() -> str:
     """История авиапоисков — и единственный источник кодов IATA с названиями.
 
     Резолвера «название → код» у банка нет, поэтому если пользователь называет
-    город словами, ищи код здесь, а не подставляй по памяти."""
+    город словами, ищи код здесь, а не подставляй по памяти.
+
+    Технический нюанс: как и flight_search(), этот эндпоинт отвечает по
+    мобильной сессии благодаря X-Travel-Context='mb' — заголовку, подобранному
+    пробой вживую, а не увиденному в пассивном перехвате трафика."""
     try:
         s = _require(); s.ensure_fresh()
         rows = s.flight_history()
@@ -3036,7 +3064,8 @@ def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
     """Поиск товаров в маркетплейсе Т-Банка (Город → Шопинг).
 
     Пагинация СЕРВЕРНАЯ: offset листает выдачу, всего результатов видно в шапке.
-    Печатает skuId, pointId и shopId — эту тройку принимает корзина.
+    Печатает skuId, pointId и shopId — они опознают позицию, но добавить её в
+    корзину через MCP нельзя: тула для этого нет, shop_cart() только читает.
 
     Оформить и оплатить заказ отсюда НЕЛЬЗЯ: в захвате нет подтверждённого шага
     размещения, только расчёт доставки. Собранную корзину пользователь
