@@ -3075,11 +3075,14 @@ def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
 
 
 @mcp.tool()
-def shop_cart() -> str:
+def shop_cart(limit: int = 20) -> str:
     """Корзины маркетплейса — по одной на продавца.
 
     Оформление заказа через MCP не поддерживается: подтверждённого шага
-    размещения в захвате нет. Корзину видно, оплатить её надо в приложении."""
+    размещения в захвате нет. Корзину видно, оплатить её надо в приложении.
+
+    limit — сколько позиций одной корзины показать (<=0 — все); каждая корзина
+    рассчитывается отдельно, с честным «N всего, показано M»."""
     try:
         s = _require(); s.ensure_fresh()
         carts = s.shop_carts()
@@ -3088,16 +3091,19 @@ def shop_cart() -> str:
         out = []
         for c in carts:
             items = c.get("items") or c.get("goods") or []
-            out.append(f"{c.get('merchantName') or c.get('shoppingMerchantId') or '?'}"
-                       f" | позиций: {len(items)}"
-                       + (f" | cartId={c['cartId']}" if c.get("cartId") else ""))
-            for it in items[:20]:
+
+            def render(it):
                 kop = it.get("totalPriceInKopecks")
                 money = f"{kop / 100:.0f} ₽" if kop else ""
-                out.append(f"  - {_cut(it.get('name', '?'), 46)} × "
-                           f"{it.get('quantity', '?')}"
-                           + (f" = {money}" if money else ""))
-        return "\n".join(out)
+                return (f"  - {_cut(it.get('name', '?'), 46)} × "
+                        f"{it.get('quantity', '?')}"
+                        + (f" = {money}" if money else ""))
+
+            header = (f"{c.get('merchantName') or c.get('shoppingMerchantId') or '?'}"
+                      + (f" | cartId={c['cartId']}" if c.get("cartId") else ""))
+            out.append(_rows_out(items, render, limit=limit, total=len(items),
+                                 header=header, order_note="как в корзине"))
+        return "\n\n".join(out)
     except Exception as e:
         return _err(e)
 
@@ -3274,11 +3280,13 @@ def place_schedule(object_id: str, limit: int = 20, page: int = 1,
 
 
 @mcp.tool()
-def place_info(object_id: str, with_halls: bool = False) -> str:
+def place_info(object_id: str, with_halls: bool = False, limit: int = 10) -> str:
     """Карточка площадки: название, город, метро, залы.
 
     Адрес в самой карточке приходит ПУСТЫМ — во всех захваченных ответах, — так
-    что with_halls=True дочитывает залы, где адрес есть."""
+    что with_halls=True дочитывает залы, где адрес есть.
+
+    limit — сколько залов показать (<=0 — все), с честным «N всего, показано M»."""
     try:
         s = _require(); s.ensure_fresh()
         d = s.place_info(object_id, with_halls=with_halls)
@@ -3296,10 +3304,15 @@ def place_info(object_id: str, with_halls: bool = False) -> str:
         if metro:
             out.append(f"Метро: {metro}")
         halls = d.get("halls") or []
-        for h in halls[:10]:
+
+        def render_hall(h):
             hgeo = h.get("geo") or {}
-            out.append(f"- зал {h.get('hallName') or h.get('name') or '?'}"
-                       + (f" — {hgeo.get('address')}" if hgeo.get("address") else ""))
+            return (f"- зал {h.get('hallName') or h.get('name') or '?'}"
+                    + (f" — {hgeo.get('address')}" if hgeo.get("address") else ""))
+
+        if halls:
+            out.append(_rows_out(halls, render_hall, limit=limit, total=len(halls),
+                                 header="Залы"))
         if not geo.get("address") and not halls:
             out.append("Адрес в карточке пуст — вызови с with_halls=True.")
         return "\n".join(out)
