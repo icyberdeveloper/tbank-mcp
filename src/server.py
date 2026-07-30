@@ -1907,14 +1907,20 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
                     f"| {o.get('type', '')} | {_cut(o.get('description', ''), 40)} "
                     f"| {o.get('status', '')}")
         # limit was passed to the API AND then ignored here by a hardcoded [:50],
-        # so invest_operations(limit=200) silently showed 50. has_next goes into
-        # the HEADER, not more_hint: the bank holding more back is true even when
-        # every fetched row is shown (limit=0). No cursor is sent — its wire name
-        # is unconfirmed; a bigger limit is the capture-backed way to see more.
-        head = "Брокерские операции"
+        # so invest_operations(limit=200) silently showed 50. When has_next is
+        # True the bank confirms there IS more — len(ops) is then just how many
+        # were fetched, not a real total, so it must NOT go through _rows_out's
+        # "{total} всего" framing: claiming len(ops) as the complete count in the
+        # same breath as "у банка есть ещё" is self-contradictory. When has_next
+        # is False, len(ops) genuinely is everything, and _rows_out's usual
+        # honest-truncation framing (plus its limit-slicing) applies normally.
         if has_next:
-            head += f" (у банка есть ещё — увеличь limit, сейчас {limit})"
-        return _rows_out(ops, render, limit=limit, total=len(ops), header=head)
+            shown = ops[:limit] if limit > 0 else ops
+            head = (f"Брокерские операции: показано {len(shown)}, у банка есть "
+                    f"ещё — увеличь limit (сейчас {limit})")
+            return "\n".join([head] + [render(o) for o in shown])
+        return _rows_out(ops, render, limit=limit, total=len(ops),
+                         header="Брокерские операции")
     except Exception as e:
         return _err(e)
 

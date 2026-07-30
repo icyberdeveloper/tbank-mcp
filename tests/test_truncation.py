@@ -344,6 +344,24 @@ def test_invest_has_next_is_announced_even_at_limit_zero():
     print("  invest_operations: hasNext reaches the header even when nothing is hidden")
 
 
+def test_invest_operations_never_calls_a_bank_confirmed_partial_fetch_a_total():
+    """limit=5 against a bank that says hasNext=True used to print "5 всего,
+    показано 5" (from _rows_out, fed len(ops) as the total) right next to "у
+    банка есть ещё" — claiming a limit-bounded fetch was complete and
+    incomplete in the same header."""
+    session = AnySession(invest_operations=(MANY[:5], True))
+    saved = server._require
+    server._require = lambda: session
+    try:
+        head = server.invest_operations("2000000001", "", 5).splitlines()[0]
+        check("всего" not in head,
+              f"a fetch the bank itself says is partial must never be called a total: {head!r}")
+        check("у банка есть ещё" in head, f"hasNext must still be surfaced: {head!r}")
+    finally:
+        server._require = saved
+    print("  invest_operations: a hasNext fetch is never mislabeled as a complete total")
+
+
 def test_messenger_messages_window_is_honest():
     """The chat history is paged LOCALLY over the one page the bank returns: the
     header states page size and window, offset walks toward older messages, and a
@@ -488,6 +506,7 @@ def main():
     test_limit_zero_means_everything_in_every_list_tool()
     test_provider_page_is_printed_whole_and_notfound_names_its_boundary()
     test_invest_has_next_is_announced_even_at_limit_zero()
+    test_invest_operations_never_calls_a_bank_confirmed_partial_fetch_a_total()
     test_messenger_messages_window_is_honest()
     test_every_json_tool_trims_by_records_not_by_characters()
     test_every_row_tool_reports_what_it_hides()
