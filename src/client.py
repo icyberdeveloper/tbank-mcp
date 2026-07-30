@@ -350,6 +350,26 @@ def _next_step_hint(resp: dict) -> str:
             f"{json.dumps(resp, ensure_ascii=False)[:200]}")
 
 
+def _wait_for_propagation(probe, *, timeout_s: float = 8.0, interval_s: float = 0.3) -> None:
+    """Poll `probe` until it stops raising, or the deadline passes.
+
+    A freshly-minted session needs a moment before mobile reads accept it
+    (else INSUFFICIENT_PRIVILEGES) — a blind sleep either waits when it
+    didn't need to, or not long enough. This degrades to "waited the full
+    deadline and proceeded anyway" on timeout, so it is never worse than the
+    blind sleep it replaces."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            probe()
+            return
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(interval_s)
+
+
 def _normalize_phone(phone: str) -> str:
     """Normalize a RU mobile number to the SBP `pointer` format ``+7XXXXXXXXXX``
     (the form the real app sends). Accepts +7 / 8 / 7 / bare-9… forms."""
@@ -1219,10 +1239,10 @@ class MobileSession:
         self.cipher_key = mobile.get("cipher_key", self.cipher_key)
         self._minted_at = time.time()
         self.tmsg_session_id = ""  # force tmsg re-mint with the fresh access_token
-        # the freshly-minted session needs ~3s to propagate before mobile reads
-        # accept it (else INSUFFICIENT_PRIVILEGES). silent_relogin runs ~every 2h,
-        # so this sleep is negligible.
-        time.sleep(3.0)
+        # the freshly-minted session needs a moment to propagate before mobile
+        # reads accept it (else INSUFFICIENT_PRIVILEGES) — poll instead of a
+        # blind wait, since most of the time it's ready sooner than 3s.
+        _wait_for_propagation(self.keepalive)
         self._persist()          # same reason as in refresh(): the token rotated
         return tok
 
@@ -1323,7 +1343,7 @@ class MobileSession:
         self.cookie_str = self.sso_login_cookie
         self.tmsg_session_id = ""
         self._login_cid = self._login_token = ""
-        time.sleep(3.0)  # propagation, like silent_relogin
+        _wait_for_propagation(self.keepalive)  # propagation, like silent_relogin
         return tok
 
     
