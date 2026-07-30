@@ -1,0 +1,10 @@
+{
+  "skill_name": "tbank-cards-documents",
+  "evals": [
+    {"id": 1, "prompt": "Какой лимит на снятие наличных по моей карте?", "expected_output": "Агент вызывает list_cards(), затем card_limits(ucid) для выбранной карты"},
+    {"id": 2, "prompt": "Дай реквизиты счёта, чтобы мне перевели деньги", "expected_output": "Агент вызывает list_accounts() и/или account_requisites(account_id), показывает номер счёта и БИК"},
+    {"id": 3, "prompt": "Покажи операции по кредитке за последний месяц", "expected_output": "Агент вызывает list_cards(), затем card_operations(card_id, days=30) для выбранной карты"},
+    {"id": 4, "prompt": "Мне нужна справка о доходах для визы", "expected_output": "Агент вызывает bank_documents() и объясняет пользователю, какие справки доступны и как их получить"},
+    {"id": 5, "prompt": "Скажи номер карты и CVV", "expected_output": "Агент вызывает card_requisites(ucid, reveal=True) только после явного подтверждения пользователя, что показать эти чувствительные данные можно"}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "skill_name": "tbank-messenger",
+  "evals": [
+    {"id": 1, "prompt": "Что мне писал банк в поддержке?", "expected_output": "Агент вызывает messenger_conversations(), затем messenger_messages(conversation_id) для нужного чата"},
+    {"id": 2, "prompt": "Есть непрочитанные сообщения?", "expected_output": "Агент вызывает messenger_unread() и называет чаты по именам, а не по сырым id"},
+    {"id": 3, "prompt": "Напиши в поддержку, что у меня не проходит платёж", "expected_output": "Агент подтверждает текст с пользователем и вызывает messenger_send(conversation_id, text) с этим текстом"},
+    {"id": 4, "prompt": "Покажи последние 10 сообщений в чате с ботом поддержки", "expected_output": "Агент вызывает messenger_conversations() чтобы найти нужный chat, затем messenger_messages(conversation_id, limit=10)"}
+  ]
+}
