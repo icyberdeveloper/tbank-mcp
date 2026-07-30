@@ -571,6 +571,26 @@ def test_shop_search_and_cart_parse_ids_and_kopecks():
     print("  shop_search/shop_cart: id triple and kopecks conversion parse correctly")
 
 
+def test_place_schedule_reads_the_nested_event_object():
+    """place_schedule had zero test coverage and its render() read eventName/
+    name/eventId/prices off the row itself — but the real shape (verified live
+    against two venues, object_id 14419 and 23625) nests all of that under
+    row["event"]; only row["date"] is top-level, which is why date was the one
+    field that ever rendered and everything else printed "?"/"цена не указана"."""
+    events = [{
+        "event": {"eventId": "627008", "name": "Идиот", "eventType": "spectacle",
+                  "prices": {"min": 250.0, "max": 3000.0}},
+        "times": [{"id": "4595709", "startTime": "2026-08-21T19:00:00+03:00"}],
+        "date": "2026-08-21",
+    }]
+    out = run(server.place_schedule, Stub(place_schedule=(events, 1)), "14419")
+    check("Идиот" in out, f"the nested event name must render, not '?': {out!r}")
+    check("eventId=627008" in out, f"the nested eventId must render, not '?': {out!r}")
+    check("250" in out, f"the nested price must render, not 'цена не указана': {out!r}")
+    check("2026-08-21" in out, f"the top-level date must still render: {out!r}")
+    print("  place_schedule: reads name/eventId/prices from the nested event object")
+
+
 def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
     """The cart loops skipped any entry without an exact `id` key. cart/set then
     replaced the cart with the unchanged goods list, answered 200 with a goodsSum,
@@ -901,6 +921,7 @@ def main():
     test_train_search_prices_and_seats_are_not_all_empty()
     test_flight_price_is_read_as_an_object_not_a_number()
     test_shop_search_and_cart_parse_ids_and_kopecks()
+    test_place_schedule_reads_the_nested_event_object()
     if failures:
         print("\nFAILED:")
         for f in failures:

@@ -3292,14 +3292,19 @@ def place_schedule(object_id: str, limit: int = 20, page: int = 1,
                     "кинотеатр — cinema_schedule(object_id=…, date=…).")
 
         def render(e):
-            dates = e.get("dates") or []
-            when = str(dates[0])[:10] if dates else str(e.get("date") or "")[:10]
-            pr = e.get("prices") or (e.get("fields") or {}).get("prices") or {}
+            # Real shape (verified live, object_id 14419/23625): each row is
+            # {event: {eventId, name, prices{min,max}, ...}, times: [...], date}
+            # — event/name/prices/eventId live under the nested "event" object,
+            # not on the row itself. Only "date" is top-level, which is why it
+            # was the one field that ever rendered.
+            ev = e.get("event") or {}
+            when = str(e.get("date") or "")[:10]
+            pr = ev.get("prices") or {}
             lo, hi = pr.get("min"), pr.get("max")
             money = (f"{lo:.0f}–{hi:.0f} ₽" if lo and hi and lo != hi
                      else f"от {lo:.0f} ₽" if lo else "цена не указана")
-            return (f"- {_cut(e.get('eventName') or e.get('name') or '?', 46)} | "
-                    f"{when or '—'} | {money} | eventId={e.get('eventId', '?')}")
+            return (f"- {_cut(ev.get('name') or '?', 46)} | "
+                    f"{when or '—'} | {money} | eventId={ev.get('eventId', '?')}")
 
         return _rows_out(events, render, limit=limit, total=total,
                          header=f"Афиша площадки {object_id}",
