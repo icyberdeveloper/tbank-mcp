@@ -30,6 +30,7 @@ from urllib.parse import urlparse, parse_qsl
 import requests
 
 from .endpoints import BUILTIN_ENDPOINTS, VERTICALS, VERTICAL_ALIASES
+from .observability import _redact_value
 
 MOBILE_BASE = "https://api.t-bank-app.ru"
 ID_BASE = "https://id.t-bank-app.ru"
@@ -1303,10 +1304,12 @@ class MobileSession:
         new_token = rj.get("token", "")
         if new_token:
             self._login_token = new_token
-        # if error in the response, raise with full detail
+        # if error in the response, raise with full detail — redact BEFORE the
+        # 300-char cut, not after: a token/phone that lands near the boundary
+        # would otherwise survive as a truncated (still readable) fragment.
         if rj.get("error"):
             raise TbankApiError(str(rj.get("error")),
-                                json.dumps(rj, ensure_ascii=False)[:300])
+                                json.dumps(_redact_value(rj), ensure_ascii=False)[:300])
         code = rj.get("code")
         if not code:
             # Not an error: the login is alive and the bank named the NEXT step in

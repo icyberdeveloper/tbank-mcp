@@ -23,7 +23,7 @@ from mcp.types import ToolAnnotations
 from . import trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period, vertical
 from .endpoints import VERTICALS
-from .observability import redact_text
+from .observability import redact_text, _redact_value
 
 mcp = FastMCP("tbank")
 
@@ -274,7 +274,11 @@ def _err(e):
     trace.note_error(e)
 
     def safe(msg):
-        return _cut(redact_text(str(msg)), 300)
+        # _redact_value (not redact_text): it is JSON-aware — a raw error body
+        # dumped whole (e.g. confirm_step's error path) gets its dict structure
+        # parsed and redacted by key name, catching a short token or a phone
+        # number that redact_text's value-pattern regexes alone would miss.
+        return _cut(_redact_value(str(msg)), 300)
     if isinstance(e, SessionExpired):
         return f"SESSION EXPIRED: call refresh_session(). {safe(e.message)}"
     if isinstance(e, TbankApiError):
