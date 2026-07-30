@@ -485,6 +485,92 @@ def test_money_formatting_is_unambiguous():
     print("  _money: bare numbers, bank dicts, grouping, and 'absent' vs zero")
 
 
+def test_train_search_prices_and_seats_are_not_all_empty():
+    """ac0a84b: price sits under carGroup.refundablePrice.price and seats under
+    carGroup.places.total — nested two levels deep on each car group, not flat
+    fields on the segment. The first rendering read the wrong place and printed
+    «мест нет» for all 47 trains in the live search regardless of what the bank
+    actually returned."""
+    ways = [{
+        "segments": [{
+            "origin": {"stationName": "Москва"},
+            "destination": {"stationName": "Санкт-Петербург"},
+            "departureDateTime": "2026-08-01T08:00:00",
+            "arrivalDateTime": "2026-08-01T12:00:00",
+            "displayTrainNumber": "001А",
+            "brandName": "Сапсан",
+            "carGroups": [
+                {"refundablePrice": {"price": "3200.00"}, "places": {"total": 24},
+                 "carTypeName": "Сидячий"},
+                {"refundablePrice": {"price": "1500.00"}, "places": {"total": 8},
+                 "carTypeName": "Плацкарт"},
+            ],
+        }],
+    }]
+    out = run(server.train_search, Stub(train_search=(ways, "search-1")),
+              "2000000", "2004000", "2026-08-01")
+    check("мест нет" not in out,
+          f"a train with priced, seated car groups must not read as «мест нет»: {out!r}")
+    check("1500" in out,
+          f"the cheapest car group's price must be shown: {out!r}")
+    check("мест 32" in out,
+          f"seats are summed across every priced car group (24+8): {out!r}")
+    print("  train_search: nested price/seats are read, not left to print «мест нет»")
+
+
+def test_flight_price_is_read_as_an_object_not_a_number():
+    """299e525: price is {"amount","currency"}, not a flat number, and segments
+    live under flightSegments — the first rendering assumed a flat numeric price
+    and crashed on float(), printing nothing before that."""
+    flights = [{
+        "flightSegments": [{
+            "departure": {"airport": "SVO", "time": "2026-08-01T10:00:00"},
+            "arrival": {"airport": "LED", "time": "2026-08-01T11:30:00"},
+            "carriers": {"marketing": "SU"},
+        }],
+        "duration": 90,
+    }]
+    offers = [{
+        "price": {"amount": "5000.00", "currency": "RUB"},
+        "flights": [0], "withBaggage": True, "refundable": False,
+        "vendor": "Tinkoff", "offerId": "off-1",
+    }]
+    res = {"flights": flights, "offers": offers, "info": {},
+           "complete": True, "batches": 1, "searchId": "s-1"}
+    out = run(server.flight_search, Stub(flight_search=res),
+              "SVO", "LED", "2026-08-01")
+    check("5000" in out,
+          f"the offer price (an {{'amount','currency'}} object) must render: {out!r}")
+    check("SVO" in out and "LED" in out, f"the route must be shown: {out!r}")
+    print("  flight_search: {amount,currency} price and flightSegments parse without crashing")
+
+
+def test_shop_search_and_cart_parse_ids_and_kopecks():
+    """shop_search/shop_cart had no coverage beyond cookie/transport plumbing
+    (test_transport.py) — the id triple (skuId/pointId/dolyameShopId) and the
+    cart's kopecks->rubles conversion were never exercised against a payload."""
+    products = [{"skuId": "1001", "id": "1001", "name": "Тестовый товар",
+                "price": 999, "dolyameShopId": "77", "available": True,
+                "rating": 4.5, "totalRatings": 10, "pointId": "5"}]
+    partners = [{"id": "77", "name": "Тестовый Продавец"}]
+    out = run(server.shop_search, Stub(shop_search=(products, partners, 1)), "тест")
+    check("999" in out, f"the product price must render: {out!r}")
+    check("Тестовый Продавец" in out,
+          f"the seller, keyed by dolyameShopId, must be resolved: {out!r}")
+    check("skuId=1001" in out and "pointId=5" in out and "shopId=77" in out,
+          f"the id triple must be printed: {out!r}")
+
+    carts = [{"merchantName": "Продавец", "cartId": "c1",
+             "items": [{"name": "Товар А", "quantity": 2,
+                       "totalPriceInKopecks": 15000}]}]
+    cart_out = run(server.shop_cart, Stub(shop_carts=carts))
+    check("150 ₽" in cart_out,
+          f"kopecks must convert to rubles (15000 -> 150): {cart_out!r}")
+    check("Товар А" in cart_out and "× 2" in cart_out,
+          f"item name and quantity must show: {cart_out!r}")
+    print("  shop_search/shop_cart: id triple and kopecks conversion parse correctly")
+
+
 def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
     """The cart loops skipped any entry without an exact `id` key. cart/set then
     replaced the cart with the unchanged goods list, answered 200 with a goodsSum,
@@ -812,6 +898,9 @@ def main():
     test_the_store_list_shows_and_sorts_by_delivery_speed()
     test_the_invest_envelopes_are_unwrapped()
     test_money_formatting_is_unambiguous()
+    test_train_search_prices_and_seats_are_not_all_empty()
+    test_flight_price_is_read_as_an_object_not_a_number()
+    test_shop_search_and_cart_parse_ids_and_kopecks()
     if failures:
         print("\nFAILED:")
         for f in failures:
