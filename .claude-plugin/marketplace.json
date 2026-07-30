@@ -12,7 +12,7 @@
     {
       "name": "tbank",
       "source": "./",
-      "description": "T-Bank mobile banking MCP + 10 skills",
+      "description": "T-Bank mobile banking MCP + 11 skills",
       "version": "0.1.2",
       "keywords": [
         "finance",

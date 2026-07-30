@@ -6,9 +6,9 @@
 
 - **73 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers, messenger, investments
-- **10 skills**, entered through the `tbank` router skill: grocery order, tickets,
-  transfer, bill pay, cards & documents, messenger, budget analysis, invest advisor,
-  login
+- **11 skills**, entered through the `tbank` router skill: grocery order, tickets,
+  travel search, transfer, bill pay, cards & documents, messenger, budget analysis,
+  invest advisor, login
 - **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which no
   OS ships and every `*.t-bank-app.ru` host needs — that is most of the 22 hosts this
   MCP talks to. Shipped in `ca/roots/`, pinned by SHA-256. Leaf/intermediate rotation
@@ -19,7 +19,7 @@
 
 ## Quick Install
 
-### As a Claude Code plugin (server + all 10 skills in one step)
+### As a Claude Code plugin (server + all 11 skills in one step)
 
 ```bash
 /plugin marketplace add icyberdeveloper/tbank-mcp
@@ -160,6 +160,7 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank` | **Entry point** — what the bank can do and which skill handles it |
 | `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
+| `tbank-travel-search` | Trains, flights, marketplace — search only, no booking |
 | `tbank-bill-pay` | Service bills — utilities, taxes, fines: catalogue → provider fields → commission preview → pay |
 | `tbank-transfer-money` | P2P, SBP (СБП), account transfers |
 | `tbank-cards-documents` | Cards, limits, requisites, passport and other documents |
