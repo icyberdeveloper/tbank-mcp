@@ -3115,17 +3115,34 @@ class MobileSession:
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
         return self.pay(body)
 
+    # Short on purpose, like CLIENT_INFO_TTL: a burst cache for the common
+    # payment_providers(provider_id=…) → pay_bill(provider_id) pair, not a
+    # session-long one. The catalogue itself doesn't change within a session.
+    PROVIDER_TTL = 60.0
+
     def find_provider(self, provider_id: str, group: str = "") -> dict:
         """One provider record from the catalogue, {} if not found.
 
         Walks the pages of `group` when given (cheap: the group filter narrows
         63 889 utility providers to one page), otherwise searches the ungrouped
-        catalogue, which is 100k+ providers — so a group is strongly preferred."""
+        catalogue, which is 100k+ providers — so a group is strongly preferred.
+
+        Memoised for PROVIDER_TTL seconds, keyed by (group, provider_id): the
+        typical flow calls payment_providers(provider_id=…) to show the fields,
+        then pay_bill(provider_id) moments later — same scan, same answer."""
         pid = str(provider_id)
+        key = f"provider:{group}:{pid}"
+        memo = getattr(self, "_memo", None)
+        if memo is not None:
+            at, cached = memo.get(key, (0.0, None))
+            if cached is not None and time.time() - at < self.PROVIDER_TTL:
+                return cached
         for page in range(1, 8):
             pg = self.providers_compatible_page(group=group, page=page)
             for prov in (pg.get("providers") or []):
                 if str(prov.get("id")) == pid:
+                    if memo is not None:
+                        memo[key] = (time.time(), prov)
                     return prov
             if page >= int(pg.get("totalPages") or 1):
                 break
