@@ -2406,8 +2406,11 @@ def grocery_good_info(good_id: str, app_id: str = "", point_id: str = "") -> str
                f"Вес: {w.get('value','?')} {w.get('unit','')}   "
                f"В наличии: {g.get('count','?')}"]
         if n["kcal"] is not None or n["protein"] is not None:
-            out.append(f"КБЖУ/100 г: {n['kcal'] if n['kcal'] is not None else '?'} ккал, "
-                       f"Б {n['protein']}, Ж {n['fat']}, У {n['carb']}")
+            def _n(key):
+                v = n[key]
+                return v if v is not None else "?"
+            out.append(f"КБЖУ/100 г: {_n('kcal')} ккал, "
+                       f"Б {_n('protein')}, Ж {_n('fat')}, У {_n('carb')}")
             if n["kcal_pack"] is not None:
                 out.append(f"На упаковку ({n['grams']:.0f} г): {n['kcal_pack']:.0f} ккал")
         else:

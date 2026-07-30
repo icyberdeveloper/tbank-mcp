@@ -625,6 +625,22 @@ def test_place_schedule_reads_the_nested_event_object():
     print("  place_schedule: reads name/eventId/prices from the nested event object")
 
 
+def test_grocery_good_info_never_prints_a_bare_none():
+    """Only kcal was guarded against None in the КБЖУ line — a retailer that
+    doesn't publish carbs (a real, common case: nutrition() itself returns
+    carb=None rather than 0, see test_nutrition) made the line read literally
+    "У None" instead of "У ?"."""
+    good = {"id": "1", "name": "Сыр", "count": 5, "price": {"value": 300},
+            "meta": {"weight": {"value": 200.0, "unit": "GRM"},
+                     "nutritionalValue": {"fat": "", "protein": "", "carbohydrate": "",
+                                          "energy": "", "value": "белки 26,8 г; жиры 25,2 г; 334 ккал"}}}
+    out = run(server.grocery_good_info, Stub(grocery_good=good), "1", "204", "5980")
+    check("None" not in out, f"a missing macro must never leak a bare 'None': {out!r}")
+    check("У ?" in out, f"missing carbs must render as '?', not be silently dropped: {out!r}")
+    check("334" in out, f"the macros that ARE published must still render: {out!r}")
+    print("  grocery_good_info: a retailer's unpublished macro renders as '?', never 'None'")
+
+
 def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
     """The cart loops skipped any entry without an exact `id` key. cart/set then
     replaced the cart with the unchanged goods list, answered 200 with a goodsSum,
@@ -957,6 +973,7 @@ def main():
     test_flight_price_is_read_as_an_object_not_a_number()
     test_shop_search_and_cart_parse_ids_and_kopecks()
     test_place_schedule_reads_the_nested_event_object()
+    test_grocery_good_info_never_prints_a_bare_none()
     if failures:
         print("\nFAILED:")
         for f in failures:
