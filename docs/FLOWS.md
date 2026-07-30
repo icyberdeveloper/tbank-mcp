@@ -281,7 +281,8 @@ skill. The order here is the part you must not improvise:
    showtimes per venue, filtered by venue-name substring and a time window
    (`window_min`). Pass the SAME `city` as in step 1 — it also anchors the
    distance sort, and a Petersburg schedule ordered from the centre of Moscow
-   looks plausible and is nonsense. Default is Москва, silently.
+   looks plausible and is nonsense. Omitting both `city` and `object_id` is
+   refused outright — `CITY_REQUIRED` — not silently defaulted to Moscow.
    Concerts: `concert_schedule(event_id)` — their showings are not date-keyed.
    Take **both** `slotId` and `objectId`; a `slotId` without its venue is useless.
 3. `cinema_seats(event_id, slot_id, object_id, row, max_price, kind)` → free seats

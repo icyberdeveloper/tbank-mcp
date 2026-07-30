@@ -31,7 +31,7 @@ MCP обращается к реальным магазинам Т-Банка �
 | `grocery_add_to_cart(items, app_id, point_id)` | **Прибавить** товары к корзине (адрес доставки берётся сам). **app_id/point_id обязательны.** |
 | `grocery_set_cart(items, app_id, point_id, clear)` | **Задать** количество точно: `count=0` убирает товар, `clear=True` очищает корзину. Возвращает состав ПОСЛЕ изменения |
 | `grocery_cart(app_id, point_id)` | Получить содержимое корзины (проверить перед оплатой). **Те же app_id/point_id что в add_to_cart.** |
-| `grocery_checkout(app_id, point_id, expected_sum, account_id)` | Полный чекаут: web-корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. **Те же app_id/pointId.** `expected_sum` — сумма, которую подтвердил пользователь (передавай всегда). Счёт по умолчанию — тот, которым платили за продукты в приложении; `account_id` его переопределяет. |
+| `grocery_checkout(app_id, point_id, force, account_id, expected_sum)` | Полный чекаут: web-корзина → доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ. **Те же app_id/pointId.** `expected_sum` — сумма, которую подтвердил пользователь (передавай всегда). Счёт по умолчанию — тот, которым платили за продукты в приложении; `account_id` его переопределяет. `force=True` — повтор после UNKNOWN, только если пользователь подтвердил, что прошлого заказа нет (см. шаг 8.3). |
 | `grocery_attempts()` | Read-only: недавние попытки checkout (status, order_id, attempt_id) — для reconciliation после UNKNOWN. |
 | `grocery_order_status(order_id)` | Read-only: статус заказа на бэкенде по orderId — проверь, создался/оплатился ли после UNKNOWN. |
 | `grocery_order_cancel(order_id, app_id)` | Отмена оформленного заказа (оплаченного тоже — деньги вернутся на счёт списания). С `app_id` сам перечитает заказ и покажет фактический статус. |
