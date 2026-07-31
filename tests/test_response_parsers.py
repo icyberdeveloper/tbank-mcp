@@ -353,6 +353,27 @@ def test_the_cart_prints_the_ids_it_must_be_edited_by():
     print("  grocery_cart: every good is printed with the id grocery_set_cart needs")
 
 
+def test_list_cards_and_afisha_catalog_do_not_cut_names_either():
+    """The same unmarked-cut sweep that caught the grocery tools also found
+    list_cards (name[:26]) and afisha_catalog (genres joined then cut to 34) —
+    same bug, different domains, found by grepping every raw [:N] slice in
+    src/ rather than only the tools one audit dimension happened to name."""
+    cards = [{"id": "1", "ucid": "u1", "account": "123", "availableBalance":
+              {"value": 100, "currency": {"name": "RUB"}},
+              "name": "Дебетовая карта Black Edition для частых путешествий"}]
+    out = run(server.list_cards, Stub(cards=cards))
+    check("Black Edition для частых путешествий" in out,
+          f"the full card name must be shown, not cut at 26 chars: {out!r}")
+
+    events = [{"eventId": "1", "eventName": "Тест", "genres":
+               ["Драма", "Комедия", "Приключения", "Семейный", "Мелодрама"]}]
+    out2 = run(server.afisha_catalog, Stub(afisha_catalog=(events, 1)),
+              "кино", "Москва")
+    check("Мелодрама" in out2,
+          f"the full genre list must be shown, not cut at 34 chars: {out2!r}")
+    print("  list_cards/afisha_catalog: names and genre lists are not cut either")
+
+
 def test_delivery_speed_is_read_from_both_slot_shapes():
     """`nearestTime` comes in two shapes and they are not interchangeable — in the
     capture 55 of 80 retailers use one and 25 the other:
@@ -1008,6 +1029,7 @@ def main():
     test_grocery_search_header_is_honest()
     test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
+    test_list_cards_and_afisha_catalog_do_not_cut_names_either()
     test_delivery_speed_is_read_from_both_slot_shapes()
     test_the_store_list_shows_and_sorts_by_delivery_speed()
     test_the_invest_envelopes_are_unwrapped()

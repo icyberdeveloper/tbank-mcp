@@ -1356,7 +1356,7 @@ def messenger_send(conversation_id: str, text: str) -> str:
             mid = str(payload.get("id") or payload.get("messageId") or "")
         return (f"Отправлено в чат {conversation_id}"
                 + (f", id сообщения {mid}" if mid else " (банк не вернул id сообщения)")
-                + f": «{text[:80]}»")
+                + f": «{_cut(text, 80)}»")
     except Exception as e:
         return _err(e)
 
@@ -2028,9 +2028,12 @@ def list_cards() -> str:
             kind = ("внешняя" if external
                     else "виртуальная" if c.get("isVirtual") else "пластик")
             bal = _money(c.get("availableBalance"), c.get("currency") or "")
+            # Full name, not cut — same reason as grocery names: a product/plan
+            # name (e.g. "Black Edition для путешествий") can carry meaning
+            # past 26 chars, and nothing else in the row is cut.
             return (f"- id={c.get('id','?')} ucid={c.get('ucid') or '—'} "
                     f"| счёт {c.get('account','?')} | {kind} | {bal} "
-                    f"| {(c.get('name') or c.get('accountName') or '')[:26]}")
+                    f"| {c.get('name') or c.get('accountName') or ''}")
         return "\n".join(row(c) for c in cards)
     except Exception as e:
         return _err(e)
@@ -3260,7 +3263,7 @@ def afisha_catalog(kind: str = "movie", city: str = "", date_from: str = "",
             return (f"- {_cut(e.get('eventName', '?'), 46)}"
                     + (f" [{f.get('ageRestriction')}]" if f.get("ageRestriction") else "")
                     + (f" | ★{rating}" if rating else "")
-                    + (f" | {', '.join(e.get('genres') or [])[:34]}"
+                    + (f" | {', '.join(e.get('genres') or [])}"
                        if e.get("genres") else "")
                     + (f" | ближайший {when}" if when else "")
                     + f" | eventId={e.get('eventId', '?')}")
