@@ -1972,7 +1972,8 @@ def invest_securities(broker_account_id: str = "") -> str:
                 cur = (prices.get("currentPrice") or {})
                 y = ((pos.get("yields") or {}).get("yield") or {})
                 lines.append(
-                    f"- {str(pos.get('ticker', '?'))[:14]:14} | {pos.get('securityType', '')[:6]:6} "
+                    f"- {_cut(str(pos.get('ticker', '?')), 14):14} | "
+                    f"{_cut(str(pos.get('securityType') or ''), 6):6} "
                     f"| {pos.get('currentBalance', '?')} шт "
                     f"| {_money(cur.get('value'), cur.get('currency', ''))} "
                     f"| {pos.get('portfolioPercent', '?')}% "
@@ -3093,6 +3094,8 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
         def render(o):
             idx = o.get("flights") or []
             route = " / ".join(x for x in (leg(i) for i in idx[:2]) if x)
+            if len(idx) > 2:
+                route += f" (+{len(idx) - 2} ещё)"
             bag = "с багажом" if o.get("withBaggage") else "только ручная кладь"
             ref = "возврат" if o.get("refundable") else "невозвратный"
             return (f"- {money(o):.0f} ₽ | {route or '—'} | {bag} | {ref}"

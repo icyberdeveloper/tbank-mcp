@@ -564,6 +564,59 @@ def test_concert_schedule_caps_a_touring_events_venues_honestly():
     print("  concert_schedule: an unbounded touring-event dump is capped, limit=0 shows all")
 
 
+def test_invest_securities_ticker_cut_is_marked():
+    """ticker/securityType were cut with a bare slice ([:14]/[:6]) instead of
+    _cut() — the one place left after the earlier truncation sweep that did not
+    mark a cut, so a long ticker/ISIN or securityType silently lost its tail
+    with no "…", indistinguishable from a short one that just fit."""
+    long_ticker = "RU000A1023V15EXTRA"  # 19 chars > the 14-char column
+    folios = [{"name": "Рублевый", "brokerAccountId": "2000000003", "positions": [
+        {"ticker": long_ticker, "securityType": "corporatebond",
+         "currentBalance": 1, "portfolioPercent": 1.0,
+         "prices": {"currentPrice": {"value": 100.0, "currency": "RUB"}},
+         "yields": {"yield": {"absolute": {"value": 1.0, "currency": "RUB"}}}}]}]
+    saved = server._require
+    server._require = lambda: AnySession(invest_securities=folios)
+    try:
+        out = server.invest_securities()
+        check(long_ticker not in out,
+              f"a 19-char ticker must not fit whole in the 14-char column: {out!r}")
+        check("…" in out, f"a cut ticker/securityType must be marked, not silent: {out!r}")
+    finally:
+        server._require = saved
+    print("  invest_securities: a long ticker/securityType is cut WITH the … marker")
+
+
+def test_flight_route_marks_legs_hidden_past_the_first_two():
+    """flight_search's route renderer hard-capped an offer's itinerary to its
+    first 2 legs with no indication more legs existed — unlike every other
+    truncation in this codebase, which says how much was hidden."""
+    offer = {"flights": [0, 1, 2], "price": {"amount": "1000", "currency": "RUB"},
+             "withBaggage": True, "refundable": False, "offerId": "o1",
+             "vendor": "Tinkoff"}
+    flights = [
+        {"flightSegments": [{"departure": {"airport": "SVO", "time": "2026-08-01T10:00"},
+                             "arrival": {"airport": "LED"}, "carriers": {"marketing": "SU"}}],
+         "duration": 90},
+        {"flightSegments": [{"departure": {"airport": "LED", "time": "2026-08-01T14:00"},
+                             "arrival": {"airport": "KZN"}, "carriers": {"marketing": "SU"}}],
+         "duration": 100},
+        {"flightSegments": [{"departure": {"airport": "KZN", "time": "2026-08-01T18:00"},
+                             "arrival": {"airport": "OVB"}, "carriers": {"marketing": "SU"}}],
+         "duration": 110},
+    ]
+    res = {"offers": [offer], "flights": flights, "info": {"carrierNames": {}},
+           "complete": True, "batches": 1}
+    saved = server._require
+    server._require = lambda: AnySession(flight_search=res)
+    try:
+        out = server.flight_search("SVO", "OVB", "2026-08-01")
+        check("+1 ещё" in out, f"a 3-leg offer must say one leg is hidden: {out!r}")
+    finally:
+        server._require = saved
+    print("  flight_search: legs past the first two are marked, not silently dropped")
+
+
 def test_real_capture_payload_survives():
     """The concrete case from the audit: 8 subscriptions must not become 6."""
     cap = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
@@ -621,6 +674,8 @@ def main():
     test_every_row_tool_reports_what_it_hides()
     test_cinema_schedule_caps_a_citywide_dump_honestly()
     test_concert_schedule_caps_a_touring_events_venues_honestly()
+    test_invest_securities_ticker_cut_is_marked()
+    test_flight_route_marks_legs_hidden_past_the_first_two()
     test_real_capture_payload_survives()
     if failures:
         print("\nFAILED:")
