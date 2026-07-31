@@ -53,6 +53,23 @@ def _cut(s, n: int) -> str:
     s = str(s or "")
     return s if n <= 0 or len(s) <= n else s[:n - 1] + "…"
 
+
+def _envelope_error(body) -> tuple[str, str]:
+    """Detect the lifestyle/Город app-level error envelope: HTTP 200 +
+    {"status": "Error", "payload": {"code": ..., "message": ...}} — the same
+    shape client.py's _unwrap() checks for on the mobile-API path. The shallow
+    top-level errorMessage/errorCode checks in this file do not catch it, so a
+    bank-rejected step here used to read as success. Returns (code, message),
+    both "" if the body isn't this envelope shape."""
+    if not isinstance(body, dict):
+        return "", ""
+    if str(body.get("status", "")).lower() != "error":
+        return "", ""
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    code = str(payload.get("code") or body.get("code") or "")
+    message = str(payload.get("message") or body.get("message") or "")
+    return code, message
+
 # How long the checkout page gets to bring its cart API up. The old 10 s was a bare
 # number; this is the p99 page-ready time observed in the capture session (~3.5 s)
 # with generous headroom, and it is a CEILING, not a wait — the poll exits as soon
@@ -296,12 +313,19 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if isinstance(dbody, dict):
                 d_err = str(dbody.get("errorMessage") or "")
                 d_code = str(dbody.get("errorCode") or dbody.get("resultCode") or dbody.get("code") or "")
+            # The top-level checks above miss the {"status":"Error","payload":{...}}
+            # envelope the lifestyle API also uses — check it too, or a rejected
+            # delivery reads as success and checkout proceeds to pay for it.
+            env_code, env_msg = _envelope_error(dbody)
+            d_err = d_err or env_msg
+            d_code = d_code or env_code
             obs.emit("delivery", attempt_id=attempt_id, app_id=app_id, point_id=point_id,
                      item_count=pre_count, http_status=deliv.get("status"), app_code=d_code,
                      duration_ms=_dur, blame=obs.blame_of(deliv.get("status"), d_code))
             if deliv.get("status", 0) >= 400 or d_err:
                 raise CheckoutError(
-                    f"deliveries failed (http={deliv.get('status')}, err={_cut(d_err, 120)})")
+                    f"deliveries failed (http={deliv.get('status')}, "
+                    f"code={d_code}, err={_cut(d_err, 120)})")
             _log(f"[checkout] deliveries ok (http={deliv.get('status')})")
 
             # 4. post-delivery: the deliveries RESPONSE carries payload.cartPrice (weight
@@ -355,7 +379,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
             obs.emit("payment_account", attempt_id=attempt_id, http_status=agr_res.get("status"),
                      agreement_present=bool(agreement), blame=obs.blame_of(agr_res.get("status")))
             if not agreement:
-                raise CheckoutError("no payment account: user/payment/account/last returned no accountId")
+                env_code, env_msg = _envelope_error(agr_body)
+                detail = f" ({env_code}: {env_msg})" if env_msg else ""
+                raise CheckoutError(
+                    f"no payment account: user/payment/account/last returned no "
+                    f"accountId{detail}")
 
             ci_res = page.evaluate(_js("""
                 return await _f('/mybank/api/shopping/mobile/v1/checkout/get-customer-information?'
@@ -365,6 +393,10 @@ def checkout(session, app_id: str = "", point_id: str = "",
             ci_email = ci_body.get("email") if isinstance(ci_body, dict) else ""
             if not ci_email and isinstance(ci_body, dict):
                 ci_email = (ci_body.get("payload", {}) or {}).get("email", "")
+                env_code, env_msg = _envelope_error(ci_body)
+                if env_msg:
+                    _log(f"[checkout] customer-information errored ({env_code}: "
+                         f"{env_msg}) — falling back to client_email arg")
             email = client_email or ci_email
 
             # 6. POST order/create with the POST-DELIVERY sum + the customer email

@@ -683,6 +683,28 @@ def test_cart_readiness_distinguishes_not_up_from_empty():
     print("  checkout: 'API down', 'cart empty' and 'slow start' are told apart")
 
 
+def test_deliveries_error_envelope_is_not_missed():
+    """The lifestyle/Город API can fail a step with HTTP 200 +
+    {"status":"Error","payload":{"code","message"}} — the same envelope
+    client.py's _unwrap() checks for on the mobile-API path. checkout.py's
+    deliveries check only looked at HTTP>=400 and a top-level errorMessage, so
+    this envelope shape passed through unnoticed and the checkout went on to
+    pay for an order whose delivery was never actually set up."""
+    from src.checkout import CheckoutError
+
+    deliv_error = {"status": 200, "body": {
+        "status": "Error", "payload": {"code": "NO_SLOTS", "message": "Нет слотов доставки"}}}
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    r = routes(paid)
+    r["deliveries"] = [deliv_error]
+    res, exc, page, _ = run_checkout(r)
+    check(isinstance(exc, CheckoutError), f"an error envelope on deliveries must raise: {exc!r}")
+    check("NO_SLOTS" in str(exc), f"the envelope's code must reach the message: {exc}")
+    check("order/create" not in page.log,
+          f"a rejected delivery must stop the flow before ordering: {page.log}")
+    print("  checkout: an HTTP-200 error envelope on deliveries is not mistaken for success")
+
+
 def main():
     print("audit regressions (2026-07-25):")
     cases = [
@@ -698,6 +720,7 @@ def main():
         test_payment_gate_problem_json_reaches_the_user,
         test_cart_readiness_distinguishes_not_up_from_empty,
         test_the_cart_readiness_poll_uses_a_real_clock,
+        test_deliveries_error_envelope_is_not_missed,
     ]
     # A test defined and never called is worse than no test: the suite reports green
     # and the reader believes the behaviour is pinned. It has happened here —
