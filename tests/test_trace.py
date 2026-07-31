@@ -173,6 +173,32 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
           "phone arguments stay out")
 
 
+def test_pay_bills_fields_argument_is_measured_not_stored():
+    """pay_bill's `fields` argument is a provider-defined JSON blob — the key names
+    vary per provider (ФНС, ФССП, ГИБДД, ...) and can carry real PII: a taxpayer's
+    full name, a passport series+number, an FSSP enforcement-case number, a traffic-
+    fine decree number. None of those key names match _REDACT_KEY, so the value used
+    to reach calls.jsonl almost verbatim (just truncated to 64 chars — long enough to
+    keep a real name and document number intact)."""
+    path = fresh_trace()
+
+    @trace.wrap
+    def fake_pay_bill(provider_id, fields, amount):
+        return "OK"
+
+    pii = '{"fio":"Иванов Иван Иванович","docNumber":"1234567890"}'
+    fake_pay_bill("fssp-rf", pii, 500.0)
+
+    raw = open(path, encoding="utf-8").read()
+    check("Иванов" not in raw, "a taxpayer/enforcement name reached the trace")
+    check("1234567890" not in raw, "a document number reached the trace")
+
+    rec = trace.load(path)[-1]
+    check(rec["args"]["fields"] == f"<{len(pii)} chars>",
+          f"fields must be measured, not stored: {rec['args']}")
+    print("  privacy: pay_bill's provider-defined `fields` blob is measured, not stored")
+
+
 def test_a_refusal_is_not_recorded_as_an_error():
     """Most failures here are ordinary return values — «NO_STORE_CONTEXT»,
     «Неизвестное поле сортировки». If the tracer guessed at the answer string it
@@ -362,6 +388,7 @@ def main():
     print("call trace:")
     test_the_wrapper_does_not_change_what_agents_see()
     test_a_secret_or_a_private_message_never_reaches_the_file()
+    test_pay_bills_fields_argument_is_measured_not_stored()
     test_the_journal_and_the_event_log_redact_too()
     test_the_log_files_are_owner_only_even_if_they_already_existed()
     test_a_refusal_is_not_recorded_as_an_error()

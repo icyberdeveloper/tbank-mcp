@@ -53,8 +53,14 @@ MAX_BYTES = int(os.environ.get("TBANK_TRACE_MAX_BYTES", 5 * 1024 * 1024))
 # Arguments never stored, only measured. Free text a human wrote (a chat message, a
 # transfer note) is theirs, and a credential is a credential — neither tells us
 # anything about how the agent USES the tool, which is the whole point here.
+#
+# "fields" (pay_bill's provider-defined JSON blob) belongs here too: its schema is
+# whatever the provider asks for — fio, docNumber (a passport number), ipNum (an
+# FSSP case number), a traffic-fine decree number — and none of that matches
+# _REDACT_KEY by name, so it used to reach calls.jsonl almost verbatim. A per-key
+# allowlist can't keep up with an open-ended provider schema; only length survives.
 _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
-                "save_to"}
+                "save_to", "fields"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the
