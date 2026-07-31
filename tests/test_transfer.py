@@ -283,6 +283,18 @@ def test_description_reaches_the_recipient():
     print("  description: delivered as providerFields.message (was silently dropped)")
 
 
+def test_transfer_refuses_a_non_positive_amount_before_touching_a_session():
+    """pay_bill already refused amount<=0 with a friendly message before calling
+    the bank; transfer() (the sibling MONEY tool) had no such guard at all, so
+    the identical mistake fell through to a raw bank error or an ambiguous
+    outcome the retry-guard journal then had to reason about."""
+    for bad in (0, -5, -0.01):
+        out = server.transfer(bad, "+79991234567")
+        check("Сумма должна быть больше нуля" in out,
+              f"transfer({bad!r}, ...) must be refused with a clear message: {out!r}")
+    print("  transfer: amount<=0 is refused before any session/API work, like pay_bill")
+
+
 def test_the_chosen_account_is_the_one_debited():
     s = CaptureSession()
     s.transfer(10, "+79991234567", account="9999999999")
@@ -824,6 +836,7 @@ def main():
     test_the_pay_request_looks_like_the_device_it_claims_to_be()
     test_the_device_profile_is_configuration_not_a_constant()
     test_description_reaches_the_recipient()
+    test_transfer_refuses_a_non_positive_amount_before_touching_a_session()
     test_the_chosen_account_is_the_one_debited()
     test_a_lost_transfer_blocks_the_next_identical_one()
     test_the_result_carries_what_the_agent_needs_next()

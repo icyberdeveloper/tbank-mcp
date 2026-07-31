@@ -255,7 +255,7 @@ def _require():
         _session = _with_persist(_load_session())
     if not _session or not _session.mobile_sessionid:
         raise TbankApiError("NO_SESSION",
-            "Call login(phone) first.")
+            "Сначала вызови login(phone).")
     return _session
 
 
@@ -429,15 +429,17 @@ def login(phone: str) -> str:
     except Exception as e:
         return _err(e)
 
+_NO_SESSION_YET = TbankApiError("NO_SESSION", "Сначала вызови login(phone).")
+
 @mcp.tool()
 def confirm_otp(otp: str) -> str:
     """Отправить SMS-код."""
     global _session
-    if not _session: return "call login(phone) first"
+    if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("otp", otp)
         _save_session(_session)
-        return "OK. session active."
+        return "OK. Сессия активна."
     except Exception as e:
         return _err(e)
 
@@ -445,11 +447,11 @@ def confirm_otp(otp: str) -> str:
 def confirm_password(password: str) -> str:
     """Отправить пароль аккаунта (первый логин на новом устройстве)."""
     global _session
-    if not _session: return "call login(phone) first"
+    if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("password", password)
         _save_session(_session)
-        return "OK. session active."
+        return "OK. Сессия активна."
     except Exception as e:
         return _err(e)
 
@@ -457,11 +459,11 @@ def confirm_password(password: str) -> str:
 def confirm_pin(pin: str) -> str:
     """Отправить PIN (re-auth)."""
     global _session
-    if not _session: return "call login(phone) first"
+    if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("pin", pin)
         _save_session(_session)
-        return "OK. session active."
+        return "OK. Сессия активна."
     except Exception as e:
         return _err(e)
 
@@ -490,7 +492,7 @@ def refresh_session() -> str:
                 return "REAUTH_REQUIRED: refresh_token истёк и нет SSO_SESSION. Нужен полный логин (login + OTP + password)."
         _save_session(s)
         obs.emit("refresh", grant=grant, result="ok")
-        return "OK. session active."
+        return "OK. Сессия активна."
     except Exception as e:
         try:
             from . import observability as obs
@@ -1263,7 +1265,9 @@ def messenger_conversations(archived: bool = False, offset: int = 0) -> str:
     """Список чатов (одна страница банка).
 
     offset — с какого чата начать (следующая страница: offset из подсказки в
-    шапке ответа). archived=True — архивные чаты."""
+    шапке ответа), считая С НАЧАЛА списка. archived=True — архивные чаты.
+    Не путать с offset у messenger_messages() — там отсчёт с КОНЦА (от самых
+    новых), это два разных тула с разной точкой отсчёта."""
     try:
         s = _require(); s.ensure_fresh()
         convs = s.messenger_conversations(archived=archived, offset=offset)
@@ -1305,7 +1309,9 @@ def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
 
     Банк отдаёт одну страницу истории; параметры листают её ЛОКАЛЬНО:
       limit     — сколько сообщений показать (0 = вся страница);
-      offset    — сколько САМЫХ НОВЫХ пропустить (окно старее: offset=20, 40, …);
+      offset    — сколько САМЫХ НОВЫХ пропустить (окно старее: offset=20, 40, …).
+                  Отсчёт с КОНЦА страницы — не то же самое, что offset у
+                  messenger_conversations(), где отсчёт с начала списка чатов;
       max_chars — кап текста одного сообщения (0 = целиком). Обрезка всегда
                   помечена и называет полную длину."""
     try:
@@ -1492,6 +1498,8 @@ def transfer(amount: float, to_account: str, description: str = "",
     try:
         import time
         from . import journal
+        if amount is None or float(amount) <= 0:
+            return "Сумма должна быть больше нуля."
         s = _require(); s.ensure_fresh()
         src = from_account or s._source_account()
         key = _transfer_key(amount, to_account, provider, src)
@@ -3142,6 +3150,8 @@ def shop_search(query: str, limit: int = 20, offset: int = 0) -> str:
     """Поиск товаров в маркетплейсе Т-Банка (Город → Шопинг).
 
     Пагинация СЕРВЕРНАЯ: offset листает выдачу, всего результатов видно в шапке.
+    limit<=0 здесь НЕ значит «показать всё» (в отличие от большинства других
+    тулов этого сервера) — молча используется 20; листай через offset.
     Печатает skuId, pointId и shopId — они опознают позицию, но добавить её в
     корзину через MCP нельзя: тула для этого нет, shop_cart() только читает.
 
