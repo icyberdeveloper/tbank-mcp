@@ -705,6 +705,44 @@ def test_deliveries_error_envelope_is_not_missed():
     print("  checkout: an HTTP-200 error envelope on deliveries is not mistaken for success")
 
 
+def test_messenger_ids_are_validated_before_they_reach_a_url():
+    """conversation_id/message_id are agent-supplied — possibly copied straight out
+    of a chat message the agent just read — and used to be spliced unvalidated and
+    unencoded into an f-string request path. A value containing "/", "..", "?", "#"
+    or whitespace must be rejected before any network call is even attempted, not
+    sent to the bank as-is."""
+    from src.client import TbankApiError
+
+    s = MobileSession.__new__(MobileSession)
+    calls = []
+    s._call_read = lambda *a, **kw: (calls.append((a, kw)), {})[1]
+    s._messenger_read = lambda *a, **kw: (calls.append((a, kw)), [])[1]
+
+    for bad in ("../../etc", "a/b", "a?b", "a#b", "a b", ""):
+        try:
+            s.messenger_messages(bad)
+            failures.append(f"messenger_messages accepted a bad conversation_id: {bad!r}")
+        except TbankApiError:
+            pass
+        try:
+            s.messenger_send(bad, "hi")
+            failures.append(f"messenger_send accepted a bad conversation_id: {bad!r}")
+        except TbankApiError:
+            pass
+
+    check(not calls, f"a bad id must be rejected before any network call, got: {calls}")
+
+    # A well-formed id must still work, unchanged.
+    s.messenger_messages("c-1")
+    s.messenger_hints("c-1")
+    s.messenger_faq("c-1")
+    s.messenger_send("c-1", "hi")
+    s.messenger_mark_read("c-1", "m-1")
+    check(len(calls) == 5,
+          f"well-formed ids must still reach the network: {len(calls)} calls, {calls}")
+    print("  messenger: conversation_id/message_id are validated before hitting the network")
+
+
 def main():
     print("audit regressions (2026-07-25):")
     cases = [
@@ -721,6 +759,7 @@ def main():
         test_cart_readiness_distinguishes_not_up_from_empty,
         test_the_cart_readiness_poll_uses_a_real_clock,
         test_deliveries_error_envelope_is_not_missed,
+        test_messenger_ids_are_validated_before_they_reach_a_url,
     ]
     # A test defined and never called is worse than no test: the suite reports green
     # and the reader believes the behaviour is pinned. It has happened here —

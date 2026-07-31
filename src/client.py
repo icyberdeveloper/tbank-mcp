@@ -1363,6 +1363,21 @@ class MobileSession:
     # content, which is the worst way to fail: nothing to retry, nothing to read.
     _TMSG_AUTH_CODES = {"AUTH_REQUIRED", "TOKEN_EXPIRED", "UNAUTHORIZED"}
 
+    # conversation_id/message_id are agent-supplied arguments — possibly copied
+    # from text the agent just read in a chat message — spliced unvalidated and
+    # unencoded into an f-string request path below. Real ids are alphanumeric
+    # (plus hyphen/underscore); this is the one choke point that rejects a
+    # path-breaking or injected value (e.g. containing "/", "..", "?", "#")
+    # before it ever reaches a URL.
+    _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+    @staticmethod
+    def _safe_id(value: str, what: str) -> str:
+        v = str(value or "")
+        if not MobileSession._SAFE_ID_RE.match(v):
+            raise TbankApiError("BAD_ID", f"{what} содержит недопустимые символы: {v!r}")
+        return v
+
     @staticmethod
     def _tmsg_auth_error(data) -> str:
         rec = data[0] if isinstance(data, list) and data else data
@@ -1396,18 +1411,21 @@ class MobileSession:
 
     def messenger_messages(self, conversation_id: str, direction: str = "before",
                            message_id: str = "") -> list[dict]:
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
         ov = {"direction": direction}
         if message_id:
-            ov["messageId"] = message_id
+            ov["messageId"] = self._safe_id(message_id, "message_id")
         return self._as_list(self._messenger_read(overrides=ov,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages"))
 
     def messenger_hints(self, conversation_id: str) -> list[dict]:
-        return self._as_list(self._call_read("messenger_base",
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
+        return self._as_list(self._messenger_read(
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/hints"))
 
     def messenger_faq(self, conversation_id: str) -> list[dict]:
-        return self._as_list(self._call_read("messenger_base",
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
+        return self._as_list(self._messenger_read(
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/faq"))
 
     def messenger_unread(self) -> dict:
@@ -1419,6 +1437,7 @@ class MobileSession:
 
     def messenger_send_message(self, conversation_id: str, body: dict | None = None) -> dict:
         """POST a message to a conversation (WRITE). Replays the request body or override."""
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
         return self._call_read("messenger_send", body=body,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
@@ -1427,6 +1446,8 @@ class MobileSession:
         request is a PUT with markRead's own vendor content types, while
         messenger_base is a GET that would send `application/json` — the same
         content-negotiation mistake that made messenger_unread answer 406."""
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
+        message_id = self._safe_id(message_id, "message_id")
         return self._call_read("messenger_mark_read",
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages/{message_id}/markRead")
 
@@ -2903,6 +2924,7 @@ class MobileSession:
         """Send a text message to a conversation. Encapsulates the vendor
         Content-Type + body format."""
         import uuid as _uuid
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
         body = {"content": text, "clientSideId": str(_uuid.uuid4()),
                 "assistant": {"inputType": "default"}}
         return self._call_read("messenger_send", body=body,
