@@ -757,7 +757,11 @@ def grocery_search(query: str, app_id: str = "", point_id: str = "",
                 f"(сеть вернула {fetched})")
         if len(results) < matched:
             head += "; limit=0 — все подходящие"
-        body = "\n".join(f"- id={r['id']} | {_cut(r['name'], 40)} | {r['price']}₽ | {r.get('weight','') or '-'} | {'RAW' if r.get('likely_raw') else 'PREP'}"
+        # Full name, not cut: brand/fat%/variant that disambiguate near-identical
+        # products live at the END of a grocery name, past where a 40-char cut
+        # used to land — id/price/weight are already uncut, so a cut name was
+        # the only lossy field, and the one most likely to cause a wrong pick.
+        body = "\n".join(f"- id={r['id']} | {r['name']} | {r['price']}₽ | {r.get('weight','') or '-'} | {'RAW' if r.get('likely_raw') else 'PREP'}"
             for r in results)
         return head + "\n" + body
     except Exception as e:
@@ -778,8 +782,12 @@ def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -
             # id and weight are what the caller actually needs: without the id every
             # item had to be re-searched by hand before add_to_cart, and without the
             # weight a 30 g single-serving pack is indistinguishable from a real one.
+            # Full name, not a bare i['name'][:38] — that silently cut with no
+            # "…" mark at all, and for the same reason as grocery_search: the
+            # brand/fat%/variant that disambiguates a near-identical product
+            # lives at the end of a grocery name.
             lines.append(
-                f"✓ id={i.get('id','?')} | {i['name'][:38]} | {i['price']}₽"
+                f"✓ id={i.get('id','?')} | {i['name']} | {i['price']}₽"
                 f" | {i.get('weight') or '-'}"
                 f" | {'RAW' if i.get('likely_raw') else 'PREP'} | {i['source']}")
         if plan["missing"]:
@@ -2497,7 +2505,10 @@ def grocery_rank(query: str, app_id: str = "", point_id: str = "",
                 kcal = f"{r['kcal']:.0f}" if r.get("kcal") is not None else "—"
                 line += (f" | {kcal:>5} ккал/100г | Б{n(r.get('protein'))}"
                          f"/Ж{n(r.get('fat'))}/У{n(r.get('carb'))}")
-            lines.append(line + f" | {_cut(r['name'], 42)} | id={r['id']}")
+            # Full name, not cut — see grocery_search for why: a cut here would
+            # hide exactly the brand/fat%/variant that this ranking exists to
+            # help choose between.
+            lines.append(line + f" | {r['name']} | id={r['id']}")
         return "\n".join(lines)
     except Exception as e:
         return _err(e)
