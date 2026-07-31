@@ -14,9 +14,7 @@ import os
 import re
 import sys
 import threading
-import traceback
 from datetime import datetime, timedelta
-from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -1722,8 +1720,9 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
                     f"Проверь list_operations('{src}', days=1). "
                     f"Ответ: {_json_out(payload, 400)}")
         fee_txt = f", комиссия {_money(fee, 'RUB')}" if fee is not None else ""
+        total_txt = f", итого списано {_money(total, 'RUB')}" if total is not None else ""
         return (f"Оплачено {_money(amount, 'RUB')} → {prov.get('name')} "
-                f"со счёта {src}{fee_txt}. paymentId={pid} "
+                f"со счёта {src}{fee_txt}{total_txt}. paymentId={pid} "
                 f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
         return _err(e)

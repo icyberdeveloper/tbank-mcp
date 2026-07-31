@@ -27,7 +27,7 @@ import getpass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.client import MobileSession, TbankApiError
+from src.client import TbankApiError
 from src import server as srv
 
 

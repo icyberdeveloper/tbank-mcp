@@ -950,21 +950,6 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios"
   }
  },
- "grocery_client_info": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/grocery/client/info",
-  "params": {
-   "inache": "drivetransitt",
-   "platform": "ios",
-   "appVersion": APP_VERSION,
-   "cpswc": "true",
-   "origin": "mobile,ib5,loyalty,platform",
-   "ccc": "true",
-   "connectionType": "WiFi",
-   "appName": "mobile"
-  }
- },
  "grocery_cart_get": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",
@@ -1039,16 +1024,6 @@ BUILTIN_ENDPOINTS = {
   "method": "POST",
   "host": "https://www.tbank.ru",
   "path": "/api/supreme/lifestyle/api/grocery/deliveries",
-  "params": {
-   "appName": "grocery_evo",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- },
- "grocery_address_set": {
-  "method": "POST",
-  "host": "https://www.tbank.ru",
-  "path": "/api/supreme/lifestyle/api/grocery/address/set",
   "params": {
    "appName": "grocery_evo",
    "appVersion": APP_VERSION,

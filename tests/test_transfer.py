@@ -786,6 +786,10 @@ def test_pricing_a_bill_runs_the_real_commission_contract():
         check("AttributeError" not in out,
               f"pay_bill fed payment_commission something it cannot read: {out!r}")
         check("Оплачено" in out, f"a priced, valid payment must go through: {out!r}")
+        # `total` (amount+fee) was computed from the commission preview but never
+        # shown — the caller only ever saw the fee, never what actually gets debited.
+        check("итого списано 100.00 RUB" in out,
+              f"the commission's total must reach the user, not just the fee: {out!r}")
         pp = (s.commission_body or {}).get("payParameters") or {}
         check(pp.get("provider") == MOSENERGO["id"],
               f"the commission body lost the provider: {s.commission_body!r}")

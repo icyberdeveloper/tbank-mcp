@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse, parse_qsl
+from urllib.parse import urlparse
 
 import requests
 
@@ -277,7 +277,6 @@ def _wants_wuid(host: str, path: str) -> bool:
     Only www.tbank.ru, and only under /api/common/. It is absent from all 410
     captured api.t-bank-app.ru requests and all 235 lifestyle ones, and from the
     /api/supreme/lifestyle/* checkout paths on www.tbank.ru itself."""
-    from urllib.parse import urlparse
     hn = (urlparse(host).hostname or host or "").lower()
     return hn == "www.tbank.ru" and str(path or "").startswith("/api/common/")
 
@@ -772,7 +771,6 @@ class MobileSession:
         per-host profile). Injecting them elsewhere diverges from the app and breaks
         the grocery cart on lifestyle. An explicit template header still wins
         (setdefault below)."""
-        from urllib.parse import urlparse
         hn = (urlparse(host_url).hostname or host_url or "").lower()
         h: dict[str, str] = {"X-Lang": "ru", "Accept-Language": "ru",
                              "Accept": _accept_for(hn, path)}
@@ -988,9 +986,11 @@ class MobileSession:
         r = self._http.post(url, data=body_str, headers=headers, timeout=30)
         return self._unwrap(r)
 
-    # NOTE: pay / payment_gate_pay / grocery_order_create / checkout_process_order
-    # are REAL money-moving operations, exposed as MCP tools per the user's request.
-    # They are NOT test-called by the assistant — only invoked deliberately.
+    # NOTE: `pay` is a REAL money-moving operation, used by transfer()/pay_bill()'s
+    # MCP tools. It is NOT test-called by the assistant — only invoked deliberately.
+    # payment_gate_pay/grocery_order_create/checkout_process_order (below) are NOT
+    # on this path: grocery_checkout drives checkout.py's own Playwright-based
+    # fetches instead, and these three client methods have no caller at all.
 
     def _signed_parts(self, template_key: str, body_str: str,
                       extra_query: dict | None = None) -> tuple[str, dict, str]:
@@ -1348,11 +1348,6 @@ class MobileSession:
         self._login_cid = self._login_token = ""
         _wait_for_propagation(self.keepalive)  # propagation, like silent_relogin
         return tok
-
-    
-    def confirm_otp(self, otp: str) -> dict:
-        """Submit the SMS OTP (alias for confirm_step('otp', otp))."""
-        return self.confirm_step("otp", otp)
 
 # ---- messenger / support chat (tm.t-bank-app.ru) — Bearer+cookie, no sig ----
 
@@ -4012,10 +4007,6 @@ class MobileSession:
         data = self._call_read(vertical(kind)["schedule_key"], body=body)
         lst = (data or {}).get("list") if isinstance(data, dict) else data
         return lst if isinstance(lst, list) else []
-
-    def concert_schedule(self, event_id: str) -> list[dict]:
-        """Kept as the concert-shaped entry point into event_showings()."""
-        return self.event_showings(event_id, kind="concert")
 
     def create_ticket_order(self, event_id: str, slot_id: str, object_id: str,
                             seats: list[dict], kind: str = "movie") -> dict:
