@@ -759,6 +759,43 @@ def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
     print("  cart: a wrong key name is refused before the write, not counted as added")
 
 
+def test_a_failed_cart_reread_is_not_reported_as_an_empty_cart():
+    """grocery_cart_goods() used to swallow TbankApiError and return [], which
+    made a failed re-read after a CONFIRMED-successful write print "0 позиций"
+    — indistinguishable from a genuinely empty cart. A read failure must say
+    so, not lie about the cart's contents."""
+    from src.client import TbankApiError
+
+    class WriteOkReadFails(Stub):
+        def grocery_cart_get(self, **kw):
+            return {"cart": {"goods": [], "goodsSum": 0}}
+
+        def _grocery_delivery(self, *a, **kw):
+            return {}
+
+        def _grocery_cart_write(self, goods, app_id, delivery):
+            return {"goodsSum": 250.0}
+
+        def grocery_cart_goods(self, **kw):
+            raise TbankApiError("TIMEOUT", "перечитать корзину не удалось")
+
+    added = run(server.grocery_add_to_cart, WriteOkReadFails(),
+               '[{"id": "1", "count": 1}]', "204", "5980")
+    check("OK" in added, f"a confirmed write must still report OK: {added!r}")
+    check("0 позиций" not in added,
+          f"a read failure must not be reported as an empty cart: {added!r}")
+    check("добавлено 1 позиций" in added,
+          f"a read failure must fall back to the input count, not 0: {added!r}")
+
+    updated = run(server.grocery_set_cart, WriteOkReadFails(),
+                  '[{"id": "1", "count": 2}]', "204", "5980")
+    check("0 позиций" not in updated,
+          f"set_cart must not report an unread cart as empty: {updated!r}")
+    check("не подтверждён" in updated,
+          f"set_cart must say the read failed, not stay silent about it: {updated!r}")
+    print("  cart: a failed re-read after a successful write is never reported as '0 позиций'")
+
+
 def test_concert_seats_print_the_id_the_booking_tool_demands():
     """cinema_book wants the concert seat's composite id back verbatim, and its
     docstring plus the tickets skill both say to take it from cinema_seats — which
@@ -1019,6 +1056,7 @@ def main():
     test_search_keeps_the_venues_it_used_to_drop()
     test_free_seating_counts_choices_not_tickets()
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
+    test_a_failed_cart_reread_is_not_reported_as_an_empty_cart()
     test_concert_seats_print_the_id_the_booking_tool_demands()
     test_a_paid_order_does_not_read_as_unpaid()
     test_grocery_order_status_does_not_cut_the_goods_names()

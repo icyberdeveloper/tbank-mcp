@@ -866,17 +866,26 @@ def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
             return (f"[store appId={app_id} pointId={point_id}] ОШИБКА: бэкенд не принял "
                     f"корзину (в ответе нет goodsSum). Ничего НЕ изменено. "
                     f"Ответ: {str(pl)[:300]}")
-        goods = s.grocery_cart_goods(app_id=app_id, point_id=point_id)
-        head = (f"[store appId={app_id} pointId={point_id}] "
-                f"{'корзина очищена' if clear else 'корзина обновлена'}: "
-                f"{len(goods)} позиций, goodsSum={pl['goodsSum']}")
+        try:
+            goods = s.grocery_cart_goods(app_id=app_id, point_id=point_id)
+            goods_known = True
+        except Exception:                                   # noqa: BLE001
+            goods, goods_known = [], False
+        if goods_known:
+            head = (f"[store appId={app_id} pointId={point_id}] "
+                    f"{'корзина очищена' if clear else 'корзина обновлена'}: "
+                    f"{len(goods)} позиций, goodsSum={pl['goodsSum']}")
+        else:
+            head = (f"[store appId={app_id} pointId={point_id}] запись прошла "
+                    f"(goodsSum={pl['goodsSum']}), но состав корзины не подтверждён "
+                    f"(перечитать не удалось) — проверь grocery_cart(app_id, point_id)")
         if pl.get("otherCartsReset"):
             head += ("\n⚠️ Корзины ДРУГИХ магазинов очищены — бэкенд не даёт держать "
                      "две сразу. Если там что-то лежало, оно потеряно.")
         # Full name, not cut — see grocery_search for why: brand/fat%/variant
         # live at the end of a grocery name, and id/count are already uncut.
-        rows = [f"- {g.get('name','?')} ×{g.get('count','?')} | id={g.get('id','?')}"
-                for g in goods]
+        rows = ([f"- {g.get('name','?')} ×{g.get('count','?')} | id={g.get('id','?')}"
+                for g in goods] if goods_known else [])
         return "\n".join([head] + rows)
     except Exception as e:
         return _err(e)

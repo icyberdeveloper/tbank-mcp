@@ -2907,11 +2907,12 @@ class MobileSession:
         return goods if isinstance(goods, list) else []
 
     def grocery_cart_goods(self, app_id: str = "", point_id: str = "") -> list[dict]:
-        """Goods currently in the store's cart, [] if the cart is empty or errors."""
-        try:
-            return self._goods_of(self.grocery_cart_get(app_id=app_id, point_id=point_id))
-        except TbankApiError:
-            return []
+        """Goods currently in the store's cart. Raises TbankApiError like any other
+        read — this used to swallow it and return [], which conflated "the cart is
+        really empty" with "the re-read failed", right after a confirmed-successful
+        write. Callers that want a fallback (grocery_add_to_cart already does)
+        catch it themselves; this method must not decide that for them."""
+        return self._goods_of(self.grocery_cart_get(app_id=app_id, point_id=point_id))
 
     def grocery_checkout(self, app_id: str = "", point_id: str = "",
                          client_email: str = "", account: str = "",
