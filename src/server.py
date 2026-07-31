@@ -2665,8 +2665,13 @@ def cinema_search(query: str = "", city: str = "", limit: int = 20,
 @mcp.tool()
 def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
                     around: str = "", window_min: int = 90,
-                    city: str = "", object_id: str = "") -> str:
+                    city: str = "", object_id: str = "", limit: int = 20) -> str:
     """Сеансы кино на дату. date — YYYY-MM-DD.
+
+    limit — сколько площадок/фильмов показать, 0 = все (по умолчанию 20).
+    Городской режим (event_id+city, без cinema/around) может вернуть сотни
+    кинотеатров разом — сузь cinema/around или подними limit, если нужно
+    больше показанных по умолчанию 20.
 
     Три режима:
     - object_id БЕЗ event_id — ВЕСЬ репертуар кинотеатра на день, один запрос.
@@ -2717,6 +2722,11 @@ def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
                 if not slots:
                     continue
                 shown += 1
+                # limit caps what gets RENDERED, not the count in the header — a
+                # city-wide call with no cinema/around filter used to return
+                # hundreds of venues in one unbounded dump (133 cinemas, live).
+                if limit > 0 and shown > limit:
+                    continue
                 km = (geo.get("distance") or 0) / 1000.0
                 # Two different questions share this response. Asked about a FILM,
                 # each entry is a different cinema and the venue is the heading.
@@ -2737,8 +2747,13 @@ def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
             hint = f", фильтр «{cinema}»" if cinema else ""
             hint += f", около {around} ±{window_min} мин" if around else ""
             return (f"Сеансов на {date} не найдено ({len(venues)} кинотеатров в выдаче{hint}).")
-        head = (f"{shown} фильмов в этом кинотеатре на {date}:" if object_id
-                else f"{shown} площадок с подходящими сеансами на {date}:")
+        rendered = min(shown, limit) if limit > 0 else shown
+        what = "фильмов в этом кинотеатре" if object_id else "площадок с подходящими сеансами"
+        head = f"{shown} {what} на {date}"
+        if rendered < shown:
+            head += f", показано {rendered}. Передай limit={shown}, чтобы увидеть все."
+        else:
+            head += ":"
         return head + "\n" + "\n".join(lines)
     except Exception as e:
         return _err(e)
@@ -2884,12 +2899,15 @@ def concert_hall(event_id: str, slot_id: str, object_id: str,
 
 @mcp.tool()
 def concert_schedule(event_id: str, kind: str = "concert",
-                     object_id: str = "") -> str:
+                     object_id: str = "", limit: int = 15) -> str:
     """Показы концерта, спектакля или выставки: площадка, дата, slotId и
     objectId для cinema_seats().
     kind — "концерт" | "театр" | "выставка". Кино сюда НЕ ходит: у него показы
     привязаны к дате, это cinema_schedule(event_id, date).
     object_id — сузить до одной площадки.
+    limit — сколько площадок показать, 0 = все (по умолчанию 15). Даты в
+    запросе нет — приходит всё будущее сразу, у гастрольных событий площадок
+    может быть много.
 
     Даты в запросе нет: приходит всё будущее сразу, поэтому нужный день
     выбирай из напечатанного.
@@ -2899,8 +2917,10 @@ def concert_schedule(event_id: str, kind: str = "concert",
         venues = s.event_showings(event_id, kind=kind, object_id=object_id)
         if not venues:
             return f"Показов для события {event_id} не найдено."
+        total = len(venues)
+        shown_venues = venues[:limit] if limit > 0 else venues
         out = []
-        for v in venues:
+        for v in shown_venues:
             info = v.get("info") or {}
             geo = info.get("geo") or {}
             out.append(f"{info.get('objectName','?')} — {geo.get('address','')} "
@@ -2920,6 +2940,9 @@ def concert_schedule(event_id: str, kind: str = "concert",
                         money = "цена по секторам"
                     out.append(f"    {str(sl.get('startDateTime',''))[:16]} | {money} "
                                f"| slotId={sl.get('slotId','?')}")
+        if len(shown_venues) < total:
+            out.insert(0, f"{total} площадок всего, показано {len(shown_venues)}. "
+                          f"Передай limit={total}, чтобы увидеть все.")
         return "\n".join(out)
     except Exception as e:
         return _err(e)

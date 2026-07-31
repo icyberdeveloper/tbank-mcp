@@ -456,6 +456,69 @@ def test_every_row_tool_reports_what_it_hides():
     print(f"  {len(ROW_TOOLS)} row tools state their total and honour limit=0")
 
 
+def _cinema_venue(i):
+    return {"info": {"objectName": f"Кино {i}", "objectId": str(i),
+                     "geo": {"address": f"ул. {i}", "distance": i * 100}},
+           "events": [{"eventName": "Фильм", "slots": [
+               {"startTime": "18:00", "prices": {"fix": 300},
+                "hallName": "Зал 1", "slotId": f"s{i}"}]}]}
+
+
+def test_cinema_schedule_caps_a_citywide_dump_honestly():
+    """A city-wide call with no cinema/around filter can return hundreds of
+    venues in one response (133 cinemas, confirmed live) — cinema_schedule had
+    no limit at all, unlike every other listing tool in this file."""
+    venues = [_cinema_venue(i) for i in range(30)]
+    saved = server._require
+    server._require = lambda: AnySession(cinema_schedule=venues)
+    try:
+        out = server.cinema_schedule("1", "2026-08-01", city="Москва")
+        head = out.splitlines()[0]
+        check("30 площадок" in head, f"the honest total must be announced: {head}")
+        check("показано 20" in head, f"the default cap is 20: {head}")
+        check(out.count("objectId=") == 20,
+              f"only the capped count may render: {out.count('objectId=')}")
+
+        out_all = server.cinema_schedule("1", "2026-08-01", city="Москва", limit=0)
+        check(out_all.count("objectId=") == 30,
+              f"limit=0 must show every venue: {out_all.count('objectId=')}")
+    finally:
+        server._require = saved
+    print("  cinema_schedule: a city-wide dump is capped with an honest header, limit=0 shows all")
+
+
+def _concert_venue(i):
+    return {"info": {"objectName": f"Зал {i}", "objectId": str(i),
+                     "geo": {"address": f"пр. {i}"}},
+           "events": [{"slots": [{"startDateTime": "2026-08-01T19:00",
+                                   "prices": {"fix": 500}, "slotId": f"s{i}"}]}]}
+
+
+def test_concert_schedule_caps_a_touring_events_venues_honestly():
+    """concert_schedule has no date filter at all (every future showing comes
+    back at once), making it the more exposed of the two schedule tools to an
+    unbounded venue list for a touring show."""
+    venues = [_concert_venue(i) for i in range(20)]
+    saved = server._require
+    server._require = lambda: AnySession(event_showings=venues)
+    try:
+        out = server.concert_schedule("1")
+        head = out.splitlines()[0]
+        check("20 площадок всего" in head, f"the honest total must be announced: {head}")
+        check("показано 15" in head, f"the default cap is 15: {head}")
+        check(out.count("objectId=") == 15,
+              f"only the capped count may render: {out.count('objectId=')}")
+
+        out_all = server.concert_schedule("1", limit=0)
+        check("площадок всего" not in out_all,
+              f"limit=0 must not print a truncation header: {out_all.splitlines()[:1]}")
+        check(out_all.count("objectId=") == 20,
+              f"limit=0 must show every venue: {out_all.count('objectId=')}")
+    finally:
+        server._require = saved
+    print("  concert_schedule: an unbounded touring-event dump is capped, limit=0 shows all")
+
+
 def test_real_capture_payload_survives():
     """The concrete case from the audit: 8 subscriptions must not become 6."""
     cap = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
@@ -510,6 +573,8 @@ def main():
     test_messenger_messages_window_is_honest()
     test_every_json_tool_trims_by_records_not_by_characters()
     test_every_row_tool_reports_what_it_hides()
+    test_cinema_schedule_caps_a_citywide_dump_honestly()
+    test_concert_schedule_caps_a_touring_events_venues_honestly()
     test_real_capture_payload_survives()
     if failures:
         print("\nFAILED:")
