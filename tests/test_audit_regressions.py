@@ -743,6 +743,34 @@ def test_messenger_ids_are_validated_before_they_reach_a_url():
     print("  messenger: conversation_id/message_id are validated before hitting the network")
 
 
+def test_invest_operations_limit_zero_does_not_ask_the_bank_for_zero():
+    """The tool's docstring promises limit=0 means "everything the bank
+    returned" — but the bank does not have an "all" mode, and sending it a
+    literal limit=0 got back one malformed row instead of the real history
+    (confirmed live). limit<=0 must ask the bank for a large upstream count,
+    not forward the caller's 0 verbatim."""
+    s = MobileSession.__new__(MobileSession)
+    sent = {}
+
+    def fake_call_read(key, *, overrides=None, body=None, path_override=None):
+        sent.update(overrides or {})
+        return {"items": [{"id": "1"}, {"id": "2"}], "hasNext": False}
+
+    s._call_read = fake_call_read
+    ops, has_next = s.invest_operations("2000000001", limit=0)
+    check(sent.get("limit") not in ("0", 0),
+          f"limit=0 must not be forwarded to the bank as a literal 0: sent={sent}")
+    check(int(sent.get("limit", 0)) >= 100,
+          f"limit=0 must ask for a generously large upstream count, sent={sent}")
+    check(len(ops) == 2, f"the (stubbed) full answer must still come through: {ops}")
+
+    # A real, positive limit must still be forwarded unchanged.
+    sent.clear()
+    s.invest_operations("2000000001", limit=10)
+    check(sent.get("limit") == "10", f"a real limit must reach the bank unchanged: {sent}")
+    print("  invest_operations: limit=0 asks the bank for everything, not literally 0")
+
+
 def main():
     print("audit regressions (2026-07-25):")
     cases = [
@@ -760,6 +788,7 @@ def main():
         test_the_cart_readiness_poll_uses_a_real_clock,
         test_deliveries_error_envelope_is_not_missed,
         test_messenger_ids_are_validated_before_they_reach_a_url,
+        test_invest_operations_limit_zero_does_not_ask_the_bank_for_zero,
     ]
     # A test defined and never called is worse than no test: the suite reports green
     # and the reader believes the behaviour is pinned. It has happened here —

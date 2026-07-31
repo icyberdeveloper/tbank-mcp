@@ -1513,12 +1513,22 @@ class MobileSession:
                                            "resolution": resolution,
                                            "include_cash_in_periods": "true"})
 
+    # A generous stand-in for "everything" when limit<=0 — the bank has no
+    # actual "all" mode, so a large upstream ask is the closest honest answer,
+    # same idea as grocery_search's maxObjectsCount: max(30, limit).
+    OPERATIONS_ALL_LIMIT = 200
+
     def invest_operations(self, broker_account_id: str, operation_type: str = "",
                            limit: int = 50) -> tuple[list[dict], bool]:
         """(operations, has_next). has_next comes from the answer's envelope — the
         request itself is untouched (no cursor param: its wire name is not in any
-        capture; raising `limit` is the confirmed way to see more)."""
-        ov = {"brokerAccountId": broker_account_id, "limit": str(limit)}
+        capture; raising `limit` is the confirmed way to see more).
+
+        limit<=0 sends OPERATIONS_ALL_LIMIT upstream, not a literal 0 — the bank
+        does not treat 0 as "no cap", it treats it as "almost nothing" (one
+        malformed row instead of the real history, confirmed live)."""
+        upstream_limit = limit if limit > 0 else self.OPERATIONS_ALL_LIMIT
+        ov = {"brokerAccountId": broker_account_id, "limit": str(upstream_limit)}
         if operation_type:
             ov["operationType"] = operation_type
         data = self._call_read("ca_operations", overrides=ov)
