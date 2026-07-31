@@ -1735,9 +1735,12 @@ def payment_providers(group: str = "", query: str = "", page: int = 1,
     provider_id="<id>" печатает ПОЛЯ, которые провайдер требует для платежа:
     id поля, человеческое название, обязательность, подсказку и регулярку, по
     которой значение проверяется. Это единственный источник формы платежа —
-    угадывать имена полей нельзя. Поиск по id сканирует до `pages` страниц
-    каталога (по 100 записей); ответ «не найден» честно называет, сколько
-    страниц просмотрено — с group поиск попадает в первую страницу.
+    угадывать имена полей нельзя. Поиск по id переиспользует тот же кэш
+    (60 сек), что и последующий pay_bill(provider_id) — типовой флоу
+    payment_providers(provider_id=…) → pay_bill(provider_id) сканирует каталог
+    один раз, а не дважды. `pages` на эту ветку (provider_id=…) больше не
+    влияет — глубину скана и повтор решает общий кэш. С group поиск попадает
+    в первую страницу.
 
     Что с этим делать дальше: pay_bill(provider_id, fields, amount) — он сам
     проверит поля по регулярке и посчитает комиссию. Уже выставленный счёт вместе
@@ -1755,30 +1758,19 @@ def payment_providers(group: str = "", query: str = "", page: int = 1,
                     + "\n".join(f"- {n}" for n in sorted(names)))
 
         if provider_id:
-            # Scan the pages of the named group (or the default page) for this id.
-            found = None
-            scanned, total_pages = 0, None
-            for p in range(1, max(1, pages) + 1):
-                pg = s.providers_compatible_page(group=group, page=p)
-                scanned = p
-                total_pages = int(pg.get("totalPages") or 1)
-                for prov in (pg.get("providers") or []):
-                    if str(prov.get("id")) == str(provider_id):
-                        found = prov
-                        break
-                if found or p >= total_pages:
-                    break
+            # find_provider() is the SAME memoised scan pay_bill(provider_id) uses
+            # moments later — calling it here (instead of a separate manual scan)
+            # means the two share one cache hit instead of scanning the catalogue
+            # twice for the same id.
+            found = s.find_provider(provider_id, group=group)
             if not found:
-                # «не найден» после неполного скана — не факт, а граница поиска;
-                # молчать о ней = ложный отказ на провайдере со страницы pages+1.
+                # «не найден» после a best-effort scan — not a fact, a search
+                # boundary; staying silent about it reads as a false refusal for
+                # a provider that is simply on a later page.
                 where = f" в группе {group!r}" if group else ""
-                if total_pages and scanned < total_pages:
-                    return (f"Провайдер {provider_id!r} не найден{where} среди первых "
-                            f"{scanned} страниц из {total_pages}. Уточни group "
-                            f"(попадёт в первую страницу) или увеличь pages=. "
-                            f"Список групп: payment_providers().")
-                return (f"Провайдер {provider_id!r} не найден{where}"
-                        + ". Открой список: payment_providers(group=\"…\").")
+                return (f"Провайдер {provider_id!r} не найден{where} среди "
+                        f"просмотренных страниц каталога. Уточни group (попадёт "
+                        f"в первую страницу). Список групп: payment_providers().")
             fields = s.provider_pay_fields(found)
             head = (f"{found.get('name')} | id={found.get('id')} | "
                     f"группа={found.get('groupId')} | "

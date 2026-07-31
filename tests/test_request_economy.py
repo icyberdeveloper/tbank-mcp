@@ -477,6 +477,67 @@ def test_a_named_film_search_sees_every_page():
     print("  cinema_search: every page is seen, concurrently, and a capped scan says so")
 
 
+def test_grocery_stores_seeds_the_area_id_memo():
+    """A grocery_stores() call already has every store's areaId in hand — the
+    first add_to_cart for a store it just listed used to re-download the whole
+    retailers catalogue anyway, just to read that one field back out."""
+    class FakeResp:
+        def json(self):
+            return {"categories": [{"name": "Продукты", "retailers": [
+                {"appId": "204", "info": {"name": "ВкусВилл"},
+                 "delivery": {"pointId": "5980", "areaId": "17040911"}},
+                {"appId": "578", "info": {"name": "Азбука Вкуса"},
+                 "delivery": {"pointId": "2"}},  # no areaId at all — a real answer
+            ]}]}
+
+    class FakeHTTP:
+        def get(self, url, **kw):
+            return FakeResp()
+
+    s = server._blank_session()
+    s._http = FakeHTTP()
+    s.grocery_client_info = lambda: {"deliveryInfo": {"addresses": [
+        {"value": "ул Примерная",
+         "coordinates": {"latitude": "55.7", "longitude": "37.6"}}]}}
+
+    stores = s.grocery_stores()
+    check(len(stores) == 2, f"both retailers must come through: {stores}")
+    check(s._memo.get("areaId:204:5980") == "17040911",
+          f"grocery_stores() must seed the areaId memo it already has in hand: {s._memo}")
+    check(s._memo.get("areaId:578:2") == "",
+          f"a store with no areaId is still a real answer and must be memoised: {s._memo}")
+    print("  grocery_stores: lists stores and seeds the areaId memo for free")
+
+
+def test_afisha_places_pages_are_fetched_concurrently():
+    """afisha_places() has the same 'no server-side search, every page must be
+    read' shape as cinema_movies()/afisha_catalog() — those two already fetch
+    pages after the first concurrently, this one still fetched them one at a
+    time."""
+    def places(total):
+        def page(overrides):
+            n = int((overrides or {}).get("page", 1))
+            per_page = MobileSession.PLACES_PAGE
+            start = (n - 1) * per_page
+            count = max(0, min(per_page, total - start))
+            return {"objects": [{"name": f"Место {start + i}"} for i in range(count)],
+                    "pagination": {"totalItems": total}}
+        return page
+
+    slow = CountingSession({"events_places": places(250)}, delay=0.05)
+    started = time.monotonic()
+    out, total = slow.afisha_places(kind="кино", city="Москва")
+    elapsed = time.monotonic() - started
+    check(len(out) == 250 and total == 250,
+          f"three pages of 100 must all be fetched: got {len(out)} of {total}")
+    check(slow.count("events_places") == 3,
+          f"250 items at 100/page is 3 pages: {slow.count('events_places')}")
+    # page 1 + pages 2..3 as one concurrent batch = two waits, not three.
+    check(elapsed < 0.05 * 3,
+          f"pages 2..3 still look sequential: {elapsed:.2f}s for 3 × 0.05s")
+    print("  afisha_places: every page is seen, concurrently")
+
+
 def test_cart_can_shrink_not_only_grow():
     """The cart was append-only: re-adding a good to "correct" it added again, and
     nothing could remove one. The bank has no delete endpoint — removal is a full
@@ -698,6 +759,8 @@ def main():
     test_grocery_search_sees_the_whole_page_before_ranking()
     test_the_catalogue_spans_days_and_paginates_only_where_it_can()
     test_a_named_film_search_sees_every_page()
+    test_grocery_stores_seeds_the_area_id_memo()
+    test_afisha_places_pages_are_fetched_concurrently()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()
     test_messenger_unread_name_resolution_is_capped()

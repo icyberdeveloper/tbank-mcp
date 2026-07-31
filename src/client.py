@@ -2097,6 +2097,14 @@ class MobileSession:
                 continue
             seen.add(key)
             uniq.append(st)
+        # Seed _grocery_delivery's areaId memo from what we just fetched — a
+        # grocery_stores() call immediately followed by add_to_cart for the same
+        # store used to re-download this whole catalogue a second time just to
+        # read the one field (areaId) this call already has in hand.
+        memo = getattr(self, "_memo", None)
+        if memo is not None:
+            for st in uniq:
+                memo[f"areaId:{st.get('appId')}:{st.get('pointId')}"] = st.get("areaId", "")
         return uniq
 
     def _resolve_custom_ordered_id(self, app_id: str, point_id: str) -> str:
@@ -3892,21 +3900,29 @@ class MobileSession:
         A 204 from this endpoint means the vertical is not serving, NOT that the
         city has no venues: live, cinema answers while concert, theatre and
         exhibition all return 204. The distinction matters — «нет площадок» and
-        «раздел не отвечает» are different answers to the user."""
+        «раздел не отвечает» are different answers to the user.
+
+        Pages after the first are fetched concurrently, same as cinema_movies()/
+        afisha_catalog() and for the same reason: page 1 states the true total, so
+        the page count is known after one request and the rest cost one round trip."""
         cid = city_id_of(city, city_id)
         service = vertical(kind)["service"]
-        out: list[dict] = []
-        total = 0
-        for page in range(1, max(1, max_pages) + 1):
+
+        def fetch(page: int) -> tuple[list, int]:
             data = self._call_read("events_places", overrides={
                 "service": service, "cityId": cid, "page": str(page),
                 "count": str(self.PLACES_PAGE)})
             objs = [o for o in ((data or {}).get("objects") or [])
                     if isinstance(o, dict)]
-            total = int(((data or {}).get("pagination") or {}).get("totalItems") or 0)
-            out.extend(objs)
-            if len(out) >= total or not objs:
-                break
+            return objs, int(((data or {}).get("pagination") or {}).get("totalItems") or 0)
+
+        out, total = fetch(1)
+        pages = min(max(1, max_pages), -(-total // self.PLACES_PAGE) if total else 1)
+        if pages > 1 and len(out) < total:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, pages - 1)) as pool:
+                for objs, _ in pool.map(fetch, range(2, pages + 1)):
+                    out.extend(objs)
         q = _norm_city(query) if query else ""
         if q:
             out = [o for o in out if q in _norm_city(o.get("name") or "")]

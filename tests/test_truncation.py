@@ -300,8 +300,10 @@ ROW_TOOLS = [
 
 def test_provider_page_is_printed_whole_and_notfound_names_its_boundary():
     """The provider listing used to render provs[:60] under a header that counted
-    BEFORE the slice — a full page claimed «100 из N» while printing 60. And a
-    provider_id miss after 5 pages of 1026 read as an unconditional «не найден»."""
+    BEFORE the slice — a full page claimed «100 из N» while printing 60. A
+    provider_id lookup goes through find_provider() (shared with pay_bill's own
+    lookup, same 60s cache — see test_payment_providers_reuses_find_providers_cache),
+    so a miss is reported without pretending to know an exact page boundary."""
     page = {"providers": [{"id": f"p-{i}", "name": f"Провайдер {i}"} for i in range(100)],
             "page": 1, "totalPages": 1026, "totalProviders": 102571}
     session = AnySession(providers_compatible_page=page)
@@ -317,12 +319,55 @@ def test_provider_page_is_printed_whole_and_notfound_names_its_boundary():
         check("page=2" in head, f"the header must chain the next page: {head!r}")
 
         miss = server.payment_providers(group="ЖКХ", provider_id="нет-такого")
-        check("из 1026" in miss and "5 страниц" in miss,
-              f"a not-found after an incomplete scan must name the boundary: {miss!r}")
-        check("pages=" in miss, f"the miss must name the widening argument: {miss!r}")
+        check("не найден" in miss and "ЖКХ" in miss,
+              f"a miss must name the id and the group searched: {miss!r}")
+        check("payment_providers()" in miss,
+              f"the miss must point at how to see the groups: {miss!r}")
     finally:
         server._require = saved
     print("  payment_providers: the page prints whole, a bounded miss says so")
+
+
+def test_payment_providers_reuses_find_providers_cache():
+    """payment_providers(provider_id=…) used to run its own page scan instead of
+    calling find_provider() — the exact memoised (60s) scan pay_bill(provider_id)
+    also uses — so the natural payment_providers → pay_bill flow scanned the
+    catalogue twice for the identical id. A second provider_id lookup within the
+    cache window must not scan again."""
+    calls = []
+
+    class CountingSession(MobileSession):
+        def __init__(self):
+            self._memo = {}
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def providers_compatible_page(self, group="", page=1):
+            calls.append(page)
+            return {"providers": [{"id": "fns-rf", "name": "ФНС", "groupId": "g1"}],
+                    "page": page, "totalPages": 1}
+
+        def provider_pay_fields(self, prov):
+            return []
+
+    session = CountingSession()
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out1 = server.payment_providers(provider_id="fns-rf")
+        check("ФНС" in out1, f"the first lookup must find the provider: {out1!r}")
+        scans_after_first = len(calls)
+        check(scans_after_first > 0, "the first lookup must scan at least once")
+
+        out2 = server.payment_providers(provider_id="fns-rf")
+        check("ФНС" in out2, f"the cached lookup must still find the provider: {out2!r}")
+        check(len(calls) == scans_after_first,
+              f"a second lookup for the same id must reuse the cache, not rescan: "
+              f"{len(calls)} calls, was {scans_after_first}")
+    finally:
+        server._require = saved
+    print("  payment_providers: a repeated provider_id lookup reuses find_provider's cache")
 
 
 def test_invest_has_next_is_announced_even_at_limit_zero():
@@ -568,6 +613,7 @@ def main():
     test_list_operations_end_to_end()
     test_limit_zero_means_everything_in_every_list_tool()
     test_provider_page_is_printed_whole_and_notfound_names_its_boundary()
+    test_payment_providers_reuses_find_providers_cache()
     test_invest_has_next_is_announced_even_at_limit_zero()
     test_invest_operations_never_calls_a_bank_confirmed_partial_fetch_a_total()
     test_messenger_messages_window_is_honest()
