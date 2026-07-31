@@ -384,6 +384,32 @@ def test_the_log_files_are_owner_only_even_if_they_already_existed():
     print("  permissions: all three logs come back to 0600 even when they pre-existed")
 
 
+def test_session_file_is_owner_only_even_if_it_already_existed():
+    """session.json holds the live access/refresh tokens — the highest-value file
+    this project writes — but unlike journal.jsonl/events.jsonl/calls.jsonl (all
+    covered above), nothing pinned its 0600 permissions."""
+    path = os.path.join(_TMP, "session-perm.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    os.chmod(path, 0o644)
+
+    saved = server._SESSION_FILE
+    server._SESSION_FILE = path
+    try:
+        s = server._blank_session()
+        server._save_session(s)
+        mode = oct(os.stat(path).st_mode & 0o777)
+        check(mode == "0o600",
+              f"session.json stayed {mode} on a pre-existing file — the chmod "
+              f"next to os.open is what fixes this")
+
+        loaded = server._load_session()
+        check(loaded is not None, "a freshly-saved session must load back")
+    finally:
+        server._SESSION_FILE = saved
+    print("  permissions: session.json comes back to 0600 even when it pre-existed")
+
+
 def main():
     print("call trace:")
     test_the_wrapper_does_not_change_what_agents_see()
@@ -391,6 +417,7 @@ def main():
     test_pay_bills_fields_argument_is_measured_not_stored()
     test_the_journal_and_the_event_log_redact_too()
     test_the_log_files_are_owner_only_even_if_they_already_existed()
+    test_session_file_is_owner_only_even_if_it_already_existed()
     test_a_refusal_is_not_recorded_as_an_error()
     test_the_report_finds_an_agent_that_got_stuck()
     test_tracing_off_writes_nothing()

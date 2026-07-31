@@ -617,6 +617,60 @@ def test_flight_route_marks_legs_hidden_past_the_first_two():
     print("  flight_search: legs past the first two are marked, not silently dropped")
 
 
+def test_shop_cart_and_place_info_report_what_they_hide():
+    """Bug fix 3bb2caf added limit + an honest 'N всего, показано M' header to
+    shop_cart/place_info, but neither ever got a test with enough rows to
+    actually exercise the truncation path."""
+    items = [{"name": f"Товар {i}", "quantity": 1, "totalPriceInKopecks": 10000}
+             for i in range(25)]
+    saved = server._require
+    server._require = lambda: AnySession(shop_carts=[
+        {"merchantName": "Магазин", "cartId": "c1", "items": items}])
+    try:
+        out = server.shop_cart()
+        check("25 всего" in out and "показано 20" in out,
+              f"shop_cart must state its true total and honour the default limit: {out!r}")
+        out_all = server.shop_cart(limit=0)
+        check(out_all.count("Товар") == 25, f"limit=0 must show every item: {out_all!r}")
+    finally:
+        server._require = saved
+
+    halls = [{"hallName": f"Зал {i}"} for i in range(15)]
+    server._require = lambda: AnySession(
+        place_info={"info": {"objectName": "Кино"}, "halls": halls})
+    try:
+        out = server.place_info("1")
+        check("15 всего" in out and "показано 10" in out,
+              f"place_info must state its true total and honour the default limit: {out!r}")
+        out_all = server.place_info("1", limit=0)
+        check(out_all.count("зал") == 15, f"limit=0 must show every hall: {out_all!r}")
+    finally:
+        server._require = saved
+    print("  shop_cart/place_info: an over-limit cart/hall list states its true total")
+
+
+def test_insurance_policies_unknown_shape_falls_back_through_json_out():
+    """Bug fix 2b04b4c routed insurance_policies()'s unknown-shape fallback
+    through _json_out instead of a bare dumps()[:2000] — the fallback fires
+    exactly when the shape is unrecognized, and a silent character-cut there
+    is invisible data loss. Never exercised: the fallback only fires when the
+    render loop produces zero lines, which needs a payload big enough to
+    actually force _json_out's own truncation-marking to kick in."""
+    weird = {"Payload": {"Policies": [f"unrecognized-policy-shape-{i}" for i in range(300)]}}
+    saved = server._require
+    server._require = lambda: AnySession(insurance_policies=weird)
+    try:
+        out = server.insurance_policies()
+    finally:
+        server._require = saved
+    check(out.startswith("#"),
+          f"an unknown shape must fall through _json_out's honest marker, not a "
+          f"bare truncated blob: {out[:120]!r}")
+    check("НЕ валидный" in out or "ПОКАЗАНО" in out,
+          f"the fallback must say the data is incomplete, not just look cut: {out[:200]!r}")
+    print("  insurance_policies: an unrecognized shape falls back through _json_out, marked")
+
+
 def test_real_capture_payload_survives():
     """The concrete case from the audit: 8 subscriptions must not become 6."""
     cap = os.environ.get("TBANK_CAPTURE", os.path.expanduser("~/tbank-app/captures.xml"))
@@ -676,6 +730,8 @@ def main():
     test_concert_schedule_caps_a_touring_events_venues_honestly()
     test_invest_securities_ticker_cut_is_marked()
     test_flight_route_marks_legs_hidden_past_the_first_two()
+    test_shop_cart_and_place_info_report_what_they_hide()
+    test_insurance_policies_unknown_shape_falls_back_through_json_out()
     test_real_capture_payload_survives()
     if failures:
         print("\nFAILED:")

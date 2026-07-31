@@ -509,6 +509,61 @@ def test_grocery_stores_seeds_the_area_id_memo():
     print("  grocery_stores: lists stores and seeds the areaId memo for free")
 
 
+def test_grocery_stores_refuses_instead_of_defaulting_to_a_city():
+    """grocery_stores()/_grocery_delivery() used to silently fall back to a
+    hardcoded Moscow coordinate when the account had no saved delivery
+    address — a store list or cart write built for the wrong city with no
+    indication anything was wrong. Both must refuse instead (commit 4878688)."""
+    class TrackingHTTP:
+        def __init__(self):
+            self.called = False
+
+        def get(self, url, **kw):
+            self.called = True
+            class R:
+                def json(self):
+                    return {"categories": []}
+            return R()
+
+    # grocery_stores(): no addresses at all.
+    http = TrackingHTTP()
+    s = server._blank_session()
+    s._http = http
+    s.grocery_client_info = lambda: {"deliveryInfo": {"addresses": []}}
+    try:
+        s.grocery_stores()
+        failures.append("grocery_stores() must refuse when there is no saved address")
+    except TbankApiError as e:
+        check(e.result_code == "NO_DELIVERY_ADDRESS",
+              f"wrong refusal code for no addresses: {e.result_code}")
+    check(not http.called, "no addresses must refuse BEFORE any network call")
+
+    # grocery_stores(): an address with no coordinates.
+    http2 = TrackingHTTP()
+    s2 = server._blank_session()
+    s2._http = http2
+    s2.grocery_client_info = lambda: {"deliveryInfo": {"addresses": [
+        {"value": "где-то", "coordinates": {}}]}}
+    try:
+        s2.grocery_stores()
+        failures.append("grocery_stores() must refuse an address with no coordinates")
+    except TbankApiError as e:
+        check(e.result_code == "NO_DELIVERY_ADDRESS",
+              f"wrong refusal code for a coordinate-less address: {e.result_code}")
+    check(not http2.called, "a coordinate-less address must refuse BEFORE any network call")
+
+    # _grocery_delivery(): neither the cart nor client/info has an address.
+    s3 = server._blank_session()
+    s3.grocery_client_info = lambda: {"deliveryInfo": {}}
+    try:
+        s3._grocery_delivery("204", "5980", cart={"cart": {}})
+        failures.append("_grocery_delivery() must refuse with no address anywhere")
+    except TbankApiError as e:
+        check(e.result_code == "NO_DELIVERY_ADDRESS",
+              f"wrong refusal code for _grocery_delivery with no address: {e.result_code}")
+    print("  grocery_stores/_grocery_delivery: no usable address refuses, never defaults to a city")
+
+
 def test_afisha_places_pages_are_fetched_concurrently():
     """afisha_places() has the same 'no server-side search, every page must be
     read' shape as cinema_movies()/afisha_catalog() — those two already fetch
@@ -760,6 +815,7 @@ def main():
     test_the_catalogue_spans_days_and_paginates_only_where_it_can()
     test_a_named_film_search_sees_every_page()
     test_grocery_stores_seeds_the_area_id_memo()
+    test_grocery_stores_refuses_instead_of_defaulting_to_a_city()
     test_afisha_places_pages_are_fetched_concurrently()
     test_cart_can_shrink_not_only_grow()
     test_weight_priced_goods_survive_a_cart_write()

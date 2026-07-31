@@ -353,6 +353,46 @@ def test_the_cart_prints_the_ids_it_must_be_edited_by():
     print("  grocery_cart: every good is printed with the id grocery_set_cart needs")
 
 
+LONG_NAME = "Сыр Бри с белой плесенью выдержанный 60% Франция QEGG 220 г"
+
+
+def test_grocery_search_rank_plan_and_set_cart_do_not_cut_names():
+    """Bug fixes a080c51/f66978e removed the bare name[:N] slices from
+    grocery_search, grocery_rank, grocery_plan_order and grocery_set_cart, but
+    none of the four ever got a test asserting the full name survives — only
+    grocery_cart and grocery_order_status did. Pin all four here."""
+    search_out = run(server.grocery_search,
+                     Stub(grocery_search=([{"id": "1", "name": LONG_NAME,
+                                           "price": 538, "weight": "220 г",
+                                           "likely_raw": False}], 1, 1)),
+                     "сыр", "204", "5980")
+    check("60%" in search_out and "Франция" in search_out and "QEGG" in search_out,
+          f"grocery_search must not cut the product name: {search_out!r}")
+
+    rank_out = run(server.grocery_rank,
+                   Stub(grocery_candidates=([{"id": "1", "name": LONG_NAME,
+                                             "price": 538, "weight_label": "220 г"}], 1)),
+                   "сыр", "204", "5980")
+    check("60%" in rank_out and "Франция" in rank_out and "QEGG" in rank_out,
+          f"grocery_rank must not cut the product name: {rank_out!r}")
+
+    plan_out = run(server.grocery_plan_order,
+                   Stub(grocery_plan_order={"total_sum": 538, "missing": [], "items": [
+                       {"id": "1", "name": LONG_NAME, "price": 538,
+                        "weight": "220 г", "likely_raw": False, "source": "search"}]}),
+                   '["сыр"]', "204", "5980")
+    check("60%" in plan_out and "Франция" in plan_out and "QEGG" in plan_out,
+          f"grocery_plan_order must not cut the product name: {plan_out!r}")
+
+    set_cart_out = run(server.grocery_set_cart,
+                       Stub(grocery_set_cart={"goodsSum": 538.0},
+                            grocery_cart_goods=[{"id": "1", "name": LONG_NAME, "count": 1}]),
+                       '[{"id": "1", "count": 1}]', "204", "5980")
+    check("60%" in set_cart_out and "Франция" in set_cart_out and "QEGG" in set_cart_out,
+          f"grocery_set_cart must not cut the product name: {set_cart_out!r}")
+    print("  grocery_search/rank/plan_order/set_cart: none of the four cut the product name")
+
+
 def test_list_cards_and_afisha_catalog_do_not_cut_names_either():
     """The same unmarked-cut sweep that caught the grocery tools also found
     list_cards (name[:26]) and afisha_catalog (genres joined then cut to 34) —
@@ -1067,6 +1107,7 @@ def main():
     test_grocery_search_header_is_honest()
     test_messenger_paging_arguments_reach_the_client()
     test_the_cart_prints_the_ids_it_must_be_edited_by()
+    test_grocery_search_rank_plan_and_set_cart_do_not_cut_names()
     test_list_cards_and_afisha_catalog_do_not_cut_names_either()
     test_delivery_speed_is_read_from_both_slot_shapes()
     test_the_store_list_shows_and_sorts_by_delivery_speed()
