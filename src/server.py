@@ -873,7 +873,9 @@ def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
         if pl.get("otherCartsReset"):
             head += ("\n⚠️ Корзины ДРУГИХ магазинов очищены — бэкенд не даёт держать "
                      "две сразу. Если там что-то лежало, оно потеряно.")
-        rows = [f"- {g.get('name','?')[:40]} ×{g.get('count','?')} | id={g.get('id','?')}"
+        # Full name, not cut — see grocery_search for why: brand/fat%/variant
+        # live at the end of a grocery name, and id/count are already uncut.
+        rows = [f"- {g.get('name','?')} ×{g.get('count','?')} | id={g.get('id','?')}"
                 for g in goods]
         return "\n".join([head] + rows)
     except Exception as e:
@@ -904,8 +906,9 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         # id first: grocery_set_cart addresses goods BY ID, and this is the only tool
         # that lists what is in the cart. Without it the agent could read the cart and
         # still have no way to change one line of it.
+        # Full name, not cut — same reason as grocery_search.
         body = "\n".join(
-            f"- id={g.get('id','?')} | {(g.get('name') or '')[:35]} "
+            f"- id={g.get('id','?')} | {g.get('name') or ''} "
             f"| x{g.get('count', 1)} | {(g.get('price') or {}).get('value', '?')}₽ "
             f"| {g.get('weight', '') or g.get('quant', '') or '-'}"
             for g in goods) or "Корзина пуста"
@@ -1098,8 +1101,9 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
                 f"paymentId={pay_id or '-'} | paid={'yes' if pay_id else 'no payment id'}")
         if not goods:
             return head
+        # Full name, not cut — same reason as grocery_search.
         body = "\n".join(
-            f"- {(g.get('name') or '')[:35]} | x{g.get('count', 1)} "
+            f"- {g.get('name') or ''} | x{g.get('count', 1)} "
             f"| {(g.get('price') or {}).get('value', '?')}₽"
             for g in goods)
         return f"{head}\n{body}"

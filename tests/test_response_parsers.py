@@ -99,6 +99,25 @@ def test_a_paid_order_does_not_read_as_unpaid():
     print("  grocery_order_status: paid/unpaid, sum and status read from the real schema")
 
 
+def test_grocery_order_status_does_not_cut_the_goods_names():
+    """The cart.goods listing (added alongside the app_id fix) used a bare
+    name[:35] slice, no "…" mark — the exact same unmarked cut grocery_cart and
+    grocery_set_cart had, introduced fresh while fixing something else, by
+    copying their already-broken pattern instead of the uncut grocery_search
+    convention."""
+    order = {"payload": {"order": {
+        "id": "1", "status": "CREATED_DYNAMIC", "paymentId": "p1",
+        "application": {"name": "ВкусВилл"},
+        "cart": {"sum": 500, "goods": [
+            {"name": "Сыр Бри с белой плесенью выдержанный 60% Франция",
+             "count": 1, "price": {"value": 538.0}}]},
+    }}}
+    out = run(server.grocery_order_status, Stub(grocery_order_get=order), "1", "204")
+    check("60%" in out and "Франция" in out,
+          f"the full goods name, not just its first 35 chars, must be shown: {out!r}")
+    print("  grocery_order_status: goods names are not cut")
+
+
 def test_conversation_ids_survive_intact():
     long_id = "c" * 64
     convs = [
@@ -318,8 +337,12 @@ def test_the_cart_prints_the_ids_it_must_be_edited_by():
     printed = set(re.findall(r"id=(\S+)", out))
     check(printed == {"382032", "606"},
           f"the cart must print exactly the ids it holds, printed {printed}")
-    # The name is truncated for width; the id must not be caught up in that.
-    check("Сыр Бри" in out, f"the name must still be shown: {out}")
+    # The name used to be cut to 35 chars with a bare Python slice (no "…"
+    # mark) — "Франция" and "60%" sat past that cut and vanished silently.
+    # Full name now, for the same reason as grocery_search: brand/%/origin
+    # disambiguate near-identical products and cluster at the END of a name.
+    check("Сыр Бри" in out and "60%" in out and "Франция" in out,
+          f"the full name, not just its first 35 chars, must be shown: {out}")
     # A weight-priced good keeps its fractional count — rounding it to 1 (or to 0,
     # which means removal) is what a re-send built from this listing would carry.
     check("0.57" in out, f"a fractional count must survive the listing: {out}")
@@ -977,6 +1000,7 @@ def main():
     test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
     test_concert_seats_print_the_id_the_booking_tool_demands()
     test_a_paid_order_does_not_read_as_unpaid()
+    test_grocery_order_status_does_not_cut_the_goods_names()
     test_conversation_ids_survive_intact()
     test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
     test_documents_merge_and_lists()
