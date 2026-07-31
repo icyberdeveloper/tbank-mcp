@@ -43,8 +43,8 @@ MCP работает с **настоящим банковским счётом �
   ответов `transfer()`, `pay_bill()`, `ticket_pay()` или из `orders()`, потом его
   взять негде.
 - **Поиск по приложению:** `search_app(query, screen)` — `screen` строгий enum:
-  `services`, `afisha`, `movie_main`, `grocery`. Неверное значение = 400, не пустой
-  ответ.
+  `services`, `afisha`, `movie_main`, `concerts_main`, `spectacle_main`,
+  `exhibition_main`, `grocery`. Неверное значение = 400, не пустой ответ.
 - **Кредиты, вклады, справки и прочее:** `get_data(section)` — десятки разделов,
   список в описании тула. Три секции (`providers`, `requisites`, `statements`) —
   фильтры и требуют второй аргумент; без него тул поднимает ошибку, а не отдаёт

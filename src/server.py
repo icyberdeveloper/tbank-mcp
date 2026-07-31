@@ -634,8 +634,9 @@ def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000)
     credit_schedule | credit_rating |
     statements | invoices | templates | contacts | cards | loans | autopayments |
     sbp | offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
-    cars | shortcuts | finhealth_total | finhealth_turnover | invest_accounts |
-    invest_offers | invest_yield | pension | broker_margin | shared | appointments.
+    cars | shortcuts | finhealth_total | finhealth_turnover | finhealth_presets |
+    finhealth_invest | invest_accounts | invest_offers | invest_yield | pension |
+    broker_margin | shared | shared_owned | business_info | qr_resolve | appointments.
 
     ⚠️ Счета к оплате лежат в ДВУХ разных местах, и «пусто» в одном не значит, что
     счетов нет:
@@ -1481,7 +1482,8 @@ def transfer(amount: float, to_account: str, description: str = "",
     дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
     Между своими счетами (provider='transfer-inner') НЕ реализовано — тело платежа
     не сверено с реальным перехватом трафика; переводи между своими счетами в
-    приложении.
+    приложении. По юрлицу/ИП (provider='transfer-legal') — тоже НЕ реализовано,
+    та же причина: используй приложение.
     description — сообщение получателю.
     force=True — повторить перевод, который уже помечен как незавершённый. Только
     после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
@@ -2599,13 +2601,16 @@ def search_app(query: str, screen: str = "afisha", limit: int = 20) -> str:
     """Полнотекстовый поиск по разделу приложения.
 
     screen — СТРОГИЙ enum, угадывать бесполезно (всё остальное → 400):
-      afisha     — кино, концерты, театр, выставки, спектакли (по умолчанию);
-                   отдаёт eventId, готовый для cinema_schedule/concert_schedule
-      movie_main — только фильмы
-      services   — самый широкий: та же афиша плюс контакты из телефонной книги
-                   и сервисные блоки; id приходится доставать из диплинка
-      grocery    — каталог магазина, но для него есть grocery_search/grocery_rank
-                   (там нужны app_id/point_id и фильтр «в наличии»)"""
+      afisha         — кино, концерты, театр, выставки, спектакли (по умолчанию);
+                       отдаёт eventId, готовый для cinema_schedule/concert_schedule
+      movie_main     — только фильмы
+      services       — самый широкий: та же афиша плюс контакты из телефонной книги
+                       и сервисные блоки; id приходится доставать из диплинка
+      concerts_main  — только концерты (уже сузка внутри afisha)
+      spectacle_main — только театр
+      exhibition_main — только выставки
+      grocery        — каталог магазина, но для него есть grocery_search/grocery_rank
+                       (там нужны app_id/point_id и фильтр «в наличии»)"""
     try:
         s = _require(); s.ensure_fresh()
         hits = s.app_search(query, screen=screen, limit=limit)

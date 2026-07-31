@@ -44,12 +44,15 @@ description: |
 ### Шаг 2: Сбор данных по портфелю
 
 Для каждого брокерского счёта:
-1. `invest_portfolio(broker_account_id, days)` — статистика:
-   - `totalAmount` — текущая стоимость портфеля
-   - `expectedYield` — ожидаемая доходность
-   - `expectedAverageYield` — средняя доходность
-   - `marginEnabled` — маржинальность
-   - `openedDate` — дата открытия
+1. `invest_portfolio(broker_account_id, days)` — статистика за период, помесячная
+   серия, не плоская сводка:
+   - `cashIncome`/`cashOutcome` — ввод/вывод денег за период
+   - `coupons`/`dividends`/`turnover` — купоны, дивиденды, оборот
+   - `yield`/`yieldRelative` — доходность за весь период
+   - `dates[]` — по месяцу: `date`, `marketValueEndData` (стоимость портфеля
+     на конец месяца — это и есть «текущая стоимость», отдельного поля под
+     это имя нет), `cashIncomeData`/`cashOutcomeData`,
+     `yieldAbsoluteData`/`yieldRelativeData`
 
 2. `invest_securities(broker_account_id)` — бумаги в портфеле: тикер, тип,
    количество, текущая цена, доля портфеля, доходность.
