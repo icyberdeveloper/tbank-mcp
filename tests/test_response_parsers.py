@@ -623,12 +623,24 @@ def test_place_schedule_reads_the_nested_event_object():
                   "prices": {"min": 250.0, "max": 3000.0}},
         "times": [{"id": "4595709", "startTime": "2026-08-21T19:00:00+03:00"}],
         "date": "2026-08-21",
+    }, {
+        # Real case (object_id 9318, "Маяковский" on 2026-10-10): one row can
+        # carry TWO showings on the same date — taking only times[0] would
+        # silently drop the second one, not just the clock reading.
+        "event": {"eventId": "212538", "name": "Маяковский", "eventType": "spectacle",
+                  "prices": {"min": 1500.0, "max": 12000.0}},
+        "times": [{"id": "1", "startTime": "2026-10-10T13:00:00+03:00"},
+                  {"id": "2", "startTime": "2026-10-10T19:00:00+03:00"}],
+        "date": "2026-10-10",
     }]
-    out = run(server.place_schedule, Stub(place_schedule=(events, 1)), "14419")
+    out = run(server.place_schedule, Stub(place_schedule=(events, 2)), "14419")
     check("Идиот" in out, f"the nested event name must render, not '?': {out!r}")
     check("eventId=627008" in out, f"the nested eventId must render, not '?': {out!r}")
     check("250" in out, f"the nested price must render, not 'цена не указана': {out!r}")
     check("2026-08-21" in out, f"the top-level date must still render: {out!r}")
+    check("19:00" in out, f"the showtime clock must render, not just the date: {out!r}")
+    check("13:00" in out and "19:00" in out.split("Маяковский")[1],
+          f"a row with two showings must print BOTH times, not just times[0]: {out!r}")
     print("  place_schedule: reads name/eventId/prices from the nested event object")
 
 

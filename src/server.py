@@ -3323,13 +3323,21 @@ def place_schedule(object_id: str, limit: int = 20, page: int = 1,
                     "кинотеатр — cinema_schedule(object_id=…, date=…).")
 
         def render(e):
-            # Real shape (verified live, object_id 14419/23625): each row is
+            # Real shape (verified live, object_id 14419/23625/9318): each row is
             # {event: {eventId, name, prices{min,max}, ...}, times: [...], date}
             # — event/name/prices/eventId live under the nested "event" object,
             # not on the row itself. Only "date" is top-level, which is why it
             # was the one field that ever rendered.
             ev = e.get("event") or {}
-            when = str(e.get("date") or "")[:10]
+            date = str(e.get("date") or "")[:10]
+            # times CAN hold more than one showing on the same date (verified
+            # live: object_id 9318, "Маяковский" on 2026-10-10/11 has both a
+            # 13:00 and a 19:00 slot in one row) — showing only times[0] would
+            # silently drop a real showtime, not just omit the clock.
+            times = e.get("times") or []
+            clocks = [str(t.get("startTime"))[11:16] for t in times
+                      if isinstance(t, dict) and t.get("startTime")]
+            when = f"{date} {', '.join(clocks)}" if clocks else (date or "")
             pr = ev.get("prices") or {}
             lo, hi = pr.get("min"), pr.get("max")
             money = (f"{lo:.0f}–{hi:.0f} ₽" if lo and hi and lo != hi
