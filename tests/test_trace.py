@@ -136,7 +136,7 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
         server.list_accounts)
     run(Stub(cards=TbankApiError("X", f"boom at https://x/v1/a?sessionid={sid}")),
         server.list_cards)
-    run(Stub(transfer={"payload": {"paymentId": "1"}},
+    run(Stub(transfer=({"payload": {"paymentId": "1"}}, "И. И."),
              list_accounts=[{"id": "1111111111", "accountType": "Current",
                              "moneyAmount": {"value": 5000,
                                              "currency": {"name": "RUB"}}}]),
@@ -386,7 +386,7 @@ def test_a_broken_tracer_cannot_break_a_payment():
     try:
         # Caught rather than allowed to propagate: this must be REPORTED as a
         # failure, not kill the run before the remaining checks say why.
-        out = run(Stub(transfer={"payload": {"paymentId": "100000000001"}},
+        out = run(Stub(transfer=({"payload": {"paymentId": "100000000001"}}, "И. И."),
                        list_accounts=[{"id": "1111111111", "accountType": "Current",
                                        "moneyAmount": {"value": 5000,
                                                        "currency": {"name": "RUB"}}}]),

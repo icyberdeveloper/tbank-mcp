@@ -1563,7 +1563,7 @@ def transfer_sbp_resolve(phone: str) -> str:
                      "transfer: передай bank_member_id + pointer_link_id, или ничего (дефолт).")
         return "\n".join(lines)
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 def _transfer_key(amount, to_account, provider, from_account) -> str:
     """Identity of a LOGICAL transfer, for the duplicate guard."""
@@ -1664,10 +1664,22 @@ def transfer(amount: float, to_account: str, description: str = "",
         journal.record(attempt, "pay", "posting", user_payment_ms=int(upid), account=src)
 
         try:
-            res = s.transfer(amount, to_account, description, provider=provider,
-                             bank_member_id=bank_member_id, masked_fio=masked_fio,
-                             pointer_link_id=pointer_link_id, account=src,
-                             user_payment_id=upid) or {}
+            # The second value is the name that actually went into the signed body.
+            # Taking it back is the whole point: when the agent passes the two ids
+            # and no name, the client resolves one at the cost of a request, and
+            # this line used to print the phone number alone.
+            res, resolved_fio = s.transfer(
+                amount, to_account, description, provider=provider,
+                bank_member_id=bank_member_id, masked_fio=masked_fio,
+                pointer_link_id=pointer_link_id, account=src,
+                user_payment_id=upid)
+            res = res or {}
+            # Plain assignment, not `masked_fio or resolved_fio`: the client returns
+            # the EFFECTIVE name — the caller's when one was passed, the resolved one
+            # when it looked it up, "" when the lookup failed. An `or` here reads as
+            # a precedence rule and encodes none; both orderings behave identically,
+            # which a mutation test showed by not being able to tell them apart.
+            masked_fio = resolved_fio
         except Exception as e:
             # Not every failure is an unknown outcome, and saying so has a cost: it
             # tells the user their money may have moved and it BLOCKS the next
@@ -1731,7 +1743,7 @@ def transfer(amount: float, to_account: str, description: str = "",
                 f"со счёта {src}{commission}. paymentId={pid} "
                 f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 
 _LEGAL_GROUP = "Переводы"          # the catalogue group transfer-legal lives in
@@ -1861,7 +1873,7 @@ def payment_qr(qr: str) -> str:
                      "comment=\"…\") — РЕАЛЬНЫЕ ДЕНЬГИ, сначала подтверди сумму.")
         return "\n".join(lines)
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 
 @mcp.tool()
@@ -1997,7 +2009,7 @@ def transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
                 f"(payment_receipt('{pid}') — чек).\n"
                 + "\n".join(_legal_lines(fields)))
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 
 @mcp.tool()
@@ -2113,7 +2125,7 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
                 f"со счёта {src}{fee_txt}{total_txt}. paymentId={pid} "
                 f"(payment_receipt('{pid}') — чек).")
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 
 @mcp.tool()
@@ -2263,7 +2275,7 @@ def payment_commission(body: str = "") -> str:
         # isUrgentTransfer flags. Calling _call_read directly posts JSON → 400.
         return _json_out(s.payment_commission(b), 1000)
     except Exception as e:
-        return _err(e)
+        return _err_session(e)
 
 
 # ── INVEST ──────────────────────────────────────────────────
@@ -2395,12 +2407,20 @@ def invest_securities(broker_account_id: str = "") -> str:
 # minutes (see client.ensure_client_session), so this is the normal steady state
 # between re-mints — the tools below call ensure_client_session() to recover
 # automatically, and this hint only fires if even that did not help.
-_ANON_SESSION_CODES = ("INTERNAL_ERROR", "AccessDenied", "SESSION_IS_ABSENT")
+# Measured against a genuinely lapsed session, endpoint by endpoint. One cause,
+# five codes — and the two most common were missing, which is why the hint below
+# never fired for the failure that actually happens.
+_ANON_SESSION_CODES = ("INTERNAL_ERROR", "AccessDenied", "SESSION_IS_ABSENT",
+                       "INSUFFICIENT_PRIVILEGES", "REQUEST_RATE_LIMIT_EXCEEDED",
+                       "OPERATION_REJECTED")
 _ANON_HINT = (
     "\nПричина: этот эндпоинт проверяет уровень мобильной сессии, а не только "
     "токен, а окно CLIENT живёт ~11 минут. Тул уже пробовал перевыпустить сессию "
     "сам. Проверь keepalive() — accessLevel должен быть CLIENT; если там "
-    "ANONYMOUS, вызови refresh_session() и повтори.")
+    "ANONYMOUS, вызови refresh_session() и повтори.\n"
+    "«Слишком много попыток» и «превышено количество обращений» в этом семействе "
+    "НЕ значат перебор запросов: банк так отвечает анонимной сессии. Ждать "
+    "бесполезно, помогает только перевыпуск.")
 
 def _err_session(e) -> str:
     """_err(), plus the ANONYMOUS-session explanation when that is the cause."""

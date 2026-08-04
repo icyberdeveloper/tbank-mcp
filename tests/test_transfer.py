@@ -494,6 +494,14 @@ def test_filter_sections_refuse_to_pretend():
     class Sec(MobileSession):
         def __init__(self):
             self.seen = None
+            self.raised = 0
+
+        def ensure_client_session(self):
+            # `requisites` joined _SECTION_NEEDS_CLIENT after a live measurement
+            # showed /v1/get_requisites refuses an ANONYMOUS session. Counted, not
+            # ignored, so this test also pins that the raise happens.
+            self.raised += 1
+            return "CLIENT"
 
         def _call_read(self, key, *, overrides=None, body=None, path_override=None):
             self.seen = (key, overrides)
@@ -512,6 +520,10 @@ def test_filter_sections_refuse_to_pretend():
     s.get_data("providers", "fns-rf,gibdd-online-rf")
     check(s.seen[1] == {"ids": "fns-rf,gibdd-online-rf"},
           f"the ids must reach the query: {s.seen}")
+    check(s.raised >= 1,
+          "get_data('requisites') must raise the session to CLIENT first — the "
+          "endpoint answers an ANONYMOUS session with REQUEST_RATE_LIMIT_EXCEEDED, "
+          "which reads as a volume limit and is not one")
     s.get_data("requisites", "+79991234567")
     check(s.seen[1] == {"pointer": "+79991234567"}, f"the pointer must reach the query: {s.seen}")
 

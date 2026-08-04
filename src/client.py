@@ -3340,7 +3340,20 @@ class MobileSession:
         masked_fio, pointer_link_id, bank_name, bank_id, is_default_bank,
         provider_fields}] per bank — provider_fields is the ready SBP providerFields
         object (pointerType from the SBP_PHONE_POINTER_TYPE constant) to paste into
-        payment_commission(). Empty list = not registered in SBP / wrong number."""
+        payment_commission(). Empty list = not registered in SBP / wrong number.
+
+        RAISES THE SESSION LEVEL FIRST. This endpoint validates the mobile sessionid,
+        not just the Bearer, and its CLIENT window is ~11 minutes against the token's
+        ~2h — so ensure_fresh(), which re-mints on a ~100-minute schedule, leaves it
+        being called with an ANONYMOUS session for most of that interval. The bank's
+        answer to that is `REQUEST_RATE_LIMIT_EXCEEDED — Слишком много попыток
+        проверить банки получателя`, which reads as a volume limit and is nothing of
+        the sort: measured live, it fires on the FIRST call in 14 minutes, with the
+        same deviceId and IP, and the identical call succeeds seconds after a re-mint.
+
+        Here rather than in the tools: transfer() resolves a second time on its own
+        (for the display name), so a guard on the tool layer would miss that path."""
+        self.ensure_client_session()
         ptr = _normalize_phone(phone)
         r = self._call_read("get_requisites", overrides={
             "pointerType": "phone", "pointer": ptr,
@@ -3415,7 +3428,22 @@ class MobileSession:
         it used to be accepted, documented and then silently dropped.
 
         For commission preview, call payment_commission() separately before this.
-        ALWAYS confirm with the user. Returns the bank's payload (paymentId, …)."""
+        ALWAYS confirm with the user.
+
+        Returns (payload, recipient): the bank's payload (paymentId, commissionInfo)
+        and the masked recipient name that actually went into the signed body.
+
+        The second half exists because it used to be thrown away. When the caller
+        passes the two routing ids but no name, this method looks the name up — one
+        request to /v1/get_requisites — puts it in providerFields.maskedFIO, and
+        used to let it die with the local variable. server.transfer then built its
+        confirmation line from its OWN masked_fio argument, still empty, so the one
+        line a person reads before money moves showed a phone number and no name —
+        while the bank had told us «Алена Д.» and we had paid a request for it.
+
+        A tuple rather than an extra key in the payload: that dict is the bank's,
+        it is printed verbatim when no paymentId comes back, and inventing a field
+        in it would show the user something the bank never sent."""
         src = account or self._source_account()
         if provider == "transfer-inner":
             # providerFields={'bankContract': to_account} would be the plausible
@@ -3476,12 +3504,24 @@ class MobileSession:
             elif not masked_fio:
                 # The ids came from the caller, so the routing is already decided.
                 # Look up the display name only — never let this overwrite the choice.
+                #
+                # This lookup IS load-bearing, contrary to a first reading of it: the
+                # value goes into pf["maskedFIO"], i.e. into the SIGNED body, which is
+                # what tests/test_transfer.py pins. What it does NOT reach is the
+                # confirmation line the user reads — server.transfer builds that from
+                # its own masked_fio argument, so a name resolved here at the cost of
+                # a request is still absent from the sentence a person checks before
+                # the money moves.
                 try:
                     match = next((x for x in self.resolve_sbp_recipient(to_account)
                                   if str(x.get("bank_member_id")) == str(bank_member_id)), None)
                     masked_fio = (match or {}).get("masked_fio", "")
                 except TbankApiError:
+                    # Left EMPTY, not filled with a placeholder: this goes into the
+                    # signed body, and inventing a name there is telling the bank
+                    # something untrue. The routing is unaffected — it is the two ids.
                     masked_fio = ""
+
             pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
                   "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
                   "pointerLinkId": pointer_link_id}
@@ -3500,7 +3540,7 @@ class MobileSession:
         # /v1/pay body in either capture carries it (checked all three: captures.xml
         # #1423 and #1477, captures2.xml #595). Sending it is an invention.
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
-        return self.pay(body)
+        return self.pay(body), masked_fio
 
     # Short on purpose, like CLIENT_INFO_TTL: a burst cache for the common
     # payment_providers(provider_id=…) → pay_bill(provider_id) pair, not a
@@ -4582,8 +4622,21 @@ class MobileSession:
     # expires — and they fail with a privileges/subscriber error that reads like an
     # empty result. Found live: a real unpaid bill was invisible through get_data
     # while the same call succeeded right after session_status() raised the level.
+    # Measured, not guessed: with the session let lapse to ANONYMOUS, each endpoint
+    # below was called directly and then re-called after a re-mint. Ten refused and
+    # ten recovered — under FIVE different codes for one cause:
+    #   REQUEST_RATE_LIMIT_EXCEEDED  get_requisites, list_regular_payments
+    #   INSUFFICIENT_PRIVILEGES      payment_templates, invoices_to_pay,
+    #                                autopayments, sbp_subscriptions,
+    #                                manager_info, client_offers
+    #   OPERATION_REJECTED           subscription_all, subscription_all_bills
+    #   INTERNAL_ERROR               card_credentials
+    # accounts_light, active_loans, operations, user_profile, contact_list,
+    # bank_info and providers_compatible_page answered fine while ANONYMOUS — so
+    # this is a real subset, not "everything", and the ping it costs stays targeted.
     _SECTION_NEEDS_CLIENT = {"invoices", "subscription_bills", "subscriptions",
-                             "templates", "autopayments", "sbp"}
+                             "templates", "autopayments", "sbp",
+                             "requisites", "manager", "offers"}
 
     def get_data(self, section: str, arg: str = "", days: int = 30) -> Any:
         """Unified getter for banking data.

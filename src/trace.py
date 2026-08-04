@@ -125,6 +125,9 @@ def enabled() -> bool:
 def note_error(exc: BaseException) -> None:
     """Called from the one place every tool funnels its failures through."""
     _last_error["cls"] = type(exc).__name__
+    # The bank's result_code, when there is one. Not a secret — it is an error
+    # taxonomy — and it is what turns «something failed» into a searchable fact.
+    note_code(getattr(exc, "result_code", ""))
 
 
 # The key for args_hash. Random per process and NEVER written anywhere — not into
@@ -194,6 +197,17 @@ def _append(rec: dict) -> None:
         pass
 
 
+# Set by server._err() alongside the exception class. The bank's own code is the
+# one field that makes a failure searchable afterwards: this incident left no
+# trace at all — 4701 rows, 346 failures, and not one carried
+# REQUEST_RATE_LIMIT_EXCEEDED as anything but prose inside a redacted `head`,
+# because get_requisites calls issued INSIDE transfer() are recorded as
+# tool="transfer".
+def note_code(code: str) -> None:
+    if code:
+        _last_error["code"] = str(code)[:64]
+
+
 def record(tool: str, args: dict, started: float, result, error: str | None) -> None:
     """Never raises: a tracer that can break the thing it traces is worse than none."""
     global _seq
@@ -216,7 +230,8 @@ def record(tool: str, args: dict, started: float, result, error: str | None) -> 
             "ts": round(started, 3), "run": RUN_ID, "seq": _seq, "tool": tool,
             "args": safe, "args_hash": digest,
             "ms": int((time.time() - started) * 1000),
-            "err": error, "chars": len(text), "head": head,
+            "err": error, "err_code": _last_error.pop("code", None),
+            "chars": len(text), "head": head,
         })
     except Exception:                                        # noqa: BLE001
         pass
