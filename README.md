@@ -4,8 +4,9 @@
 
 ## Features
 
-- **73 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
-  concert tickets, orders, transfers, messenger, investments
+- **75 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+  concert tickets, orders, transfers (including payment by bank requisites, from a
+  scanned invoice QR), messenger, investments
 - **11 skills**, entered through the `tbank` router skill: grocery order, tickets,
   travel search, transfer, bill pay, cards & documents, messenger, budget analysis,
   invest advisor, login
@@ -145,7 +146,7 @@ Russian and so is the person reading the answer.
 | **Travel search** | `train_search`, `train_calendar`, `flight_search`, `flight_history` |
 | **Marketplace** | `shop_search`, `shop_cart` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_send`, `messenger_unread` |
-| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission`, `pay_bill`, `payment_providers` |
+| **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
 
@@ -276,15 +277,16 @@ present the tests additionally check the fixtures have not drifted from it.
     stays JSON → `www.tbank.ru` → the three lifestyle shelf paths. A regression has
     one signature: `_unwrap` raising `HTTP_200` because the body no longer parses.
     Compare `debug_report()` before and after each step.
-- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`, `pay_bill`) require
-  confirmation of a specific amount — "buy it" is not a confirmation.
+- Money tools (`transfer`, `transfer_requisites`, `grocery_checkout`, `ticket_pay`,
+  `pay_bill`) require confirmation of a specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 57 are `readOnlyHint: true` and
+  rather than defaulting to anything. Three kinds: 58 are `readOnlyHint: true` and
   may run without a prompt; 12 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
-  `destructiveHint: false`; 4 debit an account — `transfer`, `grocery_checkout`,
-  `ticket_pay`, `pay_bill` — and are the only ones carrying `destructiveHint`, which
+  `destructiveHint: false`; 5 debit an account — `transfer`, `transfer_requisites`,
+  `grocery_checkout`, `ticket_pay`, `pay_bill` — and are the only ones carrying
+  `destructiveHint`, which
   is what forces a confirmation dialog. The line is drawn at money on purpose: a
   booking expires by itself and a cart line is a rewrite away, so confirming those is
   friction that teaches people to click through the one dialog that matters.

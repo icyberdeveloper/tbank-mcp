@@ -16,11 +16,13 @@ by SHA-256. Certificates are never taken from the network.
 from __future__ import annotations
 
 import base64
+import decimal
 import hashlib
 import hmac
 import json
 import os
 import re
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -43,6 +45,42 @@ DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
 # phone/SBP transfers in captures.xml (6 different recipients, different bankMemberId,
 # always pointerType="8276") — it is NOT the recipient's bank code (that's bankMemberId),
 # so it's a fixed protocol constant, analogous to currencyCode "643" for RUB.
+# Serialises every path that re-mints the session.
+#
+# grocery_checkout is the only async tool and it offloads its body to a worker
+# thread (asyncio.to_thread), which leaves FastMCP's event loop free to run any
+# other sync tool — against the SAME global MobileSession. Two threads entering
+# ensure_fresh together each POST the refresh_token; the grant rotates it, so the
+# second gets invalid_grant, falls through to silent_relogin (authorize → step →
+# token, plus a propagation wait) and both then write their own access_token,
+# sessionid and rotated refresh_token over each other. What lands on disk is a mix.
+#
+# Module-level rather than per-instance because there is exactly one session per
+# server process, and because a per-instance lock has to be created somewhere —
+# and the tests build sessions without running __post_init__.
+_MINT_LOCK = threading.RLock()
+
+# Cookies EVERY bank host receives, and the only ones.
+#
+# The capture is unambiguous: across seventeen t-bank-app.ru hosts the app sends
+# exactly these three, while SSO_SESSION, SSO_SESSION_STATE, SSO_CONVERSATION_CSRF_*
+# and sso_uaid appear on id.t-bank-app.ru and nowhere else. SSO_SESSION is the
+# host-only, HttpOnly credential that mints a session WITHOUT an SMS — the whole
+# point of silent_relogin — and it was going to every host we talk to, because
+# cookie_str was assigned the entire login jar.
+_WIDE_COOKIES = ("__P__wuid", "api_sso_id", "sso_used")
+
+
+def wide_cookies(cookie_str: str) -> str:
+    """Keep only the cookies every host is supposed to get, in their given order."""
+    out = []
+    for part in (cookie_str or "").split(";"):
+        part = part.strip()
+        if part.split("=", 1)[0].strip() in _WIDE_COOKIES:
+            out.append(part)
+    return "; ".join(out)
+
+
 SBP_PHONE_POINTER_TYPE = "8276"
 
 
@@ -109,6 +147,20 @@ class TbankApiError(RuntimeError):
 
 class SessionExpired(TbankApiError):
     """refresh_token / session no longer valid -> re-login (login+confirm_otp)."""
+
+
+class UnreadableResponse(TbankApiError, requests.exceptions.RequestException):
+    """The server answered and the answer could not be read.
+
+    Deliberately BOTH a TbankApiError and a RequestException, because on the money
+    path those two mean opposite things. The money tools classify a TbankApiError as
+    «the bank answered with an error envelope, so nothing moved» and a
+    RequestException as «the request may have arrived, the outcome is unknown».
+
+    A body we cannot parse is the second kind, even on HTTP 200 — a proxy or WAF
+    interstitial means something processed the request; what it did is exactly what
+    we cannot see. Raising a plain TbankApiError here told the user their money was
+    safe on the one occasion nobody can know that."""
 
 
 # query/header keys that carry live secrets — substituted fresh at call time.
@@ -370,6 +422,54 @@ def _wait_for_propagation(probe, *, timeout_s: float = 8.0, interval_s: float = 
         time.sleep(interval_s)
 
 
+def money_amount(amount) -> float | int:
+    """The value that goes into `moneyAmount`, in the form the app sends it.
+
+    Three things happen here, and each has a way of going wrong quietly:
+
+    * NOT FINITE is refused. json.dumps writes NaN and Infinity as bare `NaN` /
+      `Infinity` — not JSON at all — and it would go into a SIGNED payment body.
+      An amount that came out of arithmetic can be either.
+    * QUANTISED to kopecks. A computed amount arrives as 7866.666666666667 and was
+      sent verbatim; the duplicate-guard key is built from that string too, so two
+      attempts at «the same» payment could stop recognising each other.
+    * WHOLE amounts stay integers. All eleven captured bodies — /v1/pay and
+      /v1/payment_commission across four capture files — carry
+      `"moneyAmount":23600`, never `23600.0`. float(amount) produced the second form.
+
+    Non-positive is left to the callers: each has a better message for it, and
+    refusing here would replace «Сумма должна быть больше нуля» with a type error."""
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        raise TbankApiError("INVALID_AMOUNT",
+                            f"сумма должна быть числом, получено {amount!r}") from None
+    if value != value or value in (float("inf"), float("-inf")):
+        raise TbankApiError("INVALID_AMOUNT",
+                            f"сумма не является конечным числом: {amount!r}")
+    # Decimal, not round(). round(100.005, 2) is 100.0, because 100.005 is really
+    # 100.00499999999999545 in binary — half a kopeck lost, silently, on money.
+    # Quantising the DECIMAL text of the value rounds what the caller meant.
+    kopecks = decimal.Decimal(str(value)).quantize(decimal.Decimal("0.01"),
+                                                   rounding=decimal.ROUND_HALF_UP)
+    return int(kopecks) if kopecks == kopecks.to_integral_value() else float(kopecks)
+
+
+def _excerpt(text, limit: int = 200) -> str:
+    """A cut that says how much it dropped.
+
+    `s[:200]` is indistinguishable from the whole thing, which is the entire
+    complaint the truncation audit made about the rest of the codebase — and these
+    are DIAGNOSTIC strings, where the missing part is often the interesting part: a
+    proxy interstitial cut at 200 characters looks like the server said nothing.
+    server._cut marks with a bare «…»; here the size is worth naming, because the
+    reader is deciding whether to go and look at the full response."""
+    s = str(text or "")
+    if len(s) <= limit:
+        return s
+    return f"{s[:limit]}… (+{len(s) - limit} симв.)"
+
+
 def _normalize_phone(phone: str) -> str:
     """Normalize a RU mobile number to the SBP `pointer` format ``+7XXXXXXXXXX``
     (the form the real app sends). Accepts +7 / 8 / 7 / bare-9… forms."""
@@ -381,6 +481,102 @@ def _normalize_phone(phone: str) -> str:
     if not (len(d) == 11 and d.startswith("7")):
         raise TbankApiError("INVALID_PHONE", f"not a valid RU mobile number: {phone}")
     return "+" + d
+
+
+# ---- payment QR (ГОСТ Р 56042-2014) --------------------------------------
+#
+# The QR printed on every Russian invoice. Header is "ST0001" + one digit naming
+# the encoding of the rest (1 = win-1251, 2 = utf-8, 3 = koi8-r), then Key=Value
+# pairs joined by "|". `Sum` is in KOPECKS; every other value is text.
+#
+# The app does not parse it locally — it posts the string untouched to
+# /providers/providers/qr/resolve and gets back the `transfer-legal` provider with
+# every field pre-filled (captures_payreq.xml #538). We parse it anyway, for two
+# reasons: the tool can show the recipient before spending a request, and a QR the
+# bank does not recognise still has a readable payee.
+QR_PAYMENT_PREFIX = "ST0001"
+
+# QR key (lowercased) → the providerFields id transfer-legal wants. The first seven
+# are the bank's OWN mapping, not a reading of the standard: the QR in
+# captures_payreq.xml #538 carries exactly Name/PersonalAcc/BankName/BIC/CorrespAcc/
+# PayeeINN/KPP/Sum, and the bank echoed each one back as the defaultValue of the
+# field named here.
+#
+# `purpose` is the exception and is marked so on purpose: that QR carried no Purpose
+# (the payer typed «За товар» by hand afterwards), so the pairing comes from the
+# standard, where Purpose IS назначение платежа, and not from an observed response.
+# Nothing rests on it being right — a missing or misread purpose is refused before
+# the payment by the provider's own `required` flag, never silently paid.
+QR_TO_PROVIDER_FIELD = {
+    "name": "addressee",
+    "personalacc": "bankAcnt",
+    "bankname": "bankName",
+    "bic": "bankBik",
+    "correspacc": "bankCorrAcnt",
+    "payeeinn": "inn",
+    "kpp": "kpp",
+    "purpose": "comment",       # from the standard; the capture has no Purpose
+    # ЖКХ block. The provider publishes `account` («Номер лицевого счета», optional)
+    # and the standard puts the payer's personal account in PersAcc — a утилита QR
+    # carries it and it was being dropped, so the payment went out with the field
+    # the receiving side uses to match the payer left empty.
+    "persacc": "account",
+}
+
+# The two values the `nds` List field accepts. Not cosmetic: this is the VAT mark
+# that goes on the payment order the recipient's bank shows their accountant.
+NDS_INCLUDED = "323"      # «НДС включен»
+NDS_EXEMPT = "322"        # «НДС не облагается» — the provider's own defaultValue
+NDS_LABELS = {NDS_INCLUDED: "НДС включен", NDS_EXEMPT: "НДС не облагается"}
+
+
+def payment_qr_hash(qr: str) -> str:
+    """`barcodeHash` as the app computes it: sha1 over the QR string's utf-8 bytes.
+
+    Verified: sha1(qr.encode("utf-8")).hexdigest() reproduces the hash the app sent
+    alongside the QR in captures_payreq.xml #538, byte for byte."""
+    return hashlib.sha1(str(qr).encode("utf-8")).hexdigest()
+
+
+def parse_payment_qr(qr: str) -> dict:
+    """Split a ГОСТ Р 56042-2014 payment QR into requisites, WITHOUT the network.
+
+    Returns {"format", "fields", "requisites", "amount", "hash"} where `requisites`
+    is already keyed by transfer-legal's own field ids and `amount` is in RUBLES
+    (the QR carries kopecks) or None when the QR names no sum — an open invoice the
+    payer fills in.
+
+    Raises QR_NOT_PAYMENT for anything that is not this format; a link, a loyalty
+    card or an SBP QR would otherwise be silently read as a set of blank requisites."""
+    text = (qr or "").strip()
+    if not text.upper().startswith(QR_PAYMENT_PREFIX):
+        raise TbankApiError("QR_NOT_PAYMENT",
+            "это не платёжный QR по ГОСТ Р 56042-2014 — такая строка должна "
+            f"начинаться с {QR_PAYMENT_PREFIX} (например ST00012|Name=…|"
+            "PersonalAcc=…|BIC=…). Получено: " + (_excerpt(text, 60) or "пусто"))
+    head, _, rest = text.partition("|")
+    fields: dict[str, str] = {}
+    for chunk in rest.split("|"):
+        key, sep, value = chunk.partition("=")
+        if sep and key.strip():
+            fields[key.strip()] = value
+    requisites: dict[str, str] = {}
+    for key, value in fields.items():
+        dst = QR_TO_PROVIDER_FIELD.get(key.lower())
+        if dst and value.strip():
+            requisites[dst] = value.strip()
+    amount = None
+    raw_sum = next((v for k, v in fields.items() if k.lower() == "sum"), "")
+    # isdecimal, not isdigit: isdigit admits superscripts and circled digits, which
+    # int() then refuses — a ValueError out of a parser whose whole job is to refuse
+    # cleanly. The kopeck conversion below is only valid for decimal digits anyway.
+    if str(raw_sum).strip().isdecimal():
+        # Kopecks. Read as rubles this would pay 100× the invoice — worth the
+        # explicit conversion and the round(), which keeps 2360000 → 23600.0 and
+        # not 23599.999999999996.
+        amount = round(int(raw_sum) / 100.0, 2)
+    return {"format": head, "fields": fields, "requisites": requisites,
+            "amount": amount, "hash": payment_qr_hash(text)}
 
 
 # Every afisha listing is scoped by a numeric cityId, and the bank publishes no
@@ -497,7 +693,6 @@ class MobileSession:
     mobile_sessionid: str
     refresh_token: str
     access_token: str = ""
-    cipher_key: str = ""
     expires_in: int = 7199
     # auth artifacts (obtained at login, replayed)
     device_id: str = ""
@@ -661,8 +856,8 @@ class MobileSession:
             "User-Agent": "okhttp/4.12.0",
             "x-lang": "ru",
         }
-        if self.cookie_str:
-            headers["Cookie"] = self.cookie_str
+        if self._wide_cookie():
+            headers["Cookie"] = self._wide_cookie()
         r = self._http.post(self.token_url, data=self._refresh_body(),
                             headers=headers, timeout=30)
         tok = self._unwrap(r)
@@ -680,7 +875,6 @@ class MobileSession:
         self.expires_in = tok.get("expires_in", self.expires_in) or self.expires_in
         mobile = tok.get("mobile") or {}
         self.mobile_sessionid = mobile.get("sessionid", self.mobile_sessionid)
-        self.cipher_key = mobile.get("cipher_key", self.cipher_key)
         self._minted_at = time.time()
         self._persist()          # the refresh_token just rotated — never lose it
         return tok
@@ -705,13 +899,25 @@ class MobileSession:
         SESSION must call ensure_client_session() instead — that window is ~11
         minutes and lapses long before the token does.
         _minted_at == 0 means unknown age (legacy session) → always re-mint."""
-        if self._minted_at == 0 or time.time() - self._minted_at > min(max_age_s, max(60, self.expires_in - 600)):
+        if not self._needs_mint(max_age_s):
+            return
+        with _MINT_LOCK:
+            # Checked again INSIDE the lock. Without this the lock only queues the
+            # threads: each would take its turn and re-mint, rotating the
+            # refresh_token once per waiter instead of once in total.
+            if not self._needs_mint(max_age_s):
+                return
             try:
                 self.refresh()
             except Exception:
                 if not (self.sso_login_cookie and self.auth_step_fingerprint):
                     raise
                 self.silent_relogin()
+
+    def _needs_mint(self, max_age_s: int = 6000) -> bool:
+        return (self._minted_at == 0
+                or time.time() - self._minted_at
+                > min(max_age_s, max(60, self.expires_in - 600)))
 
     def ensure_client_session(self) -> str:
         """Guarantee a CLIENT-level sessionid, for the few endpoints that check it.
@@ -1033,8 +1239,8 @@ class MobileSession:
         headers["Accept"] = _NATIVE_ACCEPT
         headers["Authorization"] = "Bearer " + self.access_token
         headers["x-api-signature"] = sig
-        if self.cookie_str:
-            headers["Cookie"] = self.cookie_str
+        if self._wide_cookie():
+            headers["Cookie"] = self._wide_cookie()
         headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8;"
         return url, headers, body_str
 
@@ -1074,8 +1280,8 @@ class MobileSession:
         url = "https://tm.t-bank-app.ru/app/bank/api/v1/session/issueTokenBySSO"
         headers = {"Content-Type": "application/json", "Accept": "application/json",
                    "User-Agent": "okhttp/4.12.0", "x-lang": "ru"}
-        if self.cookie_str:
-            headers["Cookie"] = self.cookie_str
+        if self._wide_cookie():
+            headers["Cookie"] = self._wide_cookie()
         r = self._http.post(url, json={"ssoToken": self.access_token},
                            headers=headers, timeout=30)
         data = self._unwrap(r)
@@ -1085,6 +1291,14 @@ class MobileSession:
         if jwt:
             self.tmsg_session_id = jwt
         return jwt
+
+    def _wide_cookie(self) -> str:
+        """cookie_str, narrowed to what every host is supposed to receive.
+
+        Applied where the value is USED, not only where it is assigned: a
+        session.json written before this existed still holds the whole login jar,
+        and it is loaded straight into the field."""
+        return wide_cookies(self.cookie_str)
 
     def _cookie_for(self, host: str) -> str:
         """The Cookie header this host expects, or "".
@@ -1109,7 +1323,7 @@ class MobileSession:
             return (f"sessionID={self.access_token}; "
                     f"sso_api_session={self.access_token}; "
                     f"deviceId={(self.device_id or '').upper()}")
-        return self.cookie_str or ""
+        return self._wide_cookie()
 
     TRAINS_TTL = 3600.0     # the Set-Cookie expiry runs ~2h; re-mint well inside it
 
@@ -1237,7 +1451,6 @@ class MobileSession:
         self.expires_in = tok.get("expires_in", self.expires_in) or self.expires_in
         mobile = tok.get("mobile") or {}
         self.mobile_sessionid = mobile.get("sessionid", self.mobile_sessionid)
-        self.cipher_key = mobile.get("cipher_key", self.cipher_key)
         self._minted_at = time.time()
         self.tmsg_session_id = ""  # force tmsg re-mint with the fresh access_token
         # the freshly-minted session needs a moment to propagate before mobile
@@ -1336,14 +1549,16 @@ class MobileSession:
         self.expires_in = tok.get("expires_in", self.expires_in) or self.expires_in
         mobile = tok.get("mobile") or {}
         self.mobile_sessionid = mobile.get("sessionid", self.mobile_sessionid)
-        self.cipher_key = mobile.get("cipher_key", self.cipher_key)
         self._minted_at = time.time()
         # capture the SSO_SESSION cookie from the jar (set during login) for
         # silent re-login + messenger.
         self.sso_login_cookie = "; ".join(
             f"{c.name}={c.value}" for c in self._http.cookies
             if c.domain and "t-bank-app.ru" in c.domain)
-        self.cookie_str = self.sso_login_cookie
+        # NOT the whole jar. sso_login_cookie keeps every cookie because
+        # silent_relogin replays it against id.t-bank-app.ru, which is the one host
+        # that issued SSO_SESSION and the one host that should ever see it again.
+        self.cookie_str = wide_cookies(self.sso_login_cookie)
         self.tmsg_session_id = ""
         self._login_cid = self._login_token = ""
         _wait_for_propagation(self.keepalive)  # propagation, like silent_relogin
@@ -1380,6 +1595,21 @@ class MobileSession:
             return str(rec.get("errorMessage") or rec["errorCode"])
         return ""
 
+    @staticmethod
+    def _tmsg_error(data) -> tuple[str, str]:
+        """(code, message) for ANY messenger error record, ('','') otherwise.
+
+        The auth subset above earns a token re-mint; every other errorCode has to
+        surface as an error all the same. _as_list wraps a lone error dict as
+        [error], and the renderers do not check that an element looks like a
+        message — so a 404 {"errorCode":"CONVERSATION_NOT_FOUND"} was PRINTED as a
+        chat message. That is worse than an empty list: there is nothing to retry
+        and nothing to read, and the agent believes it read the conversation."""
+        rec = data[0] if isinstance(data, list) and data else data
+        if isinstance(rec, dict) and rec.get("errorCode"):
+            return str(rec["errorCode"]), str(rec.get("errorMessage") or "")
+        return "", ""
+
     def _messenger_read(self, *, path_override=None, overrides=None, key="messenger_base"):
         """One messenger read, re-minting the token if the server says it is dead.
 
@@ -1388,6 +1618,9 @@ class MobileSession:
         data = self._call_read(key, path_override=path_override, overrides=overrides)
         why = self._tmsg_auth_error(data)
         if not why:
+            code, msg = self._tmsg_error(data)
+            if code:
+                raise TbankApiError(code, msg)
             return data
         self.tmsg_session_id = ""             # force a re-mint, then try once more
         self._ensure_tmsg()
@@ -1427,8 +1660,16 @@ class MobileSession:
         """Conversations with unread messages. Uses its OWN template, not
         messenger_base: this path content-negotiates and 406s on the generic
         `application/json` header. Returns {groups, conversationIds, screens}."""
-        data = self._call_read("messenger_unread")
-        return data if isinstance(data, dict) else {}
+        # Through _messenger_read, not _call_read: this path used to skip both the
+        # auth detection and the token re-mint, and then coerced anything that was
+        # not a dict to {} — so the documented rejection shape (HTTP 200 with
+        # [{"errorCode":"AUTH_REQUIRED"}], a LIST) became «Непрочитанных сообщений
+        # нет.» with nothing to retry and nothing to read.
+        data = self._messenger_read(key="messenger_unread")
+        if not isinstance(data, dict):
+            raise TbankApiError("MESSENGER_BAD_SHAPE",
+                f"мессенджер ответил не объектом: {_excerpt(data)}")
+        return data
 
     def messenger_send_message(self, conversation_id: str, body: dict | None = None) -> dict:
         """POST a message to a conversation (WRITE). Replays the request body or override."""
@@ -1577,7 +1818,7 @@ class MobileSession:
             params={"ccc": "true", "cpswc": "true", "client_id": self.client_id or "gorod-app"},
             headers={"Accept": "*/*",
                      "Authorization": "Bearer " + self.access_token,
-                     **({"Cookie": self.cookie_str} if self.cookie_str else {})},
+                     **({"Cookie": self._wide_cookie()} if self._wide_cookie() else {})},
             timeout=30)
         return self._unwrap(r)
 
@@ -1730,10 +1971,6 @@ class MobileSession:
     def subscription_all_bills(self) -> list[dict]:
         """All subscription bills."""
         return self._as_list(self._call_read("subscription_all_bills"))
-
-    def subscription_bills(self) -> list[dict]:
-        """Subscription bills."""
-        return self._as_list(self._call_read("subscription_bills"))
 
     def account_details(self) -> dict:
         """Account details (full)."""
@@ -1896,6 +2133,44 @@ class MobileSession:
         """Resolve a QR payload to a payment provider (no money moved)."""
         return self._call_read("resolve_payment_qr", body=body)
 
+    def qr_providers(self, qr: str) -> list[dict]:
+        """Ask the bank what a scanned QR means. Read-only, no money.
+
+        Answers with the provider records that can pay it — for an invoice QR that
+        is `transfer-legal`, with every field carrying the `defaultValue` the bank
+        itself read out of the QR. That is worth having even though parse_payment_qr
+        reads the same string locally: the bank's answer is what proves the QR is
+        payable at all, and it names the provider for QRs that are not invoices.
+
+        The app sends the same three values in the query AND as the JSON body
+        (captures_payreq.xml #538); both are reproduced rather than picking the one
+        that happens to work, because which one the gate reads is not observable."""
+        params = {"barcodeHash": payment_qr_hash(qr), "qr": str(qr),
+                  "frontendFeatureFlag": "SHAWithSubs"}
+        res = self._call_read("resolve_payment_qr", body=dict(params),
+                              overrides=dict(params))
+        # _unwrap already peels the `payload` envelope; keep the .get for the shape
+        # where it does not (a bare providersList).
+        data = res if isinstance(res, dict) else {}
+        data = data.get("payload", data) if isinstance(data.get("payload"), dict) else data
+        providers = (data.get("providersList") or {}).get("providers")
+        return [p for p in (providers or []) if isinstance(p, dict)]
+
+    def bank_by_bik(self, bik: str) -> dict:
+        """Bank name + correspondent account for a БИК (GET /v1/bank_info?bik=…).
+
+        The app calls this the moment a QR resolves, and it is the reason a payment
+        by hand-typed requisites needs only the БИК: the corr account and the bank's
+        legal name come back from here rather than from the payer's memory.
+
+        Separate from bank_info(), which takes no argument and answers with the
+        bank's own branches/contacts."""
+        digits = re.sub(r"\D", "", str(bik or ""))
+        if len(digits) != 9:
+            raise TbankApiError("INVALID_BIK",
+                f"БИК — это 9 цифр, получено {bik!r}")
+        return self._call_read("bank_info", overrides={"bik": digits}) or {}
+
     def merchant_brand(self) -> list[dict]:
         """Merchant brand metadata (logos/colors) by merchant id."""
         return self._as_list(self._call_read("merchant_brand"))
@@ -2024,8 +2299,8 @@ class MobileSession:
         """List available grocery stores for the delivery address."""
         base = {"Accept": "application/json", "User-Agent": "okhttp/4.12.0",
                 "Authorization": "Bearer " + self.access_token}
-        if self.cookie_str:
-            base["Cookie"] = self.cookie_str
+        if self._wide_cookie():
+            base["Cookie"] = self._wide_cookie()
         # The delivery address, through the shared accessor rather than a second
         # hand-rolled request to the same URL: a cold-start add_to_cart resolves the
         # address here AND in _grocery_delivery, which was two identical calls.
@@ -2402,8 +2677,23 @@ class MobileSession:
         else:
             ops = data if isinstance(data, list) else []
         if account_id:
-            ops = [o for o in ops
-                   if isinstance(o, dict) and str(o.get("account", "")) == str(account_id)]
+            kept = [o for o in ops
+                    if isinstance(o, dict) and str(o.get("account", "")) == str(account_id)]
+            # The fetch is unscoped and the filter runs here, so an id of the wrong
+            # KIND — a card id where an account id belongs — matches nothing and the
+            # answer reads as «этот счёт не использовался», not «такого счёта нет».
+            # A non-empty fetch that filters to nothing is the one case where those
+            # differ, and only this layer can tell them apart.
+            if ops and not kept:
+                present = sorted({str(o.get("account")) for o in ops
+                                  if isinstance(o, dict) and o.get("account")})
+                raise TbankApiError("NO_SUCH_ACCOUNT",
+                    f"среди {len(ops)} операций за период нет ни одной по счёту "
+                    f"{account_id!r}. Счета с операциями: {', '.join(present[:8])}"
+                    + (" …" if len(present) > 8 else "")
+                    + ". Похоже, передан id не того вида — id счёта берётся из "
+                      "list_accounts(), а не из list_cards().")
+            ops = kept
         return ops
 
     @staticmethod
@@ -2468,15 +2758,33 @@ class MobileSession:
 
     # -- low-level envelope --------------------------------------------------
 
+    # 401/403 mean the credential was rejected, whatever the body says. Kept out of
+    # the generic HTTP path so ensure_fresh's re-login still triggers on them.
+    _AUTH_STATUS = (401, 403)
+
     def _unwrap(self, resp: requests.Response) -> Any:
+        ok = 200 <= resp.status_code < 300
         try:
             data = resp.json()
         except ValueError:
             resp.raise_for_status()
-            raise TbankApiError("HTTP_" + str(resp.status_code), resp.text[:500])
+            # HTTP 200 and an unparseable body. See UnreadableResponse: the request
+            # was processed by SOMETHING, so this is an unknown outcome, not a
+            # confirmed non-event.
+            raise UnreadableResponse("HTTP_" + str(resp.status_code),
+                                     _excerpt(resp.text, 500))
         if isinstance(data, dict):
-            code = data.get("resultCode") or data.get("error") or ""
-            if code and code not in ("OK", "0", "success", ""):
+            # api.tinsurance.ru envelopes with a capital `ResultCode`; matching only
+            # the lowercase spelling handed its ERROR envelope back as data, and the
+            # tool printed «Действующих полисов нет.» for a failed request.
+            code = (data.get("resultCode") or data.get("ResultCode")
+                    or data.get("error") or "")
+            # Case-insensitive on the VALUE as well as the key. api.tinsurance.ru
+            # says {"ResultCode": "Ok"} — capital R, lowercase k — so reading the
+            # capital key without also relaxing the value turned that host's every
+            # SUCCESS into «API error (Ok)». Caught by a live sweep, not by a test:
+            # no fixture carried this host's exact spelling.
+            if code and str(code).lower() not in ("ok", "0", "success", ""):
                 msg = data.get("errorMessage") or data.get("error_description") or data.get("plainMessage") or ""
                 lc = str(code)
                 if lc in _SESSION_EXPIRED or "session" in lc.lower() or "authoriz" in lc.lower() or lc == "invalid_grant":
@@ -2497,13 +2805,57 @@ class MobileSession:
                 if ec in _SESSION_EXPIRED or "session" in ec.lower() or "authoriz" in ec.lower():
                     raise SessionExpired(ec, em)
                 raise TbankApiError(ec, em)
+            # The body parsed and claimed nothing was wrong — but the STATUS did.
+            #
+            # This runs AFTER the envelope checks on purpose. The OIDC token endpoint
+            # answers HTTP 400 with {"error":"invalid_grant"}, and that mapping to
+            # SessionExpired is what drives the silent re-login; checking the status
+            # first would turn it into a generic HTTP_400 and break re-login on the
+            # one path that recovers a dead session. So a body that names its own
+            # error still produces that error, and the status is the fallback.
+            #
+            # Before this existed, `_call_read` never looked at the status either, so
+            # a 404 whose body was ordinary JSON came back to the caller AS THE
+            # PAYLOAD: tm answers 404 {"errorCode":"FAQ_NOT_FOUND",…} and
+            # webview 404 {"message":"Not Found"}, and ~40 read tools rendered that as
+            # an empty list — «ничего не найдено» for a request that failed.
+            if not ok:
+                raise self._status_error(resp, data)
             # unwrap envelope: payload (mobile API) or result (messenger)
             if "payload" in data:
                 return data["payload"]
             if "result" in data:
                 return data["result"]
             return data
+        if not ok:
+            raise self._status_error(resp, data)
         return data
+
+    def _status_error(self, resp: requests.Response, data: Any) -> TbankApiError:
+        """The error for a non-2xx whose body did not declare one itself."""
+        msg = ""
+        if isinstance(data, dict):
+            for key in ("errorMessage", "message", "error_description",
+                        "plainMessage", "detail"):
+                if data.get(key):
+                    msg = str(data[key])
+                    break
+            # The server's own code is the machine-readable half and is what an
+            # agent can act on ("FAQ_NOT_FOUND" says retrying is pointless, where
+            # the prose does not). Keep both when both exist.
+            if data.get("errorCode"):
+                msg = f"{data['errorCode']}: {msg}" if msg else str(data["errorCode"])
+        code = str(resp.status_code)
+        if not msg:
+            msg = resp.text
+        # Excerpted once, here, on the way out — not at each of the branches above.
+        # The first version marked only the fallback, so a body carrying a 4 KB
+        # `message` field sailed through whole while a raw body was cut: the same
+        # defect, one level up, and invisible until a test fed it 4 000 characters.
+        msg = _excerpt(msg)
+        if resp.status_code in self._AUTH_STATUS:
+            return SessionExpired("HTTP_" + code, msg)
+        return TbankApiError("HTTP_" + code, msg)
 
     # ---- HIGH-LEVEL ENCAPSULATED TOOLS (for the agent) ----
 
@@ -2782,8 +3134,16 @@ class MobileSession:
         _reject_unkeyed(items)
         try:
             cart = self.grocery_cart_get(app_id=app_id, point_id=point_id)
-        except TbankApiError:
-            cart = {}
+        except TbankApiError as e:
+            # cart/set is a FULL REPLACE, so this read is load-bearing: whatever it
+            # returns becomes the entire cart. Treating a failed read as an empty
+            # cart posted only the new items and DELETED everything already there,
+            # while the tool printed an ordinary success line. grocery_set_cart
+            # already refuses here for the same reason; this path did not.
+            raise TbankApiError("CART_READ_FAILED",
+                f"не удалось прочитать корзину перед добавлением ({e}). "
+                f"Корзина НЕ изменена — запись заменяет её целиком, а нечитаемая "
+                f"корзина не то же самое, что пустая. Повтори позже.") from e
         delivery = self._grocery_delivery(app_id, point_id, cart=cart)
         # cart/set REPLACES the whole cart — every captured body resends the full
         # goods list (item [369] posts 6 goods, [375] posts 5 after a removal). Posting
@@ -2980,7 +3340,20 @@ class MobileSession:
         masked_fio, pointer_link_id, bank_name, bank_id, is_default_bank,
         provider_fields}] per bank — provider_fields is the ready SBP providerFields
         object (pointerType from the SBP_PHONE_POINTER_TYPE constant) to paste into
-        payment_commission(). Empty list = not registered in SBP / wrong number."""
+        payment_commission(). Empty list = not registered in SBP / wrong number.
+
+        RAISES THE SESSION LEVEL FIRST. This endpoint validates the mobile sessionid,
+        not just the Bearer, and its CLIENT window is ~11 minutes against the token's
+        ~2h — so ensure_fresh(), which re-mints on a ~100-minute schedule, leaves it
+        being called with an ANONYMOUS session for most of that interval. The bank's
+        answer to that is `REQUEST_RATE_LIMIT_EXCEEDED — Слишком много попыток
+        проверить банки получателя`, which reads as a volume limit and is nothing of
+        the sort: measured live, it fires on the FIRST call in 14 minutes, with the
+        same deviceId and IP, and the identical call succeeds seconds after a re-mint.
+
+        Here rather than in the tools: transfer() resolves a second time on its own
+        (for the display name), so a guard on the tool layer would miss that path."""
+        self.ensure_client_session()
         ptr = _normalize_phone(phone)
         r = self._call_read("get_requisites", overrides={
             "pointerType": "phone", "pointer": ptr,
@@ -3037,12 +3410,9 @@ class MobileSession:
           envelope, but unlike p2p-anybank (capture-verified) there is no captured
           /v1/pay for this provider to check it against — refused until one exists.
           Transfer between own accounts in the app in the meantime.
-        by details (provider='transfer-legal'): NOT supported for the PAYMENT. The
-          providerFields shape IS known — four captured payment_commission bodies
-          carry all nine keys (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/
-          inn/kpp/comment/nds) — but no captured /v1/pay exists for this provider,
-          and pay is not commission-with-extra-fields (see the pay/commission key
-          split above). Commission preview works; the payment belongs to the app.
+        by details (provider='transfer-legal'): use transfer_legal() instead — the
+          payment is implemented, but it needs nine requisite fields this signature
+          has nowhere to put. Calling transfer() with it raises WRONG_METHOD.
 
         `account` = the payer account id (from list_accounts). Empty falls back to the
         first Current RUB with a positive balance — which is a GUESS, and was
@@ -3058,7 +3428,22 @@ class MobileSession:
         it used to be accepted, documented and then silently dropped.
 
         For commission preview, call payment_commission() separately before this.
-        ALWAYS confirm with the user. Returns the bank's payload (paymentId, …)."""
+        ALWAYS confirm with the user.
+
+        Returns (payload, recipient): the bank's payload (paymentId, commissionInfo)
+        and the masked recipient name that actually went into the signed body.
+
+        The second half exists because it used to be thrown away. When the caller
+        passes the two routing ids but no name, this method looks the name up — one
+        request to /v1/get_requisites — puts it in providerFields.maskedFIO, and
+        used to let it die with the local variable. server.transfer then built its
+        confirmation line from its OWN masked_fio argument, still empty, so the one
+        line a person reads before money moves showed a phone number and no name —
+        while the bank had told us «Алена Д.» and we had paid a request for it.
+
+        A tuple rather than an extra key in the payload: that dict is the bank's,
+        it is printed verbatim when no paymentId comes back, and inventing a field
+        in it would show the user something the bank never sent."""
         src = account or self._source_account()
         if provider == "transfer-inner":
             # providerFields={'bankContract': to_account} would be the plausible
@@ -3073,24 +3458,18 @@ class MobileSession:
                 "конверт на платеже нельзя. Перевод между своими счетами — в "
                 "приложении.")
         elif provider == "transfer-legal":
-            # The refusal stands, but its stated reason was false: four captured
-            # payment_commission requests carry the full 9-key providerFields shape
-            # (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/inn/kpp/comment/nds).
-            # What is genuinely missing is a captured /v1/pay for this provider — and
-            # the two pay bodies that DO exist show pay is not commission-plus-fields
-            # (it drops paymentType, adds userPaymentId/cellularService/frontCamera,
-            # and one of them drops isTransferStatus/isUrgentTransfer too). So the
-            # fields could be filled and the envelope would still be a guess, on a
-            # payment to an arbitrary legal entity.
-            raise TbankApiError("NOT_SUPPORTED",
-                "Перевод по банковским реквизитам (БИК/счёт/ИНН) через MCP не "
-                "реализован. Набор полей известен из захватов комиссии "
-                "(bankBik/bankAcnt/bankCorrAcnt/bankName/addressee/inn/kpp/comment/nds), "
-                "но захваченного тела САМОЙ оплаты для этого провайдера нет, а "
-                "конверт /v1/pay отличается от конверта комиссии — угадывать его на "
-                "платеже юрлицу нельзя. Посчитать комиссию можно: "
-                "payment_commission(...) с provider='transfer-legal'. Сам платёж — "
-                "в приложении.")
+            # No longer a refusal for want of a capture — captures_payreq.xml #578 is
+            # a real signed /v1/pay for this provider. It is a refusal because this
+            # signature cannot carry the payment: transfer() routes by ONE recipient
+            # id, and a payment to a legal entity needs nine (account, БИК, corr
+            # account, bank name, payee, ИНН, КПП, purpose, VAT mark), each with its
+            # own format the bank enforces. transfer_legal() takes them.
+            raise TbankApiError("WRONG_METHOD",
+                "Перевод по банковским реквизитам делается не через transfer(), а "
+                "через transfer_legal(amount, fields=…) — у него девять полей "
+                "(bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/inn/kpp/comment/"
+                "nds), которые в сигнатуру transfer() не помещаются. Тул: "
+                "transfer_requisites(...), а прочитать QR со счёта — payment_qr(qr).")
         else:  # p2p-anybank (phone / SBP)
             # The caller's CHOICE is the two ids. maskedFIO is a display name the
             # bank echoes back, not part of the routing — and requiring it here meant
@@ -3125,12 +3504,24 @@ class MobileSession:
             elif not masked_fio:
                 # The ids came from the caller, so the routing is already decided.
                 # Look up the display name only — never let this overwrite the choice.
+                #
+                # This lookup IS load-bearing, contrary to a first reading of it: the
+                # value goes into pf["maskedFIO"], i.e. into the SIGNED body, which is
+                # what tests/test_transfer.py pins. What it does NOT reach is the
+                # confirmation line the user reads — server.transfer builds that from
+                # its own masked_fio argument, so a name resolved here at the cost of
+                # a request is still absent from the sentence a person checks before
+                # the money moves.
                 try:
                     match = next((x for x in self.resolve_sbp_recipient(to_account)
                                   if str(x.get("bank_member_id")) == str(bank_member_id)), None)
                     masked_fio = (match or {}).get("masked_fio", "")
                 except TbankApiError:
+                    # Left EMPTY, not filled with a placeholder: this goes into the
+                    # signed body, and inventing a name there is telling the bank
+                    # something untrue. The routing is unaffected — it is the two ids.
                     masked_fio = ""
+
             pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
                   "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
                   "pointerLinkId": pointer_link_id}
@@ -3139,7 +3530,7 @@ class MobileSession:
             # (captures2.xml #595: providerFields.message = "Hi").
             pf["message"] = description
         pay_params = {"provider": provider, "currency": "RUB", "account": src,
-                      "moneyAmount": amount, "providerFields": pf,
+                      "moneyAmount": money_amount(amount), "providerFields": pf,
                       "isTransferStatus": "false", "isUrgentTransfer": "false",
                       # Present in every real pay body; absent from ours until now.
                       "cellularService": "WiFi", "frontCamera": "true",
@@ -3149,14 +3540,15 @@ class MobileSession:
         # /v1/pay body in either capture carries it (checked all three: captures.xml
         # #1423 and #1477, captures2.xml #595). Sending it is an invention.
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params))
-        return self.pay(body)
+        return self.pay(body), masked_fio
 
     # Short on purpose, like CLIENT_INFO_TTL: a burst cache for the common
     # payment_providers(provider_id=…) → pay_bill(provider_id) pair, not a
     # session-long one. The catalogue itself doesn't change within a session.
     PROVIDER_TTL = 60.0
 
-    def find_provider(self, provider_id: str, group: str = "") -> dict:
+    def find_provider(self, provider_id: str, group: str = "",
+                      max_pages: int = 7) -> dict:
         """One provider record from the catalogue, {} if not found.
 
         Walks the pages of `group` when given (cheap: the group filter narrows
@@ -3173,7 +3565,27 @@ class MobileSession:
             at, cached = memo.get(key, (0.0, None))
             if cached is not None and time.time() - at < self.PROVIDER_TTL:
                 return cached
-        for page in range(1, 8):
+        # The app looks a provider up by id with ONE filtered request; the page
+        # walk downloads up to seven pages of 362 KB (~2.5 MB) to find the same
+        # record. Same host, same shape — /providers/compatible/filter?ids= answers
+        # with the full fields[] schema (captures: 4 providers, 15 KB).
+        try:
+            got = self._call_read("providers_compatible", overrides={"ids": pid})
+            # `providers`, read by name. _as_list understands `list` and `payload`
+            # only, so it wrapped this envelope as ONE element and the id never
+            # matched — the same shape mismatch that made four other tools print a
+            # single useless row.
+            found = (got or {}).get("providers") if isinstance(got, dict) else got
+            for prov in (found or []):
+                if isinstance(prov, dict) and str(prov.get("id")) == pid:
+                    if memo is not None:
+                        memo[key] = (time.time(), prov)
+                    return prov
+        except TbankApiError:
+            # The filter is an optimisation, not the contract: if it is unavailable
+            # or answers something unexpected, the page walk below still finds it.
+            pass
+        for page in range(1, max(1, int(max_pages or 7)) + 1):
             pg = self.providers_compatible_page(group=group, page=page)
             for prov in (pg.get("providers") or []):
                 if str(prov.get("id")) == pid:
@@ -3233,10 +3645,49 @@ class MobileSession:
         can report each failure with its own message."""
         src = account or self._source_account()
         pay_params = {"provider": str(provider_id), "currency": "RUB", "account": src,
-                      "moneyAmount": amount, "providerFields": dict(fields),
+                      "moneyAmount": money_amount(amount), "providerFields": dict(fields),
                       "cellularService": "WiFi", "frontCamera": "true",
                       "userPaymentId": user_payment_id or str(int(time.time() * 1000))}
         body = "payParameters=" + urllib.parse.quote(json.dumps(pay_params, ensure_ascii=False))
+        return self.pay(body)
+
+    def transfer_legal(self, amount: float, fields: dict, account: str = "",
+                       user_payment_id: str = "", from_qr: bool = False) -> Any:
+        """Pay a legal entity / sole trader by bank requisites. REAL MONEY.
+
+        Body is capture-verified against captures_payreq.xml #578 — a real signed
+        /v1/pay for provider `transfer-legal`, 23 600 ₽ from an invoice QR, answered
+        200 with a paymentId. Relative to the p2p envelope it keeps isTransferStatus
+        and isUrgentTransfer, and adds `paidByPhoto: "QR"` when the requisites were
+        scanned rather than typed. `paymentType` stays out, as on every other pay.
+
+        `fields` are the providerFields ids, not human names: bankAcnt (20 digits),
+        bankBik (9), bankCorrAcnt, bankName, addressee, inn (10 or 12), kpp (9),
+        comment (назначение платежа — the bank requires it) and nds (NDS_EXEMPT /
+        NDS_INCLUDED). parse_payment_qr() produces this dict directly.
+
+        This method does NOT validate: the server layer checks the values against
+        the provider's own published regexps first, so each complaint can name the
+        field. `user_payment_id` is the retry key — same semantics as transfer()."""
+        src = account or self._source_account()
+        vals = {k: str(v) for k, v in dict(fields or {}).items() if str(v).strip()}
+        vals.setdefault("nds", NDS_EXEMPT)
+        pay_params = {"moneyAmount": money_amount(amount), "currency": "RUB",
+                      "frontCamera": "true", "cellularService": "WiFi",
+                      "provider": "transfer-legal",
+                      "isTransferStatus": "false", "isUrgentTransfer": "false",
+                      "account": src,
+                      "userPaymentId": user_payment_id or str(int(time.time() * 1000)),
+                      "providerFields": vals}
+        if from_qr:
+            # The app marks a scanned payment; the bank echoes it into the operation.
+            # Only set when the requisites really came from a QR — claiming a scan
+            # that did not happen is telling the fraud engine something false.
+            pay_params["paidByPhoto"] = "QR"
+        # ensure_ascii=False: the captured body carries the payee's name and purpose
+        # as percent-encoded utf-8 (%D0%9E%D0%9E%D0%9E), never as \uXXXX escapes.
+        body = "payParameters=" + urllib.parse.quote(
+            json.dumps(pay_params, ensure_ascii=False))
         return self.pay(body)
 
 
@@ -3718,10 +4169,16 @@ class MobileSession:
             if key not in seen:
                 seen.add(key)
                 uniq.append(e)
+        scanned = len(uniq)
         if query:
             q = _norm_city(query)
             uniq = [e for e in uniq if q in _norm_city(e.get("eventName") or "")]
-        return uniq, amount
+        # `scanned` alongside `amount`, the way cinema_movies already reports it.
+        # Without it the caller cannot tell «these are all of them» from «these are
+        # the first max_pages×count of them» — and the `query` above filters the
+        # SCANNED slice, so «ничего не найдено» was also being said about events the
+        # scan never reached.
+        return uniq, scanned, amount
 
     # ---- rail --------------------------------------------------------------
 
@@ -3871,7 +4328,7 @@ class MobileSession:
             "hall": str(f.get("hallName") or ""),
             "partner": str(f.get("partnerName") or ""),
             "reservation_code": str(f.get("reservationCode") or ""),
-            # A short payload string ("WS7BZJW"), not an image: it is what the
+            # A short payload string ("QQ1AB2C"), not an image: it is what the
             # scanner reads, and rendering it as a barcode is the client's job.
             "qr": str(f.get("qr") or ""),
             "barcode_type": str(f.get("barcodeType") or ""),
@@ -4148,16 +4605,38 @@ class MobileSession:
     # account + dateFrom + itemsOrder, and without them /v1/statements answers
     # INVALID_REQUEST_DATA — so the section was advertised in the tool description
     # and could not work, for anyone, ever. dateFrom/itemsOrder are supplied below.
+    # Sections whose endpoint is a FILTER: without its argument it answers about
+    # nothing at all. The last three were documented in FLOWS §7 and worked only by
+    # falling through to the template name, which silently DROPPED `arg` — so
+    # get_data("full_debt_amount", "<account>") asked the bank for the debt of no
+    # account and the empty answer read as «долгов нет». Parameter names are the
+    # app's own, taken from the captures: account_details?id=, full_debt_amount?
+    # account=, statement_exist?account= (+ statementId, which this tool cannot
+    # supply — see the docstring).
     _SECTION_ARG = {"providers": "ids", "requisites": "pointer",
-                    "statements": "account"}
+                    "statements": "account", "account_details": "id",
+                    "full_debt_amount": "account", "statement_exist": "account"}
 
     # Sections whose endpoint validates the SESSIONID, not just the Bearer. The
     # sessionid's CLIENT window is ~11 minutes, so these fail long before the token
     # expires — and they fail with a privileges/subscriber error that reads like an
     # empty result. Found live: a real unpaid bill was invisible through get_data
     # while the same call succeeded right after session_status() raised the level.
+    # Measured, not guessed: with the session let lapse to ANONYMOUS, each endpoint
+    # below was called directly and then re-called after a re-mint. Ten refused and
+    # ten recovered — under FIVE different codes for one cause:
+    #   REQUEST_RATE_LIMIT_EXCEEDED  get_requisites, list_regular_payments
+    #   INSUFFICIENT_PRIVILEGES      payment_templates, invoices_to_pay,
+    #                                autopayments, sbp_subscriptions,
+    #                                manager_info, client_offers
+    #   OPERATION_REJECTED           subscription_all, subscription_all_bills
+    #   INTERNAL_ERROR               card_credentials
+    # accounts_light, active_loans, operations, user_profile, contact_list,
+    # bank_info and providers_compatible_page answered fine while ANONYMOUS — so
+    # this is a real subset, not "everything", and the ping it costs stays targeted.
     _SECTION_NEEDS_CLIENT = {"invoices", "subscription_bills", "subscriptions",
-                             "templates", "autopayments", "sbp"}
+                             "templates", "autopayments", "sbp",
+                             "requisites", "manager", "offers"}
 
     def get_data(self, section: str, arg: str = "", days: int = 30) -> Any:
         """Unified getter for banking data.
@@ -4168,7 +4647,19 @@ class MobileSession:
         buried literal 30, so older statements were unreachable through any
         argument while the answer read as complete."""
         _SECTIONS = {
-            "subscriptions": "subscription_all", "subscription_bills": "subscription_all_bills",
+            "subscriptions": "subscription_all",
+            # NO subscriptionIds. An audit finding said the missing filter was why an
+            # unpaid ГИБДД fine read as «счетов нет», and that the app's two-request
+            # chain had to be copied. Implementing it returned nothing at all; the
+            # live numbers say why:
+            #     /v1/subscription/all_bills                   → 2 records, 4 bills
+            #     /v1/subscription/all_bills?subscriptionIds=… → 0 records
+            #     /v1/subscription/all                         → 0 subscriptions
+            # The parameter NARROWS; the app sends it because it is rendering one
+            # provider's screen. The bill really was invisible — but because this
+            # section validates the sessionid, whose CLIENT window is ~11 minutes,
+            # which _SECTION_NEEDS_CLIENT now raises first.
+            "subscription_bills": "subscription_all_bills",
             "credit_schedule": "credit_payment_schedule", "credit_rating": "credit_rating",
             "statements": "statements", "requisites": "get_requisites",
             "invoices": "invoices_to_pay", "templates": "payment_templates",
@@ -4190,7 +4681,13 @@ class MobileSession:
             "shared_owned": "shared_resources_owned", "shared": "shared_resources",
             "business_info": "business_account_info",
             "appointments": "appointment_deliveries",
-            "qr_resolve": "resolve_payment_qr",
+            "account_details": "account_details",
+            "full_debt_amount": "full_debt_amount",
+            "statement_exist": "statement_exist",
+            # "qr_resolve" НЕ здесь: resolve_payment_qr — это POST, чей единственный
+            # вход — тело {barcodeHash, qr, frontendFeatureFlag}, а get_data тела не
+            # передаёт. Секция уходила запросом без QR и не могла ничего разрешить.
+            # Рабочий путь — payment_qr(qr).
         }
         if section.lower() == "profile":
             # /userinfo/userinfo needs client_id=gorod-app + no mobile-BFF params —
@@ -4204,7 +4701,17 @@ class MobileSession:
             # bills", not as "the session needs raising". Costs one ping, and only
             # for the sections that actually check.
             self.ensure_client_session()
-        key = _SECTIONS.get(section.lower(), section)
+        if section.lower() not in _SECTIONS:
+            # Раньше неизвестная секция уезжала В ИМЯ ШАБЛОНА: get_data("v1_pay")
+            # выполняло POST /v1/pay, get_data("grocery_cart_set") — запись корзины,
+            # get_data("order_cancel") — отмену заказа. Тул помечен
+            # readOnlyHint=True/idempotentHint=True, то есть хост вправе выполнить
+            # его без спроса. Перечень закрыт.
+            raise TbankApiError("UNKNOWN_SECTION",
+                f"get_data('{section}') — такой секции нет. Доступные: "
+                + ", ".join(sorted(_SECTIONS))
+                + ". Разобрать платёжный QR — payment_qr(qr).")
+        key = _SECTIONS[section.lower()]
         arg_key = self._SECTION_ARG.get(section.lower())
         if arg_key:
             if not arg:
@@ -4216,7 +4723,7 @@ class MobileSession:
                        "endpoint, only looked up."
                        if arg_key == "ids" else
                        "Pass the account id from list_accounts()."
-                       if arg_key == "account" else
+                       if arg_key in ("account", "id") else
                        "For a recipient lookup prefer transfer_sbp_resolve(phone), "
                        "which parses the same response; for YOUR OWN account details "
                        "use account_requisites(account_id) — a different endpoint."))

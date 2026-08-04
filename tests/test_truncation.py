@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import server  # noqa: E402
-from src.client import MobileSession  # noqa: E402
+from src.client import MobileSession, TbankApiError  # noqa: E402
 
 failures = []
 
@@ -258,6 +258,12 @@ class AnySession(MobileSession):
         for name, value in answers.items():
             setattr(self, name, (lambda v: (lambda *a, **kw: v))(value))
 
+    def _call_read(self, key, **kw):
+        # find_provider now tries /providers/compatible/filter?ids= before walking
+        # pages. An unstubbed read means the tool went somewhere this test does not
+        # describe — say so instead of dying on a missing session attribute.
+        raise TbankApiError("NO_STUB", f"unstubbed read: {key}")
+
     def ensure_fresh(self, *a, **kw):
         return None
 
@@ -342,6 +348,12 @@ def test_payment_providers_reuses_find_providers_cache():
 
         def ensure_fresh(self, *a, **kw):
             return None
+
+        def _call_read(self, key, **kw):
+            # This test is about the PAGE-WALK cache. The filter fast path added
+            # later would answer first and the walk would never run, so it is
+            # refused here — and the refusal is the documented fallback.
+            raise TbankApiError("NO_FILTER", "filter unavailable in this test")
 
         def providers_compatible_page(self, group="", page=1):
             calls.append(page)

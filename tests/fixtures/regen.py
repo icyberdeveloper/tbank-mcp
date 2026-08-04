@@ -244,6 +244,137 @@ def build_transfer():
     }
 
 
+# The real QR names a real company, its real bank account and the sum the repo owner
+# really paid. Every one of those values is replaced by a fixed synthetic one, applied
+# to the QR string AND to the bank's own reading of it — so the fixture still proves
+# our parse agrees with the bank's, without carrying the transaction.
+#
+# The replacements keep the FORM the provider's regexps demand: a 20-digit account,
+# a БИК starting 0/1/2, a 10-digit ИНН, a 9-digit КПП.
+LEGAL_FAKE = {
+    "Name": 'ООО "ПРИМЕР"',
+    "PersonalAcc": "40702810000000000001",
+    "BankName": 'Филиал "Пример" Банка Пример (ПАО)',
+    "BIC": "044525000",
+    "CorrespAcc": "30101810000000000001",
+    "PayeeINN": "7700000000",
+    "KPP": "770000001",
+    "Sum": "123456",                # 1 234.56 ₽ — still proves kopecks and rounding
+}
+LEGAL_COMMENT = "Счет 1 от 01.01.2026"
+
+
+def build_transfer_legal():
+    """The whole pay-by-requisites flow, from captures_payreq.xml.
+
+    Kept real: every key set, the provider's published field schema and regexps, the
+    protocol constants (paymentType, nds values, paidByPhoto) and the response shape.
+    Replaced: the company, its account and bank, the sum, the payer account, the
+    userPaymentId and the paymentId."""
+    import test_requisites as R
+
+    if not os.path.exists(R.CAPTURE):
+        raise FileNotFoundError(R.CAPTURE)
+    items = R.items()
+
+    qr_real = R.request_json(items, R.QR_RESOLVE)["qr"]
+    head, _, rest = qr_real.partition("|")
+    # Value-for-value substitution, so the same real string never survives anywhere.
+    subs, pairs = {}, []
+    for chunk in rest.split("|"):
+        key, sep, value = chunk.partition("=")
+        fake = LEGAL_FAKE.get(key.strip(), value)
+        if value and fake != value:
+            subs[value] = fake
+        pairs.append(f"{key}{sep}{fake}")
+    qr = head + "|" + "|".join(pairs)
+
+    def scrub(value):
+        if isinstance(value, str):
+            out = value
+            for real, fake in subs.items():
+                out = out.replace(real, fake)
+            return out
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [scrub(v) for v in value]
+        return value
+
+    resolved = R.response_json(items, R.QR_RESOLVE)["payload"]["providersList"]["providers"][0]
+    # The bank's own reading of the QR: field id → defaultValue, scrubbed the same
+    # way. `nds` is the provider's constant, not something read out of the QR.
+    defaults = {f["id"]: scrub(f["defaultValue"])
+                for f in resolved["fields"]
+                if f.get("defaultValue") and f["id"] != "nds"}
+
+    catalogue = next(p for p in R.response_json(items, R.CATALOGUE)
+                     ["payload"]["providersPage"]["providers"]
+                     if p["id"] == "transfer-legal")
+
+    pay_form = R.request_form(items, R.PAY)
+    pp = scrub(json.loads(pay_form["payParameters"][0]))
+    pp["account"] = "0000000000"
+    pp["userPaymentId"] = "1700000000000"
+    pp["moneyAmount"] = int(LEGAL_FAKE["Sum"]) / 100.0
+    pp["providerFields"]["comment"] = LEGAL_COMMENT
+
+    commission = scrub(json.loads(R.request_form(items, R.COMMISSION)["payParameters"][0]))
+    commission["moneyAmount"] = pp["moneyAmount"]
+    commission["account"] = pp["account"]
+    commission["providerFields"]["comment"] = LEGAL_COMMENT
+
+    commission_resp = scrub(R.response_json(items, R.COMMISSION)["payload"])
+    for key in ("value", "total"):
+        money = commission_resp.get(key)
+        if isinstance(money, dict) and "value" in money:
+            money["value"] = 0 if key == "value" else pp["moneyAmount"]
+
+    pay_resp = R.response_json(items, R.PAY)["payload"]
+    pay_resp["paymentId"] = "100000000001"
+    info = pay_resp.get("commissionInfo") or {}
+    for key in ("amount", "amountWithCommission"):
+        if isinstance(info.get(key), dict):
+            info[key]["value"] = pp["moneyAmount"]
+    if isinstance(info.get("commission"), dict):
+        info["commission"]["value"] = 0.0
+
+    bank = R.response_json(items, R.BANK_INFO)["payload"]
+    corr = (bank.get("correspondentAccount") or {}).get("value")
+
+    return {
+        "_note": ("Scrubbed from captures_payreq.xml (QR → resolve → commission → "
+                  "signed /v1/pay, transfer-legal, 200). Key sets, the provider's "
+                  "field schema and regexps, and the protocol constants are real; "
+                  "the company, its account and bank, the sum, the payer account, "
+                  "userPaymentId and paymentId are synthetic. "
+                  "Regenerate with tests/fixtures/regen.py."),
+        "qr": qr,
+        "qr_format": head,
+        "qr_amount": int(LEGAL_FAKE["Sum"]) / 100.0,
+        "provider_defaults": defaults,
+        "provider_resolved": {"id": resolved["id"], "name": resolved["name"],
+                              "fields": [dict(f, defaultValue=scrub(f["defaultValue"]))
+                                         if f.get("defaultValue") else f
+                                         for f in resolved["fields"]]},
+        "provider_catalogue": catalogue,
+        "query_keys": sorted(R.request_query(items, R.PAY)),
+        "form_keys": sorted(pay_form),
+        "pay_parameters": pp,
+        "pay_response": pay_resp,
+        "commission_request": commission,
+        "commission_response": commission_resp,
+        "bank_info": scrub(bank),
+        "bank_info_bik": LEGAL_FAKE["BIC"],
+        "bank_info_name": LEGAL_FAKE["BankName"],
+        "bank_info_corr": LEGAL_FAKE["CorrespAcc"] if corr else "",
+        "tool_args": {"name": LEGAL_FAKE["Name"],
+                      "account_number": LEGAL_FAKE["PersonalAcc"],
+                      "bik": LEGAL_FAKE["BIC"], "inn": LEGAL_FAKE["PayeeINN"],
+                      "kpp": LEGAL_FAKE["KPP"]},
+    }
+
+
 def write(name, data):
     out = os.path.join(HERE, name)
     with open(out, "w", encoding="utf-8") as fh:
@@ -264,6 +395,10 @@ def main():
     except FileNotFoundError as e:
         print(f"booking fixture skipped: {e}")
     write("transfer.json", build_transfer())
+    try:
+        write("transfer_legal.json", build_transfer_legal())
+    except FileNotFoundError as e:
+        print(f"transfer_legal fixture skipped: {e}")
     return 0
 
 

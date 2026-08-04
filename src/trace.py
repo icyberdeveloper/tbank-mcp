@@ -21,9 +21,14 @@ time — the messages come out of the data, not out of a list somebody maintaine
 
 SAFETY. Values go through observability._redact_value (by key name and by value
 pattern), then are truncated. Arguments that are free text a person wrote or a
-secret — a messenger message, a transfer description, a password, an OTP — are never
-stored at all, only their length. The full argument tuple is hashed so repeated
-identical calls can be detected without keeping what was in them.
+secret — a messenger message, a transfer description, a payment purpose, a scanned
+QR, a password, an OTP — are never stored at all, only their length.
+
+The argument tuple is also reduced to one short digest, so two identical calls in a
+row can be spotted without keeping what was in them. That digest is keyed with a
+random per-process value that is never written down. It has to be: an unkeyed hash
+of a four-digit PIN is the PIN, and putting one next to the redacted field would
+hand back exactly what the redaction removed.
 
 ON BY DEFAULT, because a debugging aid that has to be switched on before the
 interesting thing happens is not one. `TBANK_TRACE=0` turns it off; the file is
@@ -36,9 +41,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 
@@ -59,8 +66,17 @@ MAX_BYTES = int(os.environ.get("TBANK_TRACE_MAX_BYTES", 5 * 1024 * 1024))
 # FSSP case number), a traffic-fine decree number — and none of that matches
 # _REDACT_KEY by name, so it used to reach calls.jsonl almost verbatim. A per-key
 # allowlist can't keep up with an open-ended provider schema; only length survives.
+#
+# `qr` and `comment` were added after a payment QR turned out to defeat every other
+# rule at once. The ГОСТ Р 56042-2014 string packs the payee's name, their 20-digit
+# settlement account, the corr account, ИНН and КПП into one value — and `_MAX_ARG`
+# cuts at 64 characters, which lands just past `PersonalAcc=<20 digits>`. Neither key
+# matches _REDACT_KEY, while the SAME account passed as `account_number` is redacted
+# because that name contains "account". Which meant the protection depended on which
+# argument the agent happened to use. `comment` is назначение платежа: an invoice
+# number, a contract, what was bought — the exact class `description` is opaque for.
 _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
-                "save_to", "fields"}
+                "save_to", "fields", "qr", "comment", "purpose"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the
@@ -69,6 +85,18 @@ _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
 # replaced by its length — unless the call FAILED, in which case the first line is an
 # error string from _err(), which is already redacted and is the thing worth keeping.
 _ECHOES_USER_TEXT = {"messenger_send", "messenger_messages", "messenger_conversations"}
+
+# Tools whose successful answer NAMES THE OTHER PARTY. «Отправлено 23 600 RUB →
+# ООО «Ромашка» со счёта #» — _RE_LONG_ID scrubs the digits and leaves the company,
+# so the trace records who was paid and when. Same treatment, different reason, and
+# the reason is worth keeping separate: this is not text the user typed.
+#
+# Nothing is lost by it. `err` records success or failure independently of `head`,
+# and the report GROUPS by head — where a per-payee line was a crowd of singletons
+# and one marker is a count. On a FAILED call the head survives, because there the
+# first line is the error from _err(), which is already redacted and is the whole
+# reason to look.
+_NAMES_A_COUNTERPARTY = {"transfer", "transfer_requisites"}
 
 _MAX_ARG = 64
 _HEAD = 160
@@ -97,13 +125,35 @@ def enabled() -> bool:
 def note_error(exc: BaseException) -> None:
     """Called from the one place every tool funnels its failures through."""
     _last_error["cls"] = type(exc).__name__
+    # The bank's result_code, when there is one. Not a secret — it is an error
+    # taxonomy — and it is what turns «something failed» into a searchable fact.
+    note_code(getattr(exc, "result_code", ""))
+
+
+# The key for args_hash. Random per process and NEVER written anywhere — not into
+# the record, not to disk, not to a log.
+#
+# The digest used to be a bare sha256 of the arguments, which undid the redaction
+# standing next to it: `pin` was stored as "<4 chars>" while the hash beside it
+# committed to the actual four digits. A PIN has 10 000 possible values and an SMS
+# code a million, so anyone holding the file recovers both by counting — measured at
+# 0.05 s and 2.4 s. A truncated hash of a low-entropy secret is that secret.
+#
+# Salting is enough because of what the digest is FOR: report() compares it between
+# ADJACENT rows of ONE run, to notice an agent calling the same tool with the same
+# arguments twice in a row. That never needs to be reproducible outside the process
+# that wrote it, and never compares across runs. Hashing the sanitised dict instead
+# would also stop the leak, but would make two DIFFERENT PINs collide and report a
+# repeat that never happened.
+_ARGS_HASH_KEY = secrets.token_bytes(32)
 
 
 def _short_args(args: dict) -> tuple[dict, str]:
-    """(what is safe to store, a hash of what was really passed)."""
+    """(what is safe to store, a per-run handle on what was really passed)."""
     canon = json.dumps({k: str(v) for k, v in sorted(args.items())},
                        ensure_ascii=False, sort_keys=True)
-    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+    digest = hmac.new(_ARGS_HASH_KEY, canon.encode("utf-8"),
+                      hashlib.sha256).hexdigest()[:12]
     out: dict = {}
     for k, v in args.items():
         if k in _OPAQUE_ARGS:
@@ -147,6 +197,17 @@ def _append(rec: dict) -> None:
         pass
 
 
+# Set by server._err() alongside the exception class. The bank's own code is the
+# one field that makes a failure searchable afterwards: this incident left no
+# trace at all — 4701 rows, 346 failures, and not one carried
+# REQUEST_RATE_LIMIT_EXCEEDED as anything but prose inside a redacted `head`,
+# because get_requisites calls issued INSIDE transfer() are recorded as
+# tool="transfer".
+def note_code(code: str) -> None:
+    if code:
+        _last_error["code"] = str(code)[:64]
+
+
 def record(tool: str, args: dict, started: float, result, error: str | None) -> None:
     """Never raises: a tracer that can break the thing it traces is worse than none."""
     global _seq
@@ -159,6 +220,8 @@ def record(tool: str, args: dict, started: float, result, error: str | None) -> 
         if text.strip():
             if tool in _ECHOES_USER_TEXT and not error:
                 head = f"<{len(text)} chars, содержимое не записывается>"
+            elif tool in _NAMES_A_COUNTERPARTY and not error:
+                head = "<успех, получатель не записывается>"
             else:
                 first = redact_text(text.strip().splitlines()[0])
                 head = _RE_LONG_ID.sub("#", first)[:_HEAD]
@@ -167,7 +230,8 @@ def record(tool: str, args: dict, started: float, result, error: str | None) -> 
             "ts": round(started, 3), "run": RUN_ID, "seq": _seq, "tool": tool,
             "args": safe, "args_hash": digest,
             "ms": int((time.time() - started) * 1000),
-            "err": error, "chars": len(text), "head": head,
+            "err": error, "err_code": _last_error.pop("code", None),
+            "chars": len(text), "head": head,
         })
     except Exception:                                        # noqa: BLE001
         pass

@@ -265,7 +265,7 @@ BUILTIN_ENDPOINTS = {
    "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "get_requisites": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -1160,7 +1160,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "shopping_cart_detail": {
   "method": "POST",
   "host": "https://webview.t-bank-app.ru",
@@ -1170,7 +1170,7 @@ BUILTIN_ENDPOINTS = {
    "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "store_products": {
   "method": "GET",
   "host": "https://webview.t-bank-app.ru",
@@ -1180,7 +1180,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "store_product": {
   "method": "GET",
   "host": "https://webview.t-bank-app.ru",
@@ -1190,7 +1190,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "store_categories": {
   "method": "GET",
   "host": "https://webview.t-bank-app.ru",
@@ -1200,7 +1200,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "sphere_categories": {
   "method": "GET",
   "host": "https://webview.t-bank-app.ru",
@@ -1210,7 +1210,7 @@ BUILTIN_ENDPOINTS = {
    "platform": "webview_ios",
    "appVersion": APP_VERSION
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "grocery_goods": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",
@@ -1237,7 +1237,7 @@ BUILTIN_ENDPOINTS = {
    "appName": "mobile",
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "v1_pay": {
   "method": "POST",
   "host": "https://api.t-bank-app.ru",
@@ -1262,7 +1262,7 @@ BUILTIN_ENDPOINTS = {
    "appVersion": APP_VERSION,
    "platform": "webview_ios"
   }
- },
+ , "no_base_params": True, "no_bearer": True},
  "messenger_base": {
   "method": "GET",
   "host": "https://tm.t-bank-app.ru",
@@ -1359,8 +1359,6 @@ BUILTIN_ENDPOINTS.update({
     # POST {"date","eventId","city","sort":{"by":"distance"},"location":{lat,lon}}
     "schedule_movie": {"method": "POST", "host": "https://lifestyle.t-bank-app.ru",
                        "path": "/api/schedule/movie", "params": {}},
-    "event_movie": {"method": "GET", "host": "https://lifestyle.t-bank-app.ru",
-                    "path": "/api/event/movie", "params": {}},
 
     # ---- extras surfaced by captures2 -------------------------------------
     # bank-issued certificates (справки) — returns a BARE list, no envelope
@@ -1675,6 +1673,13 @@ VERTICAL_ALIASES = {
 # The search parameter is `search`, NOT `query` — the sibling media endpoint uses
 # `query`, which is exactly the kind of near-miss worth writing down.
 _SHOP = {"appName": "mobile", "appVersion": APP_VERSION, "platform": "webview_ios"}
+# The nine legacy webview templates above carry no_base_params/no_bearer for the
+# reason _SHOP_LEAN exists: webview.t-bank-app.ru authorises on its own cookies, and
+# 1177 of 1177 captured requests to that host carry NEITHER an Authorization header
+# NOR the native query block (sessionid, deviceId, oldDeviceId, ccc, cpswc, origin,
+# inache, connectionType). Sending what the app does not send is the same class of
+# divergence that once broke the grocery cart — and it was sending the Bearer to a
+# host that never asks for one.
 _SHOP_LEAN = {"no_base_params": True, "no_bearer": True}
 
 BUILTIN_ENDPOINTS.update({

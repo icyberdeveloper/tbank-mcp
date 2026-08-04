@@ -8,7 +8,9 @@ resulting session. Read endpoint shapes are built into `endpoints.py` (static
 API params only — no device/session/account secrets).
 
 `pay`/`group_pay` use HMAC-SHA256 `x-api-signature` (key = sessionid); reads are
-cookie+Bearer (no signature); TLS self-heals on cert rotation.
+cookie+Bearer (no signature). TLS trust comes from the system store plus the
+SHA-256-pinned roots in ca/roots/ — a rotation is handled by adding a PEM there
+or setting TBANK_EXTRA_CA, never by learning the certificate that was offered.
 """
 from .client import (
     MobileSession, TbankApiError, SessionExpired, ms_for_period, MOBILE_BASE,

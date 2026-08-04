@@ -238,9 +238,11 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 {"name": "token_auth_version", "value": "2.0", "domain": ".tbank.ru", "path": "/"},
                 {"name": "isSubscribedToPush", "value": "false", "domain": ".tbank.ru", "path": "/"},
             ]
-            all_cookies_str = session.cookie_str or ""
-            if session.sso_login_cookie:
-                all_cookies_str = session.sso_login_cookie + "; " + all_cookies_str
+            # Only the wide-scoped set, and NOT sso_login_cookie. Every part of
+            # that string was re-written below as a `.tbank.ru` cookie — which took
+            # SSO_SESSION, a host-only credential that mints a session without an
+            # SMS, and handed it to every host under tbank.ru the page touches.
+            all_cookies_str = session._wide_cookie()
             for part in all_cookies_str.split(";"):
                 part = part.strip()
                 if "=" in part:
@@ -452,7 +454,10 @@ def checkout(session, app_id: str = "", point_id: str = "",
             _t0 = time.time()
             pay_res = page.evaluate(_js("""
                 return await _f('/api/common/pg-api/v1/payment-gate/payments?origin=web,ib5,platform', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: a.body
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json',
+                              'Pg-Api-System': 't-grocery-ib'},
+                    body: a.body
                 }, a.ms);
             """), {"body": pay_body, "ms": FETCH_TIMEOUT_MS})
             _dur = int((time.time() - _t0) * 1000)
