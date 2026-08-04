@@ -48,6 +48,11 @@ class CountingSession(MobileSession):
         self.writes = []          # (key, body) of every call, for asserting shape
         self._memo = {}
         self._lock = threading.Lock()
+        # How many reads overlap at any moment, and the highest that ever got. Wall
+        # clock cannot tell «8 in parallel» from «2 at a time on a fast machine»,
+        # and the concurrency test used to pass with a pool crippled to 2 workers.
+        self._inflight = 0
+        self.peak = 0
 
     def ensure_fresh(self, *a, **kw):
         return None
@@ -59,12 +64,18 @@ class CountingSession(MobileSession):
         with self._lock:
             self.calls.append(key)
             self.writes.append((key, body))
-        if self.delay:
-            time.sleep(self.delay)
-        value = self.responses.get(key)
-        if value is None:
-            raise TbankApiError("NO_STUB", f"unstubbed read: {key}")
-        return value(overrides) if callable(value) else value
+            self._inflight += 1
+            self.peak = max(self.peak, self._inflight)
+        try:
+            if self.delay:
+                time.sleep(self.delay)
+            value = self.responses.get(key)
+            if value is None:
+                raise TbankApiError("NO_STUB", f"unstubbed read: {key}")
+            return value(overrides) if callable(value) else value
+        finally:
+            with self._lock:
+                self._inflight -= 1
 
     def count(self, key):
         return self.calls.count(key)
@@ -195,6 +206,10 @@ def test_a_cold_start_add_to_cart_asks_for_the_address_once():
     class Retailers:
         """The retailers catalogue, which grocery_stores() fetches through _http."""
 
+        # _unwrap reads the status before the body: a stub standing in for a
+        # Response has to answer like one, or it tests a shape production never has.
+        status_code = 200
+
         @staticmethod
         def json():
             return {"payload": {"categories": [{"retailers": [
@@ -267,6 +282,8 @@ def test_nutrition_is_fetched_concurrently():
             time.sleep(self.delay)
             return goods, len(goods), len(goods)
 
+
+
     s = SearchSession({
         "grocery_good": {"good": {"meta": {"nutritionalValue": {
             "fat": "1", "protein": "2", "carbohydrate": "3", "energy": "100",
@@ -283,11 +300,22 @@ def test_nutrition_is_fetched_concurrently():
     check(s.count("grocery_good") == 8,
           f"expected one good request per candidate, got {s.count('grocery_good')}")
 
+    # OBSERVED parallelism, not wall clock. The old assertion was
+    # `elapsed < sequential * 0.6`, which a pool crippled from 8 workers to 2 still
+    # satisfied — so a 4× latency regression in the fan-out went undetected and only
+    # a total loss of concurrency failed. `s.peak` is the highest number of
+    # grocery_good calls in flight at once, counted by the fake itself.
+    check(s.peak == 8,
+          f"the fan-out ran {s.peak} request(s) at a time, not 8 — the pool is "
+          f"min(8, len(rows)) and every widening of it is a latency win the user "
+          f"waits for")
+    # Wall clock is kept as a sanity check, not as the assertion: it catches an
+    # implementation that reports parallelism it did not have.
     sequential = per_call * 9          # search + 8 goods, one after another
     check(elapsed < sequential * 0.6,
           f"nutrition still looks sequential: {elapsed:.2f}s vs {sequential:.2f}s serial")
-    print(f"  grocery_rank: 8 nutrition lookups in {elapsed:.2f}s "
-          f"(sequential would be ~{sequential:.2f}s)")
+    print(f"  grocery_rank: 8 nutrition lookups, {s.peak} in flight at the peak, "
+          f"{elapsed:.2f}s (sequential would be ~{sequential:.2f}s)")
 
 
 def test_grocery_search_sees_the_whole_page_before_ranking():
@@ -303,6 +331,8 @@ def test_grocery_search_sees_the_whole_page_before_ranking():
     hits[15] = good(15, 1)             # the cheapest match, beyond the old break
 
     class Answer:
+        status_code = 200
+
         @staticmethod
         def json():
             return {"payload": {"sortedByScoreObjects": hits}}
@@ -372,7 +402,7 @@ def test_the_catalogue_spans_days_and_paginates_only_where_it_can():
             return {"amount": 60, "list": evs}
 
     concert = Catalog({})
-    events, amount = concert.afisha_catalog(kind="концерт", city="Москва",
+    events, _scanned, amount = concert.afisha_catalog(kind="концерт", city="Москва",
                                             date_from="2026-07-30",
                                             date_to="2026-08-06")
     check(concert.count("events_concert") == 3,
@@ -482,6 +512,7 @@ def test_grocery_stores_seeds_the_area_id_memo():
     first add_to_cart for a store it just listed used to re-download the whole
     retailers catalogue anyway, just to read that one field back out."""
     class FakeResp:
+        status_code = 200
         def json(self):
             return {"categories": [{"name": "Продукты", "retailers": [
                 {"appId": "204", "info": {"name": "ВкусВилл"},
@@ -521,6 +552,8 @@ def test_grocery_stores_refuses_instead_of_defaulting_to_a_city():
         def get(self, url, **kw):
             self.called = True
             class R:
+                status_code = 200
+
                 def json(self):
                     return {"categories": []}
             return R()

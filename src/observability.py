@@ -159,7 +159,16 @@ def recent(limit: int = 40, step: str | None = None) -> list[dict]:
             if step and rec.get("step") != step:
                 continue
             out.append(rec)
-    return out[-limit:]
+    # limit <= 0 means EVERYTHING, the same convention every list tool here uses.
+    # It happened to work through `out[-0:]`, which returns the whole list by
+    # accident of slice semantics rather than by intent — and read as a bug to
+    # anyone tidying it up.
+    return out[-limit:] if limit > 0 else out
+
+
+def total(step: str | None = None) -> int:
+    """How many events exist, so a tool showing the last N can say what N is of."""
+    return len(recent(0, step))
 
 
 def for_attempt(attempt_id: str) -> list[dict]:

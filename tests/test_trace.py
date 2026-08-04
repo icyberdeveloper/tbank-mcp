@@ -10,8 +10,10 @@ it. None of that shows up as a failing feature — so each of them is executed h
 """
 import asyncio
 import inspect
+import hashlib
 import json
 import os
+import time
 import sys
 import tempfile
 
@@ -171,6 +173,95 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
           f"an error must stay readable after redaction: {failed['head']!r}")
     print("  privacy: chat text, transfer notes, sessionid, account numbers and "
           "phone arguments stay out")
+
+
+def test_a_redacted_secret_cannot_be_read_back_out_of_its_own_hash():
+    """`args_hash` used to be an unkeyed sha256 of the RAW arguments, stored on the
+    same line as the redacted copy. A PIN has 10 000 possible values and an SMS code
+    a million, so the digest handed straight back what the redaction had removed —
+    measured at 0.05 s and 2.4 s to enumerate.
+
+    This searches the whole keyspace, exactly as an attacker holding the file would,
+    and requires the search to come up empty."""
+    args = {"pin": "8317"}
+    safe, digest = trace._short_args(args)
+    check(safe["pin"] == "<4 chars>", f"the pin must not be stored: {safe}")
+
+    def unkeyed(pin):
+        canon = json.dumps({"pin": pin}, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+
+    check(unkeyed("8317") != digest,
+          "args_hash is an unkeyed hash of the raw argument again — "
+          "the redaction next to it is decorative")
+    recovered = next((p for p in (f"{i:04d}" for i in range(10000))
+                      if unkeyed(p) == digest), None)
+    check(recovered is None,
+          f"the PIN was recovered from args_hash by exhaustive search: {recovered}")
+
+    # ...and the digest must still do its job: report() compares it between adjacent
+    # rows to spot an agent repeating itself. Hashing the SANITISED dict would also
+    # have closed the leak, and would have made two different PINs collide.
+    same_a = trace._short_args({"query": "молоко"})[1]
+    same_b = trace._short_args({"query": "молоко"})[1]
+    other = trace._short_args({"query": "хлеб"})[1]
+    check(same_a == same_b, "identical arguments must still produce one digest")
+    check(same_a != other, "different arguments must still be distinguishable")
+    check(trace._short_args({"pin": "0000"})[1] != trace._short_args({"pin": "9999"})[1],
+          "two different PINs collide — a repeat would be reported that never happened")
+    print("  args_hash: keyed, the whole PIN keyspace comes up empty, repeats still detected")
+
+
+def test_a_scanned_qr_does_not_smuggle_the_payee_account_into_the_file():
+    """The ГОСТ payment QR packs the payee's name, their 20-digit settlement account,
+    the corr account, ИНН and КПП into ONE argument. It matched no key rule and no
+    value pattern, and the 64-character cut lands just past the account — so the same
+    number that is redacted when passed as `account_number` was stored in full when
+    it arrived inside `qr`. Protection must not depend on which argument was used."""
+    path = fresh_trace()
+    acct = "40702810000000000001"
+    qr = (f'ST00012|Name=ООО "ПРИМЕР"|PersonalAcc={acct}'
+          f'|BIC=044525000|CorrespAcc=30101810000000000000|PayeeINN=7700000000')
+    purpose = "Оплата по счету № 5982 от 03.08.2026 за профиль алюминиевый"
+
+    run(Stub(), server.payment_qr, qr)
+    run(Stub(), server.transfer_requisites, 100.0, qr, purpose)
+
+    raw = open(path, encoding="utf-8").read()
+    check(acct not in raw, "the payee account reached the trace inside the QR argument")
+    check("ПРИМЕР" not in raw, "the payee name reached the trace inside the QR argument")
+    check(purpose not in raw, "назначение платежа was stored verbatim")
+
+    rows = trace.load(path)
+    for r in rows:
+        for key in ("qr", "comment"):
+            if key in r["args"]:
+                check(r["args"][key].endswith("chars>"),
+                      f"{r['tool']}.{key} must be measured, not stored: {r['args'][key]!r}")
+    print("  qr/comment: measured, not stored — the payee account stays out of the file")
+
+
+def test_a_successful_payment_does_not_record_who_was_paid():
+    """«Отправлено 23 600 RUB → ООО «Ромашка» со счёта #» — _RE_LONG_ID scrubs the
+    digits and leaves the counterparty, so the trace recorded who was paid and when.
+    A FAILED call must keep its head: there the first line is the error, already
+    redacted, and it is the whole reason to look."""
+    path = fresh_trace()
+    trace.record("transfer_requisites", {"amount": 23600}, time.time(),
+                 'Отправлено 23 600.00 RUB → ООО "РОМАШКА" со счёта 1111111111.', None)
+    trace.record("transfer_requisites", {"amount": 23600}, time.time(),
+                 "Платёж НЕ выполнен: API error (INVALID_REQUEST_DATA)", "TbankApiError")
+    rows = trace.load(path)
+
+    ok, failed = rows[0], rows[1]
+    check("РОМАШКА" not in ok["head"],
+          f"the payee is recorded on a successful payment: {ok['head']!r}")
+    check(ok["err"] is None, "success must still be distinguishable from failure")
+    check("НЕ выполнен" in failed["head"],
+          f"a failed payment must keep its error line: {failed['head']!r}")
+    check("РОМАШКА" not in open(path, encoding="utf-8").read(),
+          "the payee reached the file by some other route")
+    print("  head: a paid counterparty is not recorded; a failure keeps its message")
 
 
 def test_pay_bills_fields_argument_is_measured_not_stored():
@@ -414,6 +505,9 @@ def main():
     print("call trace:")
     test_the_wrapper_does_not_change_what_agents_see()
     test_a_secret_or_a_private_message_never_reaches_the_file()
+    test_a_redacted_secret_cannot_be_read_back_out_of_its_own_hash()
+    test_a_scanned_qr_does_not_smuggle_the_payee_account_into_the_file()
+    test_a_successful_payment_does_not_record_who_was_paid()
     test_pay_bills_fields_argument_is_measured_not_stored()
     test_the_journal_and_the_event_log_redact_too()
     test_the_log_files_are_owner_only_even_if_they_already_existed()

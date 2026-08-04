@@ -205,7 +205,8 @@ def test_every_tool_declares_what_it_does_to_the_world():
     # MONEY debits an account. Only these three force a confirmation dialog: by the
     # repo owner's rule a booking that expires by itself, a cart line, a chat
     # message and an SMS are all recoverable, and a payment is not.
-    MONEY = {"transfer", "grocery_checkout", "ticket_pay", "pay_bill"}
+    MONEY = {"transfer", "transfer_requisites", "grocery_checkout", "ticket_pay",
+             "pay_bill"}
     # WRITE changes something that costs nothing. They must NOT claim to be
     # read-only — `readOnlyHint: true` states that a tool does not modify its
     # environment, and every one of these does.
@@ -314,10 +315,28 @@ def test_the_documented_counts_match_the_registry():
 
     # The money enumeration is the one place an omission is dangerous: a reader
     # takes the list as exhaustive and assumes anything unlisted cannot spend.
+    #
+    # Checked in THREE places, not one. README was ratcheted; FLOWS and the router
+    # skill were not — and both drifted to naming three of the five, which is worse
+    # than naming none: `flows()` with no argument is what an agent reads to orient
+    # itself, and its list is the one it will trust. `pay_bill` and
+    # `transfer_requisites` were the two missing, and both debit an account.
     money = sorted(n for n, (_, k) in kinds.items() if k == server.MONEY)
-    unlisted = [n for n in money if f"`{n}`" not in readme]
-    check(not unlisted,
-          f"money tools missing from the README enumeration: {', '.join(unlisted)}")
+    #
+    # For FLOWS the check is against what `flows("")` RETURNS, not against the file.
+    # A whole-file search passes as soon as the tool is named anywhere — and it was,
+    # in its own section — while the Notes list that flows() actually serves still
+    # named three of five. The artifact an agent reads is the one to assert on.
+    router = os.path.join(ROOT, "skills", "tbank", "SKILL.md")
+    router_text = open(router, encoding="utf-8").read() if os.path.exists(router) else ""
+    served = server.flows("")
+    for label, blob in (("README", readme),
+                        ("what flows() serves with no argument", served),
+                        ("the tbank router skill", router_text)):
+        unlisted = [n for n in money if f"`{n}`" not in blob]
+        check(not unlisted,
+              f"money tools missing from the enumeration in {label}: "
+              f"{', '.join(unlisted)}")
     print(f"  counts: {live} tools = {counts[server.READ]} read / "
           f"{counts[server.WRITE]} write / {counts[server.MONEY]} money, "
           f"all {len(money)} money tools named")
@@ -344,24 +363,52 @@ RETIRED_CLAIMS = [
     (r"тот отвечает INSUFFICIENT_PRIVILEGES\s+даже на CLIENT",
      "travel_link_auth_token answers 200 in captures-gorod.xml; the earlier refusal "
      "was a lapsed session, not a permission wall"),
+    (r"INSUFFICIENT_PRIVILEGES`?,? even on a\s+CLIENT",
+     "the English half of the same claim, which lived on in FLOWS §9 for a month "
+     "after the Russian one was retired — the tool's own message says the endpoint "
+     "is simply not wired up yet, not that the bank refuses"),
+    (r"link-token minted outside this host",
+     "same paragraph, same wrong diagnosis: the flight order needs a web session "
+     "layered over the mobile one (the bridge IS in the capture), not a link-token"),
 ]
 
 
 def test_disproven_claims_do_not_come_back():
-    """A wrong reading that lived in five files is easy to reintroduce in one."""
-    scanned = list(doc_files())
-    scanned += [os.path.join(ROOT, "src", f) for f in os.listdir(os.path.join(ROOT, "src"))
-                if f.endswith(".py")]
-    for d in sorted(os.listdir(os.path.join(ROOT, "skills"))):
-        p = os.path.join(ROOT, "skills", d, "SKILL.md")
-        if os.path.exists(p):
-            scanned.append(p)
+    """A wrong reading that lived in five files is easy to reintroduce in one.
+
+    This is the one test in the suite that searches SOURCE TEXT, and it stays that
+    way deliberately. The thing under test is not behaviour — it is a sentence
+    asserting something the captures disprove, sitting in a file an agent will read
+    and act on. There is no code path to execute; the defect is that the words
+    exist. Everywhere else in this repo, asserting on text would be a substitute for
+    running the code, and is banned.
+
+    doc_files() ALREADY returns every skills/*/SKILL.md, and a second loop appended
+    them again: the list held 34 entries for 23 distinct files, every skill scanned
+    twice and the success line overstating its coverage by 48%. Deduped, and the
+    count now reports distinct files."""
+    scanned = set(doc_files())
+    scanned |= {os.path.join(ROOT, "src", f)
+                for f in os.listdir(os.path.join(ROOT, "src")) if f.endswith(".py")}
+    scanned = sorted(scanned)
     for pattern, why in RETIRED_CLAIMS:
         hits = [os.path.relpath(p, ROOT) for p in scanned
                 if re.search(pattern, open(p, encoding="utf-8").read())]
         check(not hits, f"retired claim is back in {', '.join(hits)}: {why}")
+
+    # The scan is only worth its exemption if it covers what it claims to. A skill
+    # or a doc that stopped being scanned would silently narrow it.
+    import glob
+    for required in (glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md"))
+                     + [os.path.join(ROOT, "docs", "FLOWS.md"),
+                        os.path.join(ROOT, "README.md"),
+                        os.path.join(ROOT, "src", "client.py"),
+                        os.path.join(ROOT, "src", "server.py")]):
+        check(required in scanned,
+              f"{os.path.relpath(required, ROOT)} is no longer scanned for retired "
+              f"claims — the exemption this test has is for full coverage")
     print(f"  {len(RETIRED_CLAIMS)} disproven claims stay retired across "
-          f"{len(scanned)} files")
+          f"{len(scanned)} distinct files")
 
 
 def test_every_tool_is_documented():

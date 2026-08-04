@@ -312,7 +312,13 @@ class FakeBrowser:
         return self
 
     def add_cookies(self, cookies):
-        pass
+        # Recorded, not discarded, and hung off the PAGE so the caller of
+        # run_checkout can read it: what lands in the browser jar is a security
+        # question. Every part of it used to be re-written as a `.tbank.ru` cookie,
+        # including SSO_SESSION — the host-only credential that mints a session
+        # without an SMS.
+        self.cookies = getattr(self, "cookies", []) + list(cookies)
+        self.page.browser_cookies = self.cookies
 
     def new_page(self):
         return self.page
@@ -389,6 +395,26 @@ def test_the_cart_readiness_poll_uses_a_real_clock():
     print("  checkout poll: wall-clock deadline, result reused, errors are not-ready")
 
 
+def test_the_checkout_browser_never_receives_the_no_otp_credential():
+    """checkout() seeds the page's jar from the session, and every part of that
+    string was re-written with `domain: ".tbank.ru"` — so SSO_SESSION, which is
+    host-only to id.t-bank-app.ru and mints a session with NO SMS, was handed to
+    every host under tbank.ru the checkout page talks to."""
+    paid = {"status": 200, "body": {"paymentId": "PAY-1",
+                                    "stage": {"status": "SUCCESS"}}}
+    _, _, page, _ = run_checkout(routes(paid))
+    jar = getattr(page, "browser_cookies", None)
+    check(jar is not None, "the fake browser recorded no cookies at all")
+    names = {c["name"] for c in (jar or [])}
+    for secret in ("SSO_SESSION", "SSO_SESSION_STATE", "SSO_CONVERSATION_CSRF_ab"):
+        check(secret not in names,
+              f"{secret} was written into the browser jar as a .tbank.ru cookie: "
+              f"{sorted(names)}")
+    check({"api_sso_id", "sso_used"} <= names,
+          f"the cookies the checkout actually needs are missing: {sorted(names)}")
+    print("  checkout cookies: the no-OTP credential stays out of the browser jar")
+
+
 def run_checkout(routes, **kw):
     """Drive the REAL checkout() against a fake browser. Returns (result, exc, page, stdout).
     Extra kwargs go straight to checkout() (expected_sum, account, ...)."""
@@ -406,8 +432,14 @@ def run_checkout(routes, **kw):
         mobile_sessionid = "sid"
         access_token = "tok"
         device_id = "DEV-1"
-        cookie_str = "a=1"
-        sso_login_cookie = "SSO_SESSION=x"
+        # The real shapes: the login jar holds SSO_SESSION, the per-host string is
+        # what every ordinary host receives.
+        cookie_str = "__P__wuid=W; api_sso_id=A; sso_used=true; SSO_SESSION=SECRET"
+        sso_login_cookie = "SSO_SESSION=SECRET; SSO_SESSION_STATE=st; api_sso_id=A"
+
+        def _wide_cookie(self):
+            from src.client import wide_cookies
+            return wide_cookies(self.cookie_str)
 
     from src import checkout as co
     out = io.StringIO()
@@ -778,6 +810,7 @@ def main():
         test_err_redacts_the_sessionid,
         test_cinema_schedule_emits_objectid,
         test_in_page_fetch_gives_up_instead_of_hanging,
+        test_the_checkout_browser_never_receives_the_no_otp_credential,
         test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout,
         test_lost_payment_answer_is_reconciled_not_declared_unknown,
         test_the_sum_the_user_approved_is_the_sum_that_gets_paid,

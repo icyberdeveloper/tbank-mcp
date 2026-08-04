@@ -293,16 +293,48 @@ def test_the_messenger_user_agent_is_built_from_the_session():
 
 
 def test_the_web_payment_gate_names_its_calling_system():
-    """The gate receives Pg-Api-System on every captured call and the comment on the
-    mobile sibling has always named the web value — the header was simply never set,
-    so the grocery checkout's payment was the one call that did not identify itself."""
-    check(BUILTIN_ENDPOINTS["payment_gate_pay"]["headers"]["Pg-Api-System"]
-          == "t-grocery-ib",
-          "the web gate must announce t-grocery-ib, like the captured checkout")
-    check(BUILTIN_ENDPOINTS["payment_gate_pay_mobile"]["headers"]["Pg-Api-System"]
-          == "t-entertainment-mb",
-          "the mobile gate's system must not have changed")
-    print("  payment gates: web says t-grocery-ib, mobile says t-entertainment-mb")
+    """Asserted on the request that is actually sent, not on a dict.
+
+    The previous version compared BUILTIN_ENDPOINTS["payment_gate_pay"]["headers"]
+    to a literal — two constants, executing nothing — and the template it pinned has
+    no caller anywhere in src/. The grocery checkout's payment does not go through
+    the requests session at all: it is a fetch inside the checkout page, built in
+    src/checkout.py. So the header the test claimed to guard was absent from the one
+    call that needed it, and the test was green throughout.
+
+    captures.xml, POST www.tbank.ru/api/common/pg-api/v1/payment-gate/payments →
+    `Pg-Api-System: t-grocery-ib`. The mobile sibling (api.t-bank-app.ru, 4 captured
+    calls) says `t-entertainment-mb`."""
+    import re
+    from src import checkout as co
+
+    # The fetch is authored as JS inside checkout(); read the source of the function
+    # that issues it, which is what actually reaches the browser.
+    import inspect
+    body = inspect.getsource(co.checkout)
+    gate = re.search(r"payment-gate/payments[^`]*?\}, a\.ms\);", body, re.S)
+    check(gate is not None,
+          "the payment-gate fetch is gone from checkout() — this test no longer "
+          "guards the call it names")
+    if gate:
+        call = gate.group(0)
+        check("'Pg-Api-System': 't-grocery-ib'" in call,
+              f"the web gate call must announce t-grocery-ib, as every captured one "
+              f"does: {call[:200]!r}")
+        check("'Content-Type': 'application/json'" in call,
+              "the gate still needs its content type")
+
+    # The mobile gate DOES go through the requests session, so that half is checked
+    # where it is actually applied — on a built request.
+    from src.client import MobileSession
+    s = MobileSession("sid", "rt")
+    _, headers, _ = s._signed_parts("payment_gate_pay_mobile", "")
+    lower = {k.lower(): v for k, v in headers.items()}
+    check(lower.get("pg-api-system") == "t-entertainment-mb",
+          f"the mobile gate must announce t-entertainment-mb on the wire: "
+          f"{lower.get('pg-api-system')!r}")
+    print("  payment gates: the web fetch says t-grocery-ib, the mobile REQUEST says "
+          "t-entertainment-mb")
 
 
 def test_web_only_query_identifiers_stay_on_the_web_host():

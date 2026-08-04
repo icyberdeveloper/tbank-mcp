@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **73 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **75 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -118,7 +118,10 @@ You normally just call a read tool; the above runs under the hood. Call
    captured `/v1/pay` bodies. Do NOT use `pointerType:"ACCOUNT"`, the bank rejects it
    → INVALID_REQUEST_DATA.
 3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
-   pointer_link_id, from_account, force)` → moves REAL money. The HMAC
+   pointer_link_id, from_account, force)` → moves REAL money. `provider=
+   "transfer-legal"` raises `WRONG_METHOD` and names `transfer_requisites` instead:
+   nine requisite fields do not fit this signature (see «By bank requisites» below).
+   The HMAC
    `x-api-signature` over `/v1/pay` (base64(HMAC-SHA256(key=sessionid,
    msg=METHOD+path_tail+query+body))) is applied INSIDE `transfer`, over the query
    too — so the device/anti-fraud block it sends is part of what gets signed.
@@ -134,6 +137,44 @@ You normally just call a read tool; the above runs under the hood. Call
 
 > Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
 > is cookie-only.
+
+### By bank requisites — paying a company or a sole trader (`transfer-legal`)
+
+The invoice case: БИК + 20-digit account + ИНН, either typed or scanned off the QR
+printed on the счёт. Whole flow capture-verified (`captures_payreq.xml`: QR →
+resolve → commission → signed `/v1/pay`, 200 with a `paymentId`).
+
+1. `payment_qr(qr)` → read-only. Takes the ГОСТ Р 56042-2014 string the QR encodes
+   (`ST0001<enc>|Name=…|PersonalAcc=…|BankName=…|BIC=…|CorrespAcc=…|PayeeINN=…|
+   KPP=…|Sum=…`) and prints the payee, the requisites, the sum and the fee — i.e.
+   everything the user has to confirm. It also asks the bank what the QR means
+   (`POST /providers/providers/qr/resolve`, with `barcodeHash` = **sha1 of the QR's
+   utf-8 bytes** and the same three values in the query AND the JSON body). A QR
+   that resolves to any provider OTHER than `transfer-legal` is a bill, not a
+   transfer → `payment_providers(provider_id)` then `pay_bill`.
+   **`Sum` is in KOPECKS.** `Sum=2360000` is 23 600 ₽.
+2. `transfer_requisites(amount, qr, comment, account_number, bik, inn, name, kpp,
+   corr_account, bank_name, nds, personal_account, from_account, force)` → REAL
+   money. `qr=` fills everything at once including the amount; explicit arguments
+   always win over the QR, which is how a bad scan is corrected. `corr_account` and
+   `bank_name` are looked up from the БИК (`GET /v1/bank_info?bik=`) when absent —
+   the same call the app makes the moment a QR resolves.
+   - `comment` (назначение платежа) is **required by the provider** and a QR often
+     has none; ask the user. The commission preview accepts a body without it, so
+     the refusal has to happen before that.
+   - `nds` is the VAT mark on the payment order the recipient's accountant reads:
+     `"322"` НДС не облагается (the provider's own default) or `"323"` НДС включен.
+   - Values are checked against the provider's published `regexp` before anything is
+     sent: `bankAcnt` `^[0-9]{20}$`, `bankBik` `(^(?![0]{9})[012]\d{8}$)`, `inn`
+     `^(\d{10}|\d{12})$`, `kpp` `^[0-9]{9}$`.
+   - The pay body differs from the p2p one: it KEEPS `isTransferStatus` /
+     `isUrgentTransfer`, and adds `paidByPhoto:"QR"` — but only when the requisites
+     really were scanned. `paymentType` stays out, as on every other `/v1/pay`; the
+     commission call for this provider sends `paymentType:"Transfer"`, not
+     `"Payment"`.
+   - Unknown outcome blocks a repeat and reuses `userPaymentId`, exactly as
+     `transfer` does. The duplicate key is (amount, recipient account, provider,
+     payer account).
 
 ### Service bills (utilities, fines, taxes, internet)
 
@@ -209,8 +250,15 @@ call returning raw JSON:
 1. `get_data("loans")` → active credits.
 2. `get_data("credit_schedule")` → payment schedule.
 3. `get_data("credit_rating")` / `get_data("credit_recommendations")` → rating + advice.
-4. `get_data("full_debt_amount")` / `get_data("account_details")` → debt + account detail.
-5. `get_data("statements")` / `get_data("statement_exist")` → statements.
+4. `get_data("full_debt_amount", account_id)` / `get_data("account_details", account_id)`
+   → debt + account detail. **Both are FILTER endpoints and need the account id** —
+   they used to accept the call without one, drop the argument on the floor and
+   answer about nothing, which read as «долгов нет». Omitting it now raises
+   `ARG_REQUIRED`.
+5. `get_data("statements", account_id, days)` → statements for the window.
+   `get_data("statement_exist", account_id)` also takes an account; the app pairs it
+   with a `statementId` this tool has no way to obtain, so treat its answer as
+   «does this account have statements at all», not as a lookup of one.
 
 ## 8. Cards, account details, identity documents
 
@@ -247,12 +295,15 @@ groceries have their own `grocery_order_status`.
 Travel is split by vertical, because each one authorizes differently:
 - **Hotels** — `travel_order_details(order_id)` works: `hotels.t-bank-app.ru`
   accepts the plain Bearer, and returns dates, city, hotel, room, guests, price.
-- **Flights and trains** are BLOCKED, and not by a request-shape bug. Both need a
-  separate link-token minted outside this host — trains via
-  `tsocial.tinkoff.ru/.../game/link-token` (answers `B002D965`), flights via
-  `/v1/travel_link_auth_token` (answers `INSUFFICIENT_PRIVILEGES`, even on a
-  CLIENT-level session). `travel_order_details` says so instead of retrying;
-  the summary from `orders()` is all there is.
+- **Flights and trains** return only the `orders()` summary — and NOT because the
+  bank refuses. Each detail endpoint wants a session this MCP does not yet build:
+  the flight order lives on `www.tbank.ru/api/travel/flight/order`, which needs a
+  web session layered over the mobile one (the bridge IS in the capture —
+  `session/webview/get_by_token` hands back a portal session — it is simply not
+  wired up), and the train order lives on `trains.t-bank-app.ru/api/orders/{id}`,
+  which authorises by a cookie that host sets itself in response to a Bearer
+  request. `travel_order_details` says exactly that, naming the host and what is
+  missing, instead of retrying.
 
 ## 10. Grocery nutrition / lowest-calorie shopping
 
@@ -447,7 +498,8 @@ comes back empty.
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) are REAL — confirm the
+- Money tools — all five — are REAL: `transfer`, `transfer_requisites`,
+  `pay_bill`, `grocery_checkout`, `ticket_pay`. Confirm the
   amount/recipient (transfer), store+sum (grocery_checkout) or sum+seats
   (ticket_pay) with the user before running. A request to buy something is not a
   confirmation to pay for it; the confirmation is an answer to a concrete sum.

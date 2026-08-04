@@ -1,0 +1,753 @@
+{
+ "_note": "Scrubbed from captures_payreq.xml (QR → resolve → commission → signed /v1/pay, transfer-legal, 200). Key sets, the provider's field schema and regexps, and the protocol constants are real; the company, its account and bank, the sum, the payer account, userPaymentId and paymentId are synthetic. Regenerate with tests/fixtures/regen.py.",
+ "qr": "ST00012|Name=ООО \"ПРИМЕР\"|PersonalAcc=40702810000000000001|BankName=Филиал \"Пример\" Банка Пример (ПАО)|BIC=044525000|CorrespAcc=30101810000000000001|PayeeINN=7700000000|KPP=770000001|Sum=123456",
+ "qr_format": "ST00012",
+ "qr_amount": 1234.56,
+ "provider_defaults": {
+  "addressee": "ООО \"ПРИМЕР\"",
+  "bankName": "Филиал \"Пример\" Банка Пример (ПАО)",
+  "bankAcnt": "40702810000000000001",
+  "bankCorrAcnt": "30101810000000000001",
+  "bankBik": "044525000",
+  "inn": "7700000000",
+  "kpp": "770000001"
+ },
+ "provider_resolved": {
+  "id": "transfer-legal",
+  "name": "Юридическому лицу",
+  "fields": [
+   {
+    "id": "nds",
+    "name": "НДС",
+    "defaultValue": "322",
+    "keyboard": "text",
+    "options": [
+     {
+      "key": "НДС включен",
+      "value": "323"
+     },
+     {
+      "key": "НДС не облагается",
+      "value": "322"
+     }
+    ],
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 9,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 9,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "List"
+   },
+   {
+    "id": "addressee",
+    "name": "Получатель",
+    "defaultValue": "ООО \"ПРИМЕР\"",
+    "regexp": "(?!^[0-9()!@\"#№%:;^?&*$'()-=+\\/*.,<>_\\s|\\\\~`]+$)^[^<>]{1,160}$",
+    "keyboard": "text",
+    "hint": "Используйте не более 160 символов. Недопустимы: <, >",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 5,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 5,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "bankName",
+    "name": "Банк получателя",
+    "defaultValue": "Филиал \"Пример\" Банка Пример (ПАО)",
+    "keyboard": "text",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "orderId": 1,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "bankAcnt",
+    "name": "Счет получателя",
+    "defaultValue": "40702810000000000001",
+    "regexp": "^[0-9]{20}$",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 4,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 4,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "bankCorrAcnt",
+    "name": "Корреспондентский счёт",
+    "defaultValue": "30101810000000000001",
+    "keyboard": "text",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "orderId": 2,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "bankBik",
+    "name": "БИК",
+    "defaultValue": "044525000",
+    "regexp": "(^(?![0]{9})[012]\\d{8}$)",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 3,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 3,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "comment",
+    "name": "Назначение платежа",
+    "defaultValue": "",
+    "regexp": "^.{0,160}$",
+    "keyboard": "text",
+    "hint": "Не более 160 символов. Укажите назначение платежа, наименование товаров, работ, услуг, номера и даты договоров, товарных документов, а также другую необходимую информацию. В случае перевода денежных средств по договору займа укажите вид займа (процентный/беспроцентный) и характер платежа (предоставление/возврат).",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 10,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "QuickAccess",
+      "required": false,
+      "visible": true,
+      "editable": false,
+      "orderId": 10,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 10,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "inn",
+    "name": "ИНН получателя",
+    "defaultValue": "7700000000",
+    "regexp": "^(\\d{10}|\\d{12})$",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 6,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "orderId": 6,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   },
+   {
+    "id": "kpp",
+    "name": "КПП",
+    "defaultValue": "770000001",
+    "regexp": "^[0-9]{9}$",
+    "keyboard": "number",
+    "hint": "Поле необязательное для заполнения",
+    "usageTypes": [
+     {
+      "usageTypeCode": "Template",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "orderId": 7,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "usageTypeCode": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "orderId": 7,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "fieldType": "Text"
+   }
+  ]
+ },
+ "provider_catalogue": {
+  "id": "transfer-legal",
+  "modifiedAt": "2026-07-28T11:31:15+03:00",
+  "paymentType": "Transfer",
+  "name": "Юридическому лицу",
+  "icon": "del.gif",
+  "smsName": "Yur. perevod",
+  "rating": 36467,
+  "commissionwise": true,
+  "canBeRegular": true,
+  "payableWithLinkedCard": false,
+  "isInfoRequestAvailable": false,
+  "templatable": true,
+  "isExternalSourceAllowed": false,
+  "extraInfo": {
+   "qr": "Y",
+   "mainRequisiteField": "bankAcnt",
+   "paymentNotification": "N",
+   "qr_spare_provider": "Y",
+   "turnOffFromUIForbidden": "Y",
+   "paymentNotificationZhkh": "Y"
+  },
+  "descriptionFields": [],
+  "groupId": "Переводы",
+  "fields": [
+   {
+    "id": "nds",
+    "name": "НДС",
+    "defaultValue": "322",
+    "keyboard": "text",
+    "options": {
+     "НДС включен": "323",
+     "НДС не облагается": "322"
+    },
+    "optionsList": [
+     {
+      "key": "НДС включен",
+      "value": "323"
+     },
+     {
+      "key": "НДС не облагается",
+      "value": "322"
+     }
+    ],
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 9,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 9,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "List"
+   },
+   {
+    "id": "addressee",
+    "name": "Получатель",
+    "regexp": "(?!^[0-9()!@\"#№%:;^?&*$'()-=+\\/*.,<>_\\s|\\\\~`]+$)^[^<>]{1,160}$",
+    "keyboard": "text",
+    "hint": "Используйте не более 160 символов. Недопустимы: <, >",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 5,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 5,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "bankName",
+    "name": "Банк получателя",
+    "keyboard": "text",
+    "usageTypes": [
+     {
+      "code": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 1,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": false,
+    "type": "Text"
+   },
+   {
+    "id": "bankAcnt",
+    "name": "Счет получателя",
+    "regexp": "^[0-9]{20}$",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 4,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 4,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "bankCorrAcnt",
+    "name": "Корреспондентский счёт",
+    "keyboard": "text",
+    "usageTypes": [
+     {
+      "code": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 2,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": false,
+    "type": "Text"
+   },
+   {
+    "id": "bankBik",
+    "name": "БИК",
+    "regexp": "(^(?![0]{9})[012]\\d{8}$)",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 3,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 3,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "comment",
+    "name": "Назначение платежа",
+    "regexp": "^.{0,160}$",
+    "keyboard": "text",
+    "hint": "Не более 160 символов. Укажите назначение платежа, наименование товаров, работ, услуг, номера и даты договоров, товарных документов, а также другую необходимую информацию. В случае перевода денежных средств по договору займа укажите вид займа (процентный/беспроцентный) и характер платежа (предоставление/возврат).",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 10,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "QuickAccess",
+      "required": false,
+      "visible": true,
+      "editable": false,
+      "order": 10,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 10,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "inn",
+    "name": "ИНН получателя",
+    "regexp": "^(\\d{10}|\\d{12})$",
+    "keyboard": "number",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 6,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": true,
+      "visible": true,
+      "editable": true,
+      "order": 6,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "kpp",
+    "name": "КПП",
+    "regexp": "^[0-9]{9}$",
+    "keyboard": "number",
+    "hint": "Поле необязательное для заполнения",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 7,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 7,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   },
+   {
+    "id": "account",
+    "name": "Номер лицевого счета",
+    "regexp": "^.{0,22}$",
+    "keyboard": "text",
+    "hint": "Если вы оплачиваете не коммунальные услуги, введите тут 0",
+    "usageTypes": [
+     {
+      "code": "Template",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 8,
+      "reqCondition": "",
+      "important": 0
+     },
+     {
+      "code": "Pay",
+      "required": false,
+      "visible": true,
+      "editable": true,
+      "order": 8,
+      "reqCondition": "",
+      "important": 0
+     }
+    ],
+    "saveable": true,
+    "type": "Text"
+   }
+  ],
+  "accessLevels": [
+   "CLIENT"
+  ],
+  "isActive": true,
+  "hasPaymentOrder": true,
+  "ruSmsName": "Переводы"
+ },
+ "query_keys": [
+  "appName",
+  "appVersion",
+  "ccc",
+  "colorDepth",
+  "connectionType",
+  "cpswc",
+  "debug",
+  "deviceId",
+  "device_screen_height",
+  "device_screen_width",
+  "emulator",
+  "inache",
+  "jailbreak",
+  "javaEnabled",
+  "javaScriptEnabled",
+  "language",
+  "notificationUrl",
+  "oldDeviceId",
+  "origin",
+  "platform",
+  "sessionid",
+  "timezone"
+ ],
+ "form_keys": [
+  "colorDepth",
+  "debug",
+  "device_screen_height",
+  "device_screen_width",
+  "emulator",
+  "jailbreak",
+  "javaEnabled",
+  "javaScriptEnabled",
+  "language",
+  "notificationUrl",
+  "payParameters",
+  "timezone"
+ ],
+ "pay_parameters": {
+  "moneyAmount": 1234.56,
+  "currency": "RUB",
+  "frontCamera": "true",
+  "cellularService": "WiFi",
+  "provider": "transfer-legal",
+  "isTransferStatus": "false",
+  "account": "0000000000",
+  "userPaymentId": "1700000000000",
+  "providerFields": {
+   "kpp": "770000001",
+   "inn": "7700000000",
+   "comment": "Счет 1 от 01.01.2026",
+   "nds": "322",
+   "bankName": "Филиал \"Пример\" Банка Пример (ПАО)",
+   "addressee": "ООО \"ПРИМЕР\"",
+   "bankBik": "044525000",
+   "bankAcnt": "40702810000000000001",
+   "bankCorrAcnt": "30101810000000000001"
+  },
+  "isUrgentTransfer": "false",
+  "paidByPhoto": "QR"
+ },
+ "pay_response": {
+  "paymentId": "100000000001",
+  "commissionInfo": {
+   "amount": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 1234.56
+   },
+   "commission": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 0.0
+   },
+   "amountWithCommission": {
+    "currency": {
+     "name": "RUB",
+     "strCode": "643",
+     "code": 643
+    },
+    "value": 1234.56
+   }
+  },
+  "extraFields": {}
+ },
+ "commission_request": {
+  "paymentType": "Transfer",
+  "isUrgentTransfer": "false",
+  "provider": "transfer-legal",
+  "currency": "RUB",
+  "account": "0000000000",
+  "moneyAmount": 1234.56,
+  "isTransferStatus": "false",
+  "providerFields": {
+   "bankBik": "044525000",
+   "nds": "322",
+   "addressee": "ООО \"ПРИМЕР\"",
+   "inn": "7700000000",
+   "bankCorrAcnt": "30101810000000000001",
+   "bankAcnt": "40702810000000000001",
+   "comment": "Счет 1 от 01.01.2026",
+   "bankName": "Филиал \"Пример\" Банка Пример (ПАО)",
+   "kpp": "770000001"
+  }
+ },
+ "commission_response": {
+  "providerId": "transfer-legal",
+  "description": "Комиссия не взимается банком",
+  "shortDescription": "Комиссия не взимается банком",
+  "limit": 1000000000.0,
+  "value": {
+   "value": 0,
+   "currency": {
+    "name": "RUB",
+    "strCode": "643",
+    "code": 643
+   }
+  },
+  "minAmount": 0.01,
+  "maxAmount": 1000000000.0,
+  "total": {
+   "value": 1234.56,
+   "currency": {
+    "name": "RUB",
+    "strCode": "643",
+    "code": 643
+   }
+  },
+  "unfinishedFlag": false,
+  "externalFees": [],
+  "additionalParameters": []
+ },
+ "bank_info": {
+  "name": "Филиал \"Пример\" Банка Пример (ПАО)",
+  "isForeign": false,
+  "isBranch": true,
+  "bankIdentificationCode": {
+   "code": "044525000"
+  },
+  "correspondentAccount": {
+   "value": "30101810000000000001"
+  }
+ },
+ "bank_info_bik": "044525000",
+ "bank_info_name": "Филиал \"Пример\" Банка Пример (ПАО)",
+ "bank_info_corr": "30101810000000000001",
+ "tool_args": {
+  "name": "ООО \"ПРИМЕР\"",
+  "account_number": "40702810000000000001",
+  "bik": "044525000",
+  "inn": "7700000000",
+  "kpp": "770000001"
+ }
+}

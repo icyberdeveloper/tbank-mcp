@@ -244,11 +244,11 @@ def test_inn_header_shows_the_number_and_duplicate_copies_merge():
     wrap = lambda v: {"isEntered": True, "value": v}          # noqa: E731
     docs = {
         "RusINN": [
-            {"value": {"inn": wrap("744922535413"),
+            {"value": {"inn": wrap("000000000012"),
                        "person": {"birthDate": wrap("1990-01-01"),
-                                  "lastName": wrap("Исламов")}}},
+                                  "lastName": wrap("Иванов")}}},
             # Same ИНН from another source: no person fields at all.
-            {"value": {"inn": wrap("744922535413")}},
+            {"value": {"inn": wrap("000000000012")}},
         ],
     }
 
@@ -259,12 +259,12 @@ def test_inn_header_shows_the_number_and_duplicate_copies_merge():
     out = run(server.documents, DocStub(
         identity_documents=docs,
         identity_brief={"birthDate": {"value": "1990-01-01"}}))
-    check("ИНН: 744922535413" in out,
+    check("ИНН: 000000000012" in out,
           f"the header must show the real inn, not a bare '—': {out!r}")
     check(out.count("ИНН:") == 1,
           f"the person-less copy must merge with the one that has fields, not "
           f"read as a second document: {out!r}")
-    check("inn = 744922535413" not in out,
+    check("inn = 000000000012" not in out,
           f"inn is already in the header — it must not also repeat in the body: {out!r}")
     print("  documents: ИНН header shows the number, and person-less duplicates merge")
 
@@ -407,7 +407,7 @@ def test_list_cards_and_afisha_catalog_do_not_cut_names_either():
 
     events = [{"eventId": "1", "eventName": "Тест", "genres":
                ["Драма", "Комедия", "Приключения", "Семейный", "Мелодрама"]}]
-    out2 = run(server.afisha_catalog, Stub(afisha_catalog=(events, 1)),
+    out2 = run(server.afisha_catalog, Stub(afisha_catalog=(events, len(events), 1)),
               "кино", "Москва")
     check("Мелодрама" in out2,
           f"the full genre list must be shown, not cut at 34 chars: {out2!r}")
@@ -1058,19 +1058,19 @@ def test_the_ticket_says_what_it_has_and_what_it_lacks():
     different thing from the order not existing."""
     feed = [
         {"orderId": "1", "status": "CREATED_DYNAMIC", "fields": {
-            "eventName": "Майкл", "hallName": "ЗАЛ №7", "reservationCode": "WS7BZJW",
-            "qr": "WS7BZJW", "partnerName": "Рамблер/Касса"}},
+            "eventName": "Майкл", "hallName": "ЗАЛ №7", "reservationCode": "QQ1AB2C",
+            "qr": "QQ1AB2C", "partnerName": "Рамблер/Касса"}},
         {"orderId": "2", "status": "CREATED_DYNAMIC", "fields": {
-            "eventName": "Лекция", "reservationCode": "115382035",
+            "eventName": "Лекция", "reservationCode": "100000001",
             "pdfUrl": "https://example.invalid/t.pdf", "partnerName": "Рамблер"}},
         {"orderId": "3", "status": "CREATED_DYNAMIC", "fields": {
-            "eventName": "Стас", "reservationCode": "85776589",
+            "eventName": "Стас", "reservationCode": "10000002",
             "partnerName": "Ticketland"}},
     ]
     s = Stub(orders=feed)
 
     withqr = run(server.ticket_qr, s, "1")
-    check("WS7BZJW" in withqr, f"the QR payload must be printed: {withqr!r}")
+    check("QQ1AB2C" in withqr, f"the QR payload must be printed: {withqr!r}")
     check("не картинка" in withqr,
           f"a 7-character payload must not be mistaken for an image: {withqr!r}")
 
@@ -1080,7 +1080,7 @@ def test_the_ticket_says_what_it_has_and_what_it_lacks():
     none = run(server.ticket_qr, s, "3")
     check("Ticketland" in none and "код брони" in none,
           f"a partner that issues no QR must be named, not treated as an error: {none!r}")
-    check("85776589" in none, f"the booking code is what is shown instead: {none!r}")
+    check("10000002" in none, f"the booking code is what is shown instead: {none!r}")
 
     missing = run(server.ticket_qr, s, "404")
     check("Неоплаченные" in missing or "order_details" in missing,

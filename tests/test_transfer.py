@@ -692,7 +692,7 @@ class BillSession(CaptureSession):
             "value": {"value": 0}, "total": {"value": 100},
             "minAmount": 0.01, "maxAmount": 200000000.0}
 
-    def find_provider(self, provider_id, group=""):
+    def find_provider(self, provider_id, group="", max_pages=7):
         return dict(MOSENERGO) if provider_id == MOSENERGO["id"] else {}
 
     def _call_read(self, template_key, *, overrides=None, body=None,
