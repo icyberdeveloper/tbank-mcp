@@ -243,6 +243,84 @@ def test_diagnostics_says_how_much_it_is_showing():
     print("  diagnostics: 120 events reported as 120, not silently as 40")
 
 
+def test_a_venue_id_from_the_wrong_vertical_is_named_as_such():
+    """Cinema venues and concert/theatre venues live in two id namespaces that do
+    not mix, and the bank says so only by failing opaquely: a cinema id answers
+    HTTP 500 from place/info, a concert id answers code 201 from the cinema
+    schedule. Neither message names the cause, and the label an agent follows —
+    `objectId=` — is the same word in both worlds, so it walks straight in.
+
+    Verified live in both directions across five venues each: 10031/10210/10237
+    (cinema) fail in place_info and work in cinema_schedule; 14419/9290/9530
+    (concert, theatre) do the opposite."""
+    class Vertical(MobileSession):
+        def __init__(self, code):
+            self._memo = {}
+            self.code = code
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def place_info(self, *a, **kw):
+            raise TbankApiError(self.code, "Сервис временно недоступен. Попробуйте позже.")
+
+        def place_schedule(self, *a, **kw):
+            raise TbankApiError(self.code, "Сервис временно недоступен. Попробуйте позже.")
+
+        def cinema_schedule(self, *a, **kw):
+            raise TbankApiError(self.code, "Сервис временно недоступен. Попробуйте позже.")
+
+    for tool, args in ((server.place_info, ("10031",)),
+                       (server.place_schedule, ("10031",))):
+        out = run(Vertical("500"), tool, *args)
+        check("КИНОТЕАТРА" in out,
+              f"{tool.__name__}: a cinema id must be named as such: {out!r}")
+        check("cinema_schedule" in out,
+              f"{tool.__name__}: the tool that DOES serve it must be named: {out!r}")
+        check("500" in out,
+              f"{tool.__name__}: the bank's own answer must survive — the hint is a "
+              f"guess about a cause, not a replacement for what happened: {out!r}")
+
+    out = run(Vertical("201"), server.cinema_schedule, "", "2026-08-04",
+              object_id="14419")
+    check("afisha_places" in out and "movie" in out,
+          f"the mirror case must name where a cinema id comes from: {out!r}")
+
+    # An error with no object_id involved must NOT be blamed on the namespace.
+    plain = run(Vertical("500"), server.cinema_schedule, "103693", "2026-08-04")
+    check("КИНОТЕАТРА" not in plain and "afisha_places" not in plain,
+          f"a failure without an object_id is not a namespace mix-up: {plain!r}")
+    print("  venues: both id namespaces are named on failure, and only when relevant")
+
+
+def test_the_venue_list_names_the_tool_its_ids_work_in():
+    """afisha_places prints `objectId=` for every vertical, and that label is the
+    argument name of a tool that only accepts half of them."""
+    places = [{"id": "10031", "name": "Синема Парк", "address": "Ленинградское ш.",
+               "subways": []}]
+
+    class Places(MobileSession):
+        def __init__(self):
+            self._memo = {}
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def afisha_places(self, kind="movie", **kw):
+            return places, len(places)
+
+    out = run(Places(), server.afisha_places, "movie", "Москва")
+    check("cinema_schedule(object_id" in out,
+          f"a cinema listing must point at the tool its ids work in: {out!r}")
+    check("place_info" not in out,
+          f"...and must NOT point at the one that answers them with a 500: {out!r}")
+
+    out2 = run(Places(), server.afisha_places, "concert", "Москва")
+    check("place_info" in out2 and "place_schedule" in out2,
+          f"a concert listing must point at the venue tools: {out2!r}")
+    print("  venues: the listing names the next call per vertical")
+
+
 def main():
     print("honest output:")
     test_a_capped_catalogue_scan_says_what_it_did_not_look_at()
@@ -252,6 +330,8 @@ def main():
     test_flows_matches_whole_words()
     test_the_ids_the_next_call_needs_are_printed()
     test_an_id_of_the_wrong_kind_says_so()
+    test_a_venue_id_from_the_wrong_vertical_is_named_as_such()
+    test_the_venue_list_names_the_tool_its_ids_work_in()
     test_diagnostics_says_how_much_it_is_showing()
     if failures:
         print("\nFAILED:")

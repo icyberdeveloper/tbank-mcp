@@ -451,6 +451,26 @@ def _flat(text) -> str:
     return " ".join(str(text or "").split())
 
 
+# Venue ids live in TWO namespaces that do not mix, and the bank says so only by
+# failing opaquely. A cinema venue (afisha_places("movie") → 10031) answers
+# HTTP 500 «Сервис временно недоступен» from /api/events/place/info, while a
+# concert or theatre venue (14419, 9290) answers 200 there — and the mirror image
+# holds: the concert id gives code 201 from the cinema schedule. Verified live
+# across both directions, five venues each.
+#
+# Neither error names the cause, and the label an agent follows — `objectId=` — is
+# the same word in both worlds. So the hint is attached to the failure rather than
+# guessed at: the bank's own message stays, and the sibling tool is named.
+_VENUE_CINEMA_HINT = (
+    "\nПохоже на id КИНОТЕАТРА. Площадки кино и площадки концертов/театров живут "
+    "в разных пространствах id: этот эндпоинт знает вторые. Расписание кинотеатра — "
+    "cinema_schedule(object_id=…, date=…).")
+_VENUE_AFISHA_HINT = (
+    "\nПохоже на id концертной/театральной площадки. Здесь нужен id КИНОТЕАТРА из "
+    "afisha_places(kind=\"movie\"). Для концертных площадок — place_info(object_id) "
+    "и place_schedule(object_id).")
+
+
 def _cut(s, n: int) -> str:
     """Cut a string for a column, MARKING the cut.
 
@@ -3202,7 +3222,10 @@ def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
             head += ":"
         return head + "\n" + "\n".join(lines)
     except Exception as e:
-        return _err(e)
+        # Mirror image: a concert/theatre venue id answers here with code 201.
+        return _err(e) + (_VENUE_AFISHA_HINT
+                          if object_id and ("201" in _err(e) or "500" in _err(e))
+                          else "")
 
 
 # ── TICKET BOOKING ──────────────────────────────────────────
@@ -3808,9 +3831,16 @@ def afisha_places(kind: str = "movie", city: str = "", query: str = "",
         head = f"Площадки ({kind}, {city or city_id})"
         if query:
             head += f", совпадений с «{query}»"
-        return _rows_out(places, render, limit=limit,
-                         total=len(places) if query else total, header=head,
-                         more_hint=f"Передай limit={len(places)}, чтобы увидеть все.")
+        # Name the tool this kind's objectId actually works in. The two namespaces
+        # do not mix, and printing a bare `objectId=` sent agents from a cinema
+        # straight into place_info's HTTP 500.
+        nxt = ("cinema_schedule(object_id=…, date=…) — расписание этого кинотеатра"
+               if kind in ("movie", "кино", "cinema") else
+               "place_info(object_id) и place_schedule(object_id)")
+        out = _rows_out(places, render, limit=limit,
+                        total=len(places) if query else total, header=head,
+                        more_hint=f"Передай limit={len(places)}, чтобы увидеть все.")
+        return out + f"\nЧто дальше: {nxt}."
     except Exception as e:
         # A 204 here is «this vertical is not serving», not «no venues» — live,
         # only cinema answers while concert, theatre and exhibition all 204.
@@ -3870,7 +3900,11 @@ def place_schedule(object_id: str, limit: int = 20, page: int = 1,
                                     f"остальные — page={page + 1} "
                                     f"(count={count} задаёт размер страницы)."))
     except Exception as e:
-        return _err(e)
+        # The bank answers a cinema venue id here with an opaque 500, and
+        # `objectId=` is the same label in both namespaces — so the failure
+        # itself carries the explanation.
+        return _err(e) + (_VENUE_CINEMA_HINT
+                          if "500" in _err(e) or "404" in _err(e) else "")
 
 
 @mcp.tool()
@@ -3911,7 +3945,11 @@ def place_info(object_id: str, with_halls: bool = False, limit: int = 10) -> str
             out.append("Адрес в карточке пуст — вызови с with_halls=True.")
         return "\n".join(out)
     except Exception as e:
-        return _err(e)
+        # The bank answers a cinema venue id here with an opaque 500, and
+        # `objectId=` is the same label in both namespaces — so the failure
+        # itself carries the explanation.
+        return _err(e) + (_VENUE_CINEMA_HINT
+                          if "500" in _err(e) or "404" in _err(e) else "")
 
 
 @mcp.tool()
