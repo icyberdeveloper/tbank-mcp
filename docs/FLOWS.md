@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **75 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **76 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -218,9 +218,28 @@ resolve → commission → signed `/v1/pay`, 200 with a `paymentId`).
    newest and walks older, `max_chars` caps one message's text (0 = whole text —
    use it to read a long bank message in full; a cut is always marked and names
    the full length).
-4. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
+4. `messenger_file(conversation_id, file_id, save_to, overwrite)` → download an
+   attachment TO DISK and return the path. The listing marks one as
+   `[файл: имя | 67 КБ | file_id=… → messenger_file()]`; both ids come from that
+   one line, and the pair is the key (the same `file_id` under another chat
+   answers 401). Saved 0600 under `~/.local/share/tbank-mcp/chat-files/`
+   (`TBANK_CHAT_FILES`, or `save_to`) under the name the RESPONSE states —
+   `x-amz-meta-filename-base64`, or the percent-encoded `Content-Disposition` —
+   so no name travels through the agent, and the extension comes from there and
+   from nowhere else.
+   The tool does NOT parse or summarise the document: the file is on the machine
+   the agent runs on, so the agent reads it with its own tools (Read for a PDF, an
+   image or text; a script for a workbook).
+5. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
    real support agent — not money, but not undoable either; say what you are
    about to send before sending it.
+
+> This is where the bank delivers what a chat message cannot hold — a statement, a
+> broker report, a certificate. `GET /app/bank/messenger/conversations/{cid}/files/
+> {fileId}` authorises on the `tmsgSessionID` cookie alone and answers the raw
+> bytes; an auth failure still arrives as HTTP **200** with a JSON error envelope,
+> like every other messenger route, so the envelope is detected in the bytes rather
+> than saved as the document.
 
 > `messenger_hints`, `messenger_faq` and `messenger_mark_read` exist on the client
 > but are NOT exposed as tools — quick replies and FAQ add nothing an agent cannot

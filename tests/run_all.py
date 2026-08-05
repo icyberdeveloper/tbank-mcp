@@ -35,6 +35,9 @@ def main():
     # The call trace is on by default, and a test run drives hundreds of tools —
     # without this the suite would bury the user's real trace under its own noise.
     env["TBANK_TRACE_FILE"] = os.path.join(tmp, "calls.jsonl")
+    # messenger_file writes the attachment it downloads. Same promise as above: a
+    # test run must not drop files into the user's chat-files directory.
+    env["TBANK_CHAT_FILES"] = os.path.join(tmp, "chat-files")
 
     width = max(len(f) for f in files)
     failed, results = [], []

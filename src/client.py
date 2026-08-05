@@ -16,6 +16,7 @@ by SHA-256. Certificates are never taken from the network.
 from __future__ import annotations
 
 import base64
+import binascii
 import decimal
 import hashlib
 import hmac
@@ -468,6 +469,58 @@ def _excerpt(text, limit: int = 200) -> str:
     if len(s) <= limit:
         return s
     return f"{s[:limit]}… (+{len(s) - limit} симв.)"
+
+
+def _response_filename(headers) -> str:
+    """The filename the SERVER states for a download, or ''.
+
+    Three spellings, most reliable first:
+      * `x-amz-meta-filename-base64` — the object store's own copy, exact bytes,
+        with no quoting or encoding left to interpret. This is what the messenger
+        actually sends;
+      * `Content-Disposition: …filename*=UTF-8''…` (RFC 5987);
+      * `Content-Disposition: …filename="…"`, whose value the messenger
+        percent-encodes ("Otchet_%D0%BE%D1%82…"), so it is unquoted either way — a
+        name that was NOT encoded contains no '%' and survives unchanged.
+
+    The result is untrusted text like any other bank string: it names nothing on
+    disk until the caller has scrubbed it."""
+    # requests hands over a case-insensitive mapping, but this must not depend on
+    # that: a plain dict from a test or another transport spells its keys however
+    # it likes, and a header lookup that misses simply returns no name at all.
+    lower = {str(k).lower(): v for k, v in (headers or {}).items()}
+    try:
+        raw = lower.get("x-amz-meta-filename-base64") or ""
+        if raw:
+            return base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        pass
+    cd = lower.get("content-disposition") or ""
+    m = re.search(r"filename\*\s*=\s*[^']*''([^;]+)", cd, re.I)
+    if not m:
+        m = re.search(r'filename\s*=\s*"([^"]*)"', cd, re.I) or \
+            re.search(r"filename\s*=\s*([^;]+)", cd, re.I)
+    if not m:
+        return ""
+    try:
+        return urllib.parse.unquote(m.group(1).strip(), errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return m.group(1).strip()
+
+
+def _as_json_envelope(blob: bytes):
+    """Parse `blob` as JSON if it plausibly IS one, else None.
+
+    For routes that answer with a document but report failure as JSON. A real
+    .xlsx/.pdf/.png starts with its own magic and never parses, so the guards are
+    cheap; the size cap keeps a 60MB attachment from being decoded just to find
+    out it is not an error object."""
+    if not blob or len(blob) > 65536 or blob[:1] not in (b"{", b"["):
+        return None
+    try:
+        return json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _normalize_phone(phone: str) -> str:
@@ -1002,7 +1055,8 @@ class MobileSession:
 
     def _call_read(self, template_key: str, *, overrides: dict | None = None,
                    body: dict | list | None = None,
-                   path_override: str | None = None) -> Any:
+                   path_override: str | None = None,
+                   return_response: bool = False) -> Any:
         """Replay a read endpoint (builtin shape) with fresh sessionid + Bearer.
 
         path_override replaces the path (for parameterized endpoints like
@@ -1094,6 +1148,11 @@ class MobileSession:
             r = self._http.put(url, params=params, headers=headers, timeout=30)
         else:
             r = self._http.get(url, params=params, headers=headers, timeout=30)
+        if return_response:
+            # The caller wants the response itself, not a parsed body: a download
+            # whose FILENAME lives in the headers, not in the bytes. Status handling
+            # is theirs too — this returns 401s and 500s unraised.
+            return r
         if tpl.get("raw"):
             # A few endpoints answer with bytes, not JSON (payment_receipt_pdf →
             # application/pdf). _unwrap would raise HTTP_200 on the undecodable body.
@@ -1686,6 +1745,72 @@ class MobileSession:
         message_id = self._safe_id(message_id, "message_id")
         return self._call_read("messenger_mark_read",
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages/{message_id}/markRead")
+
+    # A fileId is base64-ish and may carry '=' padding, which _SAFE_ID_RE rejects.
+    # '=' is a sub-delim: legal inside a path segment and unable to break out of
+    # one, unlike the '/', '?', '#' and '..' that stay excluded.
+    _SAFE_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_=-]{1,256}$")
+
+    def messenger_file(self, conversation_id: str, file_id: str) -> tuple[bytes, str]:
+        """(bytes, filename) for one chat attachment — content.fileId of a
+        messageType="file" message.
+
+        The name comes from the RESPONSE, not from the caller. The message record
+        carries a fileName, but making the agent copy it back in was a round trip
+        through the model for a value the server states itself — twice, in fact:
+        `x-amz-meta-filename-base64` (exact bytes, no quoting to get wrong) and
+        percent-encoded in Content-Disposition. It is still untrusted text: the
+        caller sanitises it before it becomes a path.
+
+        The pair is the key: a fileId is scoped to its conversation, and the same
+        fileId under another of the user's own conversations answers 401.
+
+        Not through _messenger_read, which parses JSON — this route returns the raw
+        document. But it shares the messenger's worst trait: a dead token comes back
+        as HTTP 200 with a JSON error envelope in the body. Unchecked, those 119
+        bytes are what gets written to disk and reported as the file — a saved error
+        that opens as a corrupt document. So the envelope is detected in the bytes,
+        and an auth failure earns the same single re-mint as every other messenger
+        read before it is called expired."""
+        conversation_id = self._safe_id(conversation_id, "conversation_id")
+        if not self._SAFE_FILE_ID_RE.match(str(file_id or "")):
+            raise TbankApiError("BAD_ID", f"file_id содержит недопустимые символы: {file_id!r}")
+        path = f"/app/bank/messenger/conversations/{conversation_id}/files/{file_id}"
+
+        def _get():
+            r = self._call_read("messenger_file", path_override=path,
+                                return_response=True)
+            st = getattr(r, "status_code", 200)
+            if st in (401, 403):
+                raise TbankApiError("NOT_AUTHORIZED",
+                    "Мессенджер не отдал файл: fileId не принадлежит этому чату. "
+                    "conversation_id и file_id должны быть из ОДНОГО сообщения "
+                    "(messenger_messages).")
+            if st == 500:
+                raise TbankApiError("FILE_NOT_FOUND",
+                    "Мессенджер ответил 500 — так он отвечает на несуществующий "
+                    "fileId. Возьми fileId из messenger_messages.")
+            if st >= 400:
+                raise TbankApiError(f"HTTP_{st}", _excerpt(getattr(r, "text", "")))
+            return r
+
+        r = _get()
+        if self._tmsg_auth_error(_as_json_envelope(r.content)):
+            self.tmsg_session_id = ""
+            self._ensure_tmsg()
+            r = _get()
+            why = self._tmsg_auth_error(_as_json_envelope(r.content))
+            if why:
+                raise SessionExpired("TMSG_AUTH_REQUIRED",
+                    f"Мессенджер отклонил токен даже после переоформления ({why}). "
+                    f"Вызови refresh_session() и повтори.")
+        blob = r.content or b""
+        code, msg = self._tmsg_error(_as_json_envelope(blob))
+        if code:
+            raise TbankApiError(code, msg)
+        if not blob:
+            raise TbankApiError("EMPTY_FILE", "Мессенджер отдал пустой файл (0 байт).")
+        return blob, _response_filename(r.headers)
 
     # ---- extended read tools (Tier-1, template-driven, unsigned) ----------
 
