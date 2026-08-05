@@ -1263,17 +1263,40 @@ BUILTIN_ENDPOINTS = {
    "platform": "webview_ios"
   }
  , "no_base_params": True, "no_bearer": True},
+ # Shared by conversations / messages / hints / faq (path per call).
+ #
+ # no_base_params: the app sends the messenger host NOTHING in the query — every
+ # captured URL on tm.t-bank-app.ru carries at most messageId/direction. We were
+ # appending sessionid, deviceId, oldDeviceId, appName… to all of them, and
+ # sessionid is the HMAC key for /v1/pay: a payment credential in a URL, on a host
+ # that never asks for it and logs it like any other. Verified live that dropping
+ # them changes nothing: conversations, messages and unread answer identically with
+ # and without (the messenger authorises on the tmsgSessionID cookie).
+ #
+ # no_bearer: for the same reason and with the same evidence. Across the captured
+ # tm.t-bank-app.ru traffic the app sends an Authorization header exactly zero
+ # times — the cookie IS the credential here. We were adding the access_token, the
+ # Bearer for every other host in this file, to a host that never asks for it.
+ # Verified live: conversations, messages, unread and the file download all answer
+ # identically with no Authorization at all.
+ #
+ # messenger_send and messenger_mark_read keep theirs: the same captures say the
+ # app sends none there either, but a send is a real message to a support agent and
+ # cannot be probe-tested, so that one stays as it is until someone has a reason to
+ # send a message anyway.
  "messenger_base": {
   "method": "GET",
   "host": "https://tm.t-bank-app.ru",
   "path": "/app/bank/messenger/conversations/unread",
-  "params": {}
+  "params": {},
+  "no_base_params": True, "no_bearer": True
  },
  "messenger_send": {
   "method": "POST",
   "host": "https://tm.t-bank-app.ru",
   "path": "/app/bank/messenger/conversations/{conversation_id}/messages",
   "params": {},
+  "no_base_params": True,          # see messenger_base: no sessionid on this host
   "headers": {
    "Content-Type": "application/vnd.chats.chatapi.text.message.in.v1+json",
    "Accept": "application/vnd.chats.chatapi.text.message.out.v1+json"
@@ -1395,6 +1418,7 @@ BUILTIN_ENDPOINTS.update({
     "messenger_unread": {
         "method": "GET", "host": "https://tm.t-bank-app.ru",
         "path": "/app/bank/messenger/conversations/unread", "params": {},
+        "no_base_params": True, "no_bearer": True,   # see messenger_base
         "headers": {"Accept": "application/vnd.chats.chatapi.unread.out.v3+json"},
     },
     # markRead is a PUT with its own vendor types and an empty body. It used to be
@@ -1404,10 +1428,37 @@ BUILTIN_ENDPOINTS.update({
     "messenger_mark_read": {
         "method": "PUT", "host": "https://tm.t-bank-app.ru",
         "path": "/app/bank/messenger/conversations/unread", "params": {},
+        "no_base_params": True,          # see messenger_base: no sessionid here
         "headers": {
             "Content-Type": "application/vnd.chats.chatapi.markread.in.v1+json",
             "Accept": "application/vnd.chats.chatapi.markread.out.v1+json",
         },
+    },
+    # A chat attachment: the bytes behind content.fileId of a messageType="file"
+    # record. GET .../conversations/{conversationId}/files/{fileId}, path supplied
+    # per call. raw=True — the body is application/octet-stream, and _unwrap would
+    # raise HTTP_200 on it. Verified live against a support-chat .xlsx.
+    #
+    # Three properties of this route, all found by probing it:
+    #   * the tmsgSessionID cookie alone authorises it — with the cookie and NO
+    #     Authorization header it still answers 200 with the file;
+    #   * the file is scoped to its conversation. The same fileId under a different
+    #     conversationId of the SAME user answers 401 NOT_AUTHORIZED, so the pair is
+    #     the key, not the fileId;
+    #   * no_base_params, because the app sends none here (nor on any other
+    #     tm.t-bank-app.ru path — the captured messenger URLs carry only
+    #     messageId/direction). Sending them costs a 200 nothing, but sessionid is
+    #     the HMAC key for /v1/pay and does not belong in a URL this host will log.
+    "messenger_file": {
+        "method": "GET", "host": "https://tm.t-bank-app.ru",
+        "path": "/app/bank/messenger/conversations/unread", "params": {},
+        "raw": True, "no_base_params": True, "no_bearer": True,
+        # The app's own Accept for this route. It is NOT load-bearing here — the
+        # route also answers the `application/json` this template would otherwise
+        # inherit — but two endpoints in this file were already caught choosing
+        # their serializer off Accept (messenger_unread 406, payment_receipt_pdf
+        # answering an error envelope), so the app's spelling is the one to send.
+        "headers": {"Accept": "application/octet-stream"},
     },
 })
 

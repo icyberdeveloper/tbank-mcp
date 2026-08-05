@@ -40,6 +40,10 @@ class FakeResponse:
         self._payload = payload
         self.content = b"%PDF-1.4 fake"
         self.text = ""
+        # A download reads the filename off the response, so the fake needs the
+        # headers a real one carries — empty here, which is the "server said
+        # nothing" case the caller must survive.
+        self.headers = {}
 
     def json(self):
         return self._payload
@@ -164,11 +168,16 @@ def test_the_session_key_spelling_is_per_endpoint():
 
 
 def test_every_read_carries_the_mobile_client_context():
-    """a8c6519: templates with sparse params must still send the full context."""
+    """a8c6519: templates with sparse params must still send the full context.
+
+    Except where the app itself sends none: `no_base_params` is that opt-out, and
+    it is deliberate per template — see test_a_lean_host_gets_only_what_the_app_
+    sends_it and test_the_messenger_host_never_sees_the_payment_key."""
     sparse = [k for k, t in BUILTIN_ENDPOINTS.items()
               if t.get("method", "GET").upper() == "GET"
               and len(t.get("params") or {}) <= 2
-              and not t.get("session_param")]
+              and not t.get("session_param")
+              and not t.get("no_base_params")]
     check(sparse, "expected at least one sparse template to exercise")
     for key in sparse[:5]:
         s = session()
@@ -222,6 +231,49 @@ def test_messenger_uses_its_own_cookie_and_vendor_accept():
     check("vnd.chats" in (sent["headers"].get("Accept") or ""),
           f"unread needs its vendor Accept or answers 406: {sent['headers'].get('Accept')!r}")
     print("  messenger: tmsg cookie only, vendor Accept for unread")
+
+
+def test_the_messenger_host_never_sees_the_payment_key():
+    """The mobile sessionid is the HMAC key for /v1/pay. It travels as a QUERY
+    PARAM, so every host we send it to logs it — and the messenger never asks: in
+    the captures not one tm.t-bank-app.ru URL carries sessionid, deviceId or
+    appName, and the routes answer identically without them (verified live).
+    Attachments made this concrete: a file download URL is exactly the kind of
+    thing that ends up pasted somewhere."""
+    s = session()
+    s.messenger_conversations()
+    s.messenger_messages("CONV1")
+    s.messenger_file("CONV1", "FILE1")
+    s.messenger_mark_read("CONV1", "MSG1")
+    unread = session({"conversationIds": []})     # unread alone wants an object back
+    unread.messenger_unread()
+    for sent in s._http.sent + unread._http.sent:
+        check("tm.t-bank-app.ru" in sent["url"], f"unexpected host: {sent['url']}")
+        leaked = [k for k in sent["params"]
+                  if k.lower() in ("sessionid", "deviceid", "olddeviceid",
+                                   "appname", "appversion", "origin", "wuid")]
+        check(not leaked,
+              f"{sent['url'].rsplit('/', 1)[-1]}: client context leaked to the "
+              f"messenger: {leaked}")
+        check("sid.authenticon-test" not in sent["url"],
+              f"the sessionid reached the URL itself: {sent['url']}")
+    # The cookie IS the credential on the messenger paths: the app sends no
+    # Authorization there in any captured request, and every read answers the same
+    # without one. issueTokenBySSO is excluded on purpose — it is the call that
+    # MINTS the cookie, so it cannot be carrying it.
+    reads = [x for x in s._http.sent + unread._http.sent
+             if "/messenger/" in x["url"] and x["method"] == "GET"]
+    check(len(reads) >= 4, f"expected the messenger reads, got {len(reads)}")
+    for sent in reads:
+        check("Authorization" not in sent["headers"],
+              f"a Bearer went to the messenger: {sent['url']}")
+        check("tmsgSessionID=jwt" in (sent["headers"].get("Cookie") or ""),
+              f"the tmsg cookie is missing, and it is the only credential: {sent['url']}")
+    # …and the arguments the app DOES send still get through.
+    msgs = [x for x in s._http.sent if x["url"].endswith("/messages")]
+    check(any(x["params"].get("direction") for x in msgs),
+          f"messages lost its direction param: {[x['params'] for x in msgs]}")
+    print("  messenger: no sessionid/deviceId in the query, direction preserved")
 
 
 def test_templates_stay_structurally_sane():
@@ -490,6 +542,7 @@ def main():
     test_form_endpoints_post_a_form_not_json()
     test_raw_endpoints_return_bytes_not_parsed_json()
     test_messenger_uses_its_own_cookie_and_vendor_accept()
+    test_the_messenger_host_never_sees_the_payment_key()
     test_bank_documents_asks_for_the_v2_record_shape()
     test_templates_stay_structurally_sane()
     test_a_lean_host_gets_only_what_the_app_sends_it()
