@@ -1,0 +1,655 @@
+{
+ "_note": "Structure and protocol values from captures-myt.xml; people, meeting subjects, office names and the car are synthetic. Regenerate: python3 tests/fixtures/regen_myt.py",
+ "_capture_indices": {
+  "schedule": 44,
+  "detail": 1062,
+  "detail_recurring": 1077,
+  "answer": 1097,
+  "answer_throttled": 1101,
+  "cancel": 1078,
+  "front_settings": 82,
+  "parking_buildings": 84,
+  "parking_last": 80,
+  "parking_recommended": 88,
+  "parking_book": 100,
+  "bookings": 101,
+  "auth_refresh": 28
+ },
+ "schedule": {
+  "method": "GET",
+  "path": "/api/Appointment/short",
+  "query": {
+   "End": "2026-08-06",
+   "Start": "2026-08-05"
+  },
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding",
+   "Connection"
+  ],
+  "status": 200,
+  "res_body": {
+   "appointments": [
+    {
+     "id": "00000000-0000-4000-8000-000000000001",
+     "start": "2026-08-05T11:00:00+00:00",
+     "end": "2026-08-05T12:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Organizer",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000002",
+     "start": "2026-08-05T14:00:00+00:00",
+     "end": "2026-08-05T15:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Accept",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000003",
+     "start": "2026-08-05T16:00:00+00:00",
+     "end": "2026-08-05T16:15:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Unknown",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000004",
+     "start": "2026-08-05T10:00:00+00:00",
+     "end": "2026-08-05T11:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Tentative",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000005",
+     "start": "2026-08-05T15:30:00+00:00",
+     "end": "2026-08-05T16:30:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Unknown",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000006",
+     "start": "2026-08-05T08:00:00+00:00",
+     "end": "2026-08-05T09:30:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Accept",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000007",
+     "start": "2026-08-05T13:30:00+00:00",
+     "end": "2026-08-05T14:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Organizer",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000008",
+     "start": "2026-08-05T12:00:00+00:00",
+     "end": "2026-08-05T15:00:00+00:00",
+     "title": null,
+     "currentUserMeetingResponseType": "Organizer",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000009",
+     "start": "2026-08-05T12:00:00+00:00",
+     "end": "2026-08-05T13:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Organizer",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000010",
+     "start": "2026-08-05T15:00:00+00:00",
+     "end": "2026-08-05T15:30:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Accept",
+     "isEnded": true
+    },
+    {
+     "id": "00000000-0000-4000-8000-000000000011",
+     "start": "2026-08-05T12:30:00+00:00",
+     "end": "2026-08-05T13:00:00+00:00",
+     "title": "Встреча",
+     "currentUserMeetingResponseType": "Accept",
+     "isEnded": true
+    }
+   ]
+  }
+ },
+ "detail": {
+  "method": "GET",
+  "path": "/api/Appointment/00000000-0000-4000-8000-000000000012",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "id": "00000000-0000-4000-8000-000000000012",
+   "parentAppointmentId": null,
+   "start": "2026-08-07T15:00:00+00:00",
+   "end": "2026-08-07T16:00:00+00:00",
+   "title": "Встреча",
+   "description": "<html xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:w=\"urn:schemas-microsoft-com:office:word\" xmlns:m=\"https://example.com/meeting\" xmlns=\"https://example.com/meeting\">\r\n<head>\r\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\r\n<meta name=\"Generator\" content=\"Microsoft Word 15 (filtered medium)\">\r\n<!--[if !mso]><style>v\\:* {behavior:url(#default#VML);}\r\no\\:* {behavior:url(#default#VML);}\r\nw\\:* {behavior:url(#default#VML);}\r\n.shape {behavior:url(#default#VML);}\r\n</style><![endif]--><style><!--\r\n/* Font Definitions */\r\n@font-face\r\n{font-family:\"Cambria Math\";\r\npanose-1:2 4 5 3 5 4 6 3 2 4;}\r\n@font-face\r\n{font-family:Calibri;\r\npanose-1:2 15 5 2 2 2 4 3 2 4;}\r\n/* Style Definitions */\r\np.MsoNormal, li.MsoNormal, div.MsoNormal\r\n{margin:0cm;\r\nfont-size:11.0pt;\r\nfont-family:\"Calibri\",sans-serif;\r\nmso-ligatures:standardcontextual;\r\nmso-fareast-language:EN-US;}\r\na:link, span.MsoHyperlink\r\n{mso-style-priority:99;\r\ncolor:#0563C1;\r\ntext-decoration:underline;}\r\nspan.EmailStyle18\r\n{mso-style-type:personal-compose;\r\nfont-family:\"Calibri\",sans-serif;\r\ncolor:windowtext;}\r\n.MsoChpDefault\r\n{mso-style-type:export-only;\r\nfont-size:10.0pt;\r\nmso-ligatures:none;}\r\n@page WordSection1\r\n{size:612.0pt 792.0pt;\r\nmargin:2.0cm 42.5pt 2.0cm 3.0cm;}\r\ndiv.WordSection1\r\n{page:WordSection1;}\r\n--></style><!--[if gte mso 9]><xml>\r\n<o:shapedefaults v:ext=\"edit\" spidmax=\"1026\" />\r\n</xml><![endif]--><!--[if gte mso 9]><xml>\r\n<o:shapelayout v:ext=\"edit\">\r\n<o:idmap v:ext=\"edit\" data=\"1\" />\r\n</o:shapelayout></xml><![endif]-->\r\n</head>\r\n<body lang=\"RU\" link=\"#0563C1\" vlink=\"#954F72\" style=\"word-wrap:break-word\">\r\n<div class=\"WordSection1\">\r\n<p class=\"MsoNormal\"><a href=\"https://example.com/meeting\">https://example.com/meeting</a><o:p></o:p></p>\r\n<p class=\"MsoNormal\">Текст повестки<o:p></o:p></p>\r\n<p class=\"MsoNormal\" align=\"center\" style=\"text-align:center\"><o:p>&nbsp;</o:p></p>\r\n<div class=\"MsoNormal\" align=\"center\" style=\"text-align:center\"><span style=\"mso-ligatures:none\">\r\n<hr size=\"0\" width=\"100%\" align=\"center\">\r\n</span></div>\r\n<p>Текст повестки<br>\r\n<a href=\"https://example.com/meeting\">https://example.com/meeting</a><o:p></o:p></p>\r\n<p class=\"MsoNormal\"><o:p>&nbsp;</o:p></p>\r\n</div>\r\n</body>\r\n</html>",
+   "participants": [
+    {
+     "id": 10001,
+     "participantId": 10002,
+     "email": "user3@example.com",
+     "fullName": "Сотрудник 4",
+     "legalPosition": "Должность",
+     "resourceUnit": "Подразделение",
+     "isOwner": true,
+     "isGroup": false,
+     "responseType": "Organizer"
+    },
+    {
+     "id": 10005,
+     "participantId": 10006,
+     "email": "user7@example.com",
+     "fullName": "Сотрудник 8",
+     "legalPosition": "Должность",
+     "resourceUnit": "Подразделение",
+     "isOwner": false,
+     "isGroup": false,
+     "responseType": "Accept"
+    }
+   ],
+   "roomBookings": [],
+   "onlineMeetingUrl": "https://example.com/meeting/00000000",
+   "offlineMeetingPlace": "",
+   "isCancelled": false,
+   "canBeModify": true,
+   "sensitivity": "Normal",
+   "currentUserMeetingResponseType": "Organizer",
+   "isRecurrent": false,
+   "recurrencePattern": null,
+   "visibility": "ParticipantsOnly"
+  }
+ },
+ "detail_recurring": {
+  "method": "GET",
+  "path": "/api/Appointment/00000000-0000-4000-8000-000000000008",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "id": "00000000-0000-4000-8000-000000000008",
+   "parentAppointmentId": null,
+   "start": "2020-12-07T12:00:00+00:00",
+   "end": "2020-12-07T15:00:00+00:00",
+   "title": null,
+   "description": "",
+   "participants": [
+    {
+     "id": 10001,
+     "participantId": 10009,
+     "email": "user3@example.com",
+     "fullName": "Сотрудник 4",
+     "legalPosition": "Должность",
+     "resourceUnit": "Подразделение",
+     "isOwner": true,
+     "isGroup": false,
+     "responseType": "Organizer"
+    }
+   ],
+   "roomBookings": [],
+   "onlineMeetingUrl": "",
+   "offlineMeetingPlace": "",
+   "isCancelled": false,
+   "canBeModify": true,
+   "sensitivity": "Normal",
+   "currentUserMeetingResponseType": "Organizer",
+   "isRecurrent": true,
+   "recurrencePattern": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+   "visibility": "ParticipantsOnly"
+  }
+ },
+ "answer": {
+  "method": "PUT",
+  "path": "/api/Appointment/answer",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Content-Type",
+   "Accept",
+   "Authorization",
+   "X-Requested-With",
+   "Priority",
+   "Accept-Encoding",
+   "Accept-Language",
+   "X-Userid",
+   "Content-Length",
+   "User-Agent",
+   "X-Auth-Provider"
+  ],
+  "status": 200,
+  "req_body": {
+   "withAnswer": false,
+   "internalAppointmentId": "00000000-0000-4000-8000-000000000013",
+   "answer": "",
+   "responseType": "Tentative"
+  }
+ },
+ "answer_throttled": {
+  "method": "PUT",
+  "path": "/api/Appointment/answer",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Content-Type",
+   "Accept",
+   "Authorization",
+   "X-Requested-With",
+   "Priority",
+   "Accept-Encoding",
+   "Accept-Language",
+   "X-Userid",
+   "Content-Length",
+   "User-Agent",
+   "X-Auth-Provider"
+  ],
+  "status": 400,
+  "req_body": {
+   "withAnswer": false,
+   "answer": "",
+   "responseType": "Accept",
+   "internalAppointmentId": "00000000-0000-4000-8000-000000000013"
+  },
+  "res_text": "Ответ на встречу можно дать раз в 5 секунд"
+ },
+ "cancel": {
+  "method": "PUT",
+  "path": "/api/Appointment/00000000-0000-4000-8000-000000000008/cancel",
+  "query": {
+   "DateTime": "2020-12-07T12:00:00+00:00"
+  },
+  "req_headers": [
+   "Host",
+   "Accept",
+   "Authorization",
+   "X-Requested-With",
+   "Priority",
+   "Accept-Encoding",
+   "Accept-Language",
+   "X-Userid",
+   "User-Agent",
+   "Content-Length",
+   "X-Auth-Provider"
+  ],
+  "status": 200
+ },
+ "front_settings": {
+  "method": "GET",
+  "path": "/workplacer/api/booking-front-settings",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "availableBookingPeriodDays": 9,
+   "availableParkingPeriodDays": 2,
+   "availableBusinessTripPeriodWeeks": 12,
+   "hasParkingTag": true,
+   "hasSearchField": false,
+   "userDefaultFloor": {
+    "buildingId": 74,
+    "floorId": 237
+   },
+   "openParkingAccessTime": "12:00:00",
+   "openBookingAccessTime": "12:00:00"
+  }
+ },
+ "parking_buildings": {
+  "method": "GET",
+  "path": "/workplacer/api/booking/parking/buildings",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": [
+   {
+    "id": 66,
+    "name": "Офис 66",
+    "sn": 1,
+    "utcOffset": "03:00:00"
+   },
+   {
+    "id": 2,
+    "name": "Офис 2",
+    "sn": 2,
+    "utcOffset": "03:00:00"
+   },
+   {
+    "id": 93,
+    "name": "Офис 93",
+    "sn": 4,
+    "utcOffset": "03:00:00"
+   },
+   {
+    "id": 153,
+    "name": "Офис 153",
+    "sn": 6,
+    "utcOffset": "03:00:00"
+   },
+   {
+    "id": 5,
+    "name": "Офис 5",
+    "sn": 10,
+    "utcOffset": "03:00:00"
+   }
+  ]
+ },
+ "parking_last": {
+  "method": "GET",
+  "path": "/workplacer/api/booking/parking/last",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "carNumber": "А000АА000",
+   "carModel": "Model",
+   "buildingId": 66,
+   "floorId": 252
+  }
+ },
+ "parking_recommended": {
+  "method": "GET",
+  "path": "/workplacer/api/booking/parking/recommended/2026-08-06",
+  "query": {
+   "buildingId": "66",
+   "floorId": "nil",
+   "resultCount": "10"
+  },
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "recommendedParkingPlaces": [
+    {
+     "parentElementId": 56183,
+     "parentElementName": "Парковка",
+     "mapElementId": 88255,
+     "mapElementName": "210",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": true
+    },
+    {
+     "parentElementId": 56184,
+     "parentElementName": "Парковка",
+     "mapElementId": 56258,
+     "mapElementName": "213",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": true
+    },
+    {
+     "parentElementId": 56183,
+     "parentElementName": "Парковка",
+     "mapElementId": 88256,
+     "mapElementName": "211",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56179,
+     "parentElementName": "Парковка",
+     "mapElementId": 56239,
+     "mapElementName": "194",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56179,
+     "parentElementName": "Парковка",
+     "mapElementId": 56251,
+     "mapElementName": "206",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56183,
+     "parentElementName": "Парковка",
+     "mapElementId": 56257,
+     "mapElementName": "212",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56183,
+     "parentElementName": "Парковка",
+     "mapElementId": 56259,
+     "mapElementName": "214",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56183,
+     "parentElementName": "Парковка",
+     "mapElementId": 56260,
+     "mapElementName": "216",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56184,
+     "parentElementName": "Парковка",
+     "mapElementId": 56261,
+     "mapElementName": "215",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    },
+    {
+     "parentElementId": 56184,
+     "parentElementName": "Парковка",
+     "mapElementId": 56262,
+     "mapElementName": "217",
+     "floorId": 252,
+     "floorName": "-2",
+     "isLastBooking": false
+    }
+   ],
+   "noRecommendedParkingPlacesReason": 0
+  }
+ },
+ "parking_book": {
+  "method": "POST",
+  "path": "/workplacer/api/booking/parking/56239",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Content-Type",
+   "Accept",
+   "Authorization",
+   "X-Requested-With",
+   "Priority",
+   "Accept-Encoding",
+   "Accept-Language",
+   "X-Userid",
+   "Content-Length",
+   "User-Agent",
+   "X-Auth-Provider"
+  ],
+  "status": 200,
+  "req_body": {
+   "date": "2026-08-06",
+   "carNumber": "А000АА000",
+   "carModel": "Model",
+   "buildingId": 66
+  }
+ },
+ "bookings": {
+  "method": "GET",
+  "path": "/workplacer/api/booking/2026-08-05/all-user-bookings",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Accept",
+   "X-Userid",
+   "Accept-Language",
+   "Authorization",
+   "X-Auth-Provider",
+   "X-Requested-With",
+   "User-Agent",
+   "Priority",
+   "Accept-Encoding"
+  ],
+  "status": 200,
+  "res_body": {
+   "workplaceBookings": [],
+   "fixedWorkplaces": [
+    {
+     "sharedWorkplaceConfig": {
+      "sharedDates": [],
+      "sharedDays": []
+     },
+     "workplaceId": 51378,
+     "position": "1",
+     "zoneId": 51377,
+     "zoneName": "39",
+     "zoneTypeId": 1,
+     "floorId": 237,
+     "floorName": "12",
+     "buildingId": 74,
+     "buildingName": "Офис"
+    }
+   ],
+   "parkingBookings": [
+    {
+     "date": "2026-08-06",
+     "parkingPlaceId": 56239,
+     "position": "194",
+     "zoneId": 56179,
+     "zoneName": "Парковка",
+     "floorId": 252,
+     "floorName": "-2",
+     "buildingId": 66,
+     "buildingName": "Офис",
+     "carNumber": "A000AA000",
+     "carModel": "Model",
+     "bookingQrCode": null
+    }
+   ],
+   "parkingFixedPlaces": [],
+   "lockerBookings": [],
+   "lockerBoxBookings": [],
+   "teamDays": []
+  }
+ },
+ "auth_refresh": {
+  "method": "POST",
+  "path": "/v3/auth/token",
+  "query": {},
+  "req_headers": [
+   "Host",
+   "Content-Type",
+   "X-User-Id",
+   "Accept",
+   "X-Requested-With",
+   "Priority",
+   "Accept-Language",
+   "X-Auth-Method-Version",
+   "Accept-Encoding",
+   "X-App-Code",
+   "Content-Length",
+   "User-Agent",
+   "X-Device-Id",
+   "X-App-Version",
+   "X-Platform",
+   "Connection"
+  ],
+  "status": 200,
+  "req_body_keys": [
+   "grantType",
+   "refreshToken"
+  ],
+  "res_body_keys": [
+   "accessToken",
+   "expiresIn",
+   "refreshToken",
+   "tokenType"
+  ]
+ }
+}

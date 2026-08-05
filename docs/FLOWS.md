@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **76 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **84 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -494,6 +494,64 @@ comes back empty.
 > **Buying is not supported.** `orders/pay` hands back a tpay webview URL that
 > cannot be completed headlessly, and creating an order needs passenger passport
 > data. This searches and compares.
+
+## 16. Work calendar — MyT (встречи, приглашения)
+
+**This is not the bank.** MyT is T-Bank's corporate app; the calendar lives behind
+`kairos.tbank.ru` with its own login. A bank session gives no access to it and
+`refresh_session()` cannot fix it. Check with `myt_status()`; if there is no
+session, the user runs `.venv/bin/python login_cli.py --myt <login>` in their own shell — the
+corporate password never goes through the agent, and there is deliberately no tool
+that takes it.
+
+1. `calendar_schedule(date_from, date_to)` — one request per day (that is how the
+   app itself reads it), max 14 days per call. Prints the full appointment id,
+   because every other call here needs it.
+2. `calendar_event(id)` — participants with their answers, the meeting URL, the
+   agenda (the Outlook HTML is stripped to text), recurrence rule.
+3. `calendar_respond(id, "пойду" | "не пойду" | "может быть")` — the answer is
+   visible to the organiser and overwrites the previous one, so confirm the
+   MEETING TITLE with the user first. Kairos throttles to one answer per 5
+   seconds; the tool waits and retries once by itself.
+4. `calendar_cancel(id, occurrence_start)` — organiser only, notifies everyone.
+
+Two traps, both from the capture:
+
+- **Times are true UTC** — confirmed against the live calendar, where an event
+  labelled `15:00+00:00` shows as 18:00 in the Moscow app. The tools convert to the
+  employee's timezone and name it in the header. The zone is resolved, not assumed:
+  workplacer lists 66 buildings across EIGHT offsets (+02:00…+10:00), so it comes
+  from the employee's own building, overridable with `TBANK_MYT_TZ`
+  (`+05:00` or `Asia/Yekaterinburg`), and falls back to Moscow only while saying so.
+  `occurrence_start` is the exception: it is an occurrence KEY, so it stays in the
+  original UTC form kairos returned.
+- **A recurring meeting resolves to the series master.** `calendar_event()` on an
+  occurrence in 2026 returns `start` in 2020 — the first meeting of the series. The
+  app cancels using that master start, gets HTTP 200, and the occurrence stays on
+  the schedule. So 200 is not proof here: `calendar_cancel` re-reads the day and
+  says what actually happened, and it refuses a recurring meeting without an
+  explicit `occurrence_start`.
+
+## 17. Office parking — MyT (бронь машиноместа)
+
+Same corporate session as the calendar, different host (`workplacer.tbank.ru`).
+
+1. `parking_places(date)` — empty date means TOMORROW, because booking opens ahead
+   and today is usually already gone. One call answers the whole question: the
+   booking window (`availableParkingPeriodDays`, 2 days in the capture), the hour
+   it opens (`openParkingAccessTime`), the buildings, the car from the last
+   booking, and the free places with their `place_id`.
+2. `parking_book(date, place_id)` — car number, model and building default to the
+   previous booking. The server answers **200 with an empty body**, so the tool
+   re-reads the bookings and prints the row that actually got saved. The car number
+   comes back transliterated (А000АА000 → A000AA000); that is how workplacer stores
+   it, not a bug.
+3. `office_bookings(date)` — parking, desk, fixed desk and lockers from that date
+   onward, not just on it.
+
+> **Cancelling a parking booking is not supported.** No such request appears in the
+> capture, and guessing a method and path against a live corporate service is
+> exactly how this repo has broken things before. Cancel in the MyT app.
 
 ## Notes
 
