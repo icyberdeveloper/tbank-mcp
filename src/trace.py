@@ -75,11 +75,8 @@ MAX_BYTES = int(os.environ.get("TBANK_TRACE_MAX_BYTES", 5 * 1024 * 1024))
 # because that name contains "account". Which meant the protection depended on which
 # argument the agent happened to use. `comment` is назначение платежа: an invoice
 # number, a contract, what was bought — the exact class `description` is opaque for.
-# `car_number` is the same class as an account number and matches no redaction rule:
-# a plate identifies a person outside this repo, in a place where the trace cannot
-# help — a parking barrier.
 _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
-                "save_to", "fields", "qr", "comment", "purpose", "car_number"}
+                "save_to", "fields", "qr", "comment", "purpose"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the
@@ -87,16 +84,7 @@ _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
 # returns «Отправлено в чат …: «<the whole message>»». For these the first line is
 # replaced by its length — unless the call FAILED, in which case the first line is an
 # error string from _err(), which is already redacted and is the thing worth keeping.
-# calendar_respond echoes the comment the user wrote for the organiser, and the
-# calendar tools print MEETING TITLES — written by colleagues, about work that is
-# not this repository's to record.
-_ECHOES_USER_TEXT = {"messenger_send", "messenger_messages", "messenger_conversations",
-                     "calendar_respond", "calendar_schedule", "calendar_event",
-                     "calendar_cancel",
-                     # myt_status печатает корпоративный ЛОГИН сотрудника, а «login»
-                     # уже объявлен чувствительным ключом в observability. Группировать
-                     # его голову всё равно нечем: там счётчик секунд, разный каждый раз.
-                     "myt_status", "myt_refresh_session"}
+_ECHOES_USER_TEXT = {"messenger_send", "messenger_messages", "messenger_conversations"}
 
 # Tools whose successful answer NAMES THE OTHER PARTY. «Отправлено 23 600 RUB →
 # ООО «Ромашка» со счёта #» — _RE_LONG_ID scrubs the digits and leaves the company,
@@ -119,16 +107,6 @@ _HEAD = 160
 # report GROUPS by that line, so a per-account id turns one recurring message into a
 # crowd of singletons. Short numbers («229 всего, показано 50») survive.
 _RE_LONG_ID = re.compile(r"\d{4,}")
-
-# Госномер: буква, 3 цифры, 2 буквы, регион. Ни один прогон цифр в нём не длиннее
-# трёх, поэтому _RE_LONG_ID его не видит, и redact_text тоже — там блобы, карты и
-# JWT. А `car_number` уже объявлен непрозрачным аргументом (см. _OPAQUE_ARGS), и
-# без этой строки та защита обходится сама собой: parking_book и office_bookings
-# печатают номер, ПРОЧИТАННЫЙ С СЕРВЕРА, — то есть он попадает в calls.jsonl даже
-# в тех вызовах, где агент номер вообще не передавал. Обе раскладки, потому что
-# workplacer принимает кириллицу и возвращает транслит.
-_RE_PLATE = re.compile(r"\b(?:[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}"
-                       r"|[ABEKMHOPCTYX]\d{3}[ABEKMHOPCTYX]{2})\d{2,3}\b")
 
 # One id per server process. An MCP server is started per agent session, so this is
 # the closest thing to "one agent's run" that exists without inventing a protocol.
@@ -246,7 +224,7 @@ def record(tool: str, args: dict, started: float, result, error: str | None) -> 
                 head = "<успех, получатель не записывается>"
             else:
                 first = redact_text(text.strip().splitlines()[0])
-                head = _RE_LONG_ID.sub("#", _RE_PLATE.sub("<госномер>", first))[:_HEAD]
+                head = _RE_LONG_ID.sub("#", first)[:_HEAD]
         safe, digest = _short_args(args)
         _append({
             "ts": round(started, 3), "run": RUN_ID, "seq": _seq, "tool": tool,

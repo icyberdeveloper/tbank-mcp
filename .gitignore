@@ -13,11 +13,6 @@ cancel-grossary.xml
 delete-order.xml
 *-grossary.xml
 session.json
-# Корпоративная сессия MyT — тот же живой accessToken+refreshToken, и
-# TBANK_MYT_SESSION умеет положить её сюда, ровно как env-переменные ниже для
-# логов. Якорь на корень обязателен: голое `myt.json` заодно выкинуло бы
-# tests/fixtures/myt.json, который коммитить как раз нужно.
-/myt.json
 *.har
 
 # Runtime logs. They live in ~/.local/share/tbank-mcp/ by default, but
