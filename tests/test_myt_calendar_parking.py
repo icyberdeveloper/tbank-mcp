@@ -619,6 +619,79 @@ def check_meeting_times_are_converted_to_the_employee_timezone():
     print("  время: UTC → пояс сотрудника, подпись в шапке, ключ отмены не тронут")
 
 
+def check_refresh_tool_does_the_capture_exchange():
+    """myt_refresh_session — тот самый обмен из захвата, запись #28.
+
+    Тело и заголовки сверяются с фикстурой: это единственный способ убедиться, что
+    мы шлём grantType=refresh_token, а не придуманный /refresh или form-urlencoded."""
+    e = fx("auth_refresh")
+    s = with_session(session({("POST", "/v3/auth/token"): FakeResp(200, {
+        "accessToken": "новый", "refreshToken": "тот-же", "expiresIn": 3600,
+        "tokenType": "Bearer"})}))
+    s.refresh_token = "тот-же"
+    out = json.loads(server.myt_refresh_session())
+
+    call = s._http.calls[0]
+    check(call["method"] == e["method"] and call["url"].endswith(e["path"]),
+          f"обмен идёт не туда: {call['method']} {call['url']}, в захвате {e['method']} {e['path']}")
+    check(sorted(call["body"]) == e["req_body_keys"],
+          f"состав тела {sorted(call['body'])} != захват {e['req_body_keys']}")
+    check(call["body"]["grantType"] == "refresh_token",
+          f"grantType должен быть refresh_token: {call['body'].get('grantType')}")
+    for h in ("X-User-Id", "X-Device-Id", "X-App-Version", "X-Platform",
+              "X-App-Code", "X-Auth-Method-Version"):
+        check(h in call["headers"], f"заголовок {h} есть в захвате, а мы его не шлём")
+
+    check(out["access_токен_сменился"] is True, f"access обязан обновиться: {out}")
+    check(out["refresh_токен_ротирован"] is False,
+          "этот сервер refresh-токен НЕ ротирует — если начал, это надо заметить")
+    check(out["живёт_секунд"] == 3600, f"expiresIn берётся из ответа: {out}")
+
+    # Мёртвый refresh — не «обменяно», а честный MYT SESSION EXPIRED.
+    s2 = with_session(session({("POST", "/v3/auth/token"): FakeResp(
+        400, {"error": {"code": "invalid_grant", "message": "no"}})}))
+    out2 = server.myt_refresh_session()
+    check("MYT SESSION EXPIRED" in out2, f"мёртвый refresh должен так и называться: {out2}")
+    check("login_cli.py --myt" in out2, f"и назвать единственный путь починки: {out2}")
+    print("  refresh: обмен из захвата #28, токен не ротируется, мёртвый — не скрыт")
+
+
+def check_status_verifies_instead_of_doing_arithmetic():
+    """Ноль в остатке — не «мертва», и статус обязан это различать запросом.
+
+    Именно на этом споткнулся живой агент: увидел «токен_живёт_ещё_секунд: 0» у
+    совершенно рабочей сессии, решил, что её надо обновить, и пошёл искать тул
+    рефреша, которого нет и не требуется."""
+    s = with_session(session({
+        ("POST", "/v3/auth/token"): FakeResp(200, {
+            "accessToken": "новый", "refreshToken": "новый-refresh",
+            "expiresIn": 3600, "tokenType": "Bearer"}),
+        ("GET", "/api/Appointment/short"): resp_of("schedule"),
+    }))
+    s._minted_at = 1.0                      # протух по арифметике
+    out = json.loads(server.myt_status())
+    check(out["статус"].startswith("жива"), f"сессия рабочая — статус должен это сказать: {out}")
+    check(out["токен_обновлён_этим_вызовом"] is True,
+          "просроченный по времени токен должен быть переминчен прямо здесь")
+    check(out["токен_живёт_ещё_секунд"] > 3000,
+          f"после переминта остаток обязан вырасти: {out['токен_живёт_ещё_секунд']}")
+    check("вручную не нужно" in out["продление"],
+          "ответ должен снимать сам вопрос про ручное обновление")
+    check(any("/api/Appointment/short" in c["url"] for c in s._http.calls),
+          "статус без живого запроса — это гадание по локальным часам")
+
+    # А мёртвую сессию нельзя объявлять живой.
+    s2 = with_session(session({
+        ("POST", "/v3/auth/token"): FakeResp(400, {"error": {"code": "invalid_grant",
+                                                             "message": "no"}}),
+    }))
+    s2._minted_at = 1.0
+    out2 = server.myt_status()
+    check("MYT SESSION EXPIRED" in out2, f"мёртвая сессия должна называться мёртвой: {out2}")
+    check("login_cli.py --myt" in out2, f"и назвать способ починки: {out2}")
+    print("  статус: проверяет запросом, сам продлевает, мёртвую не выдаёт за живую")
+
+
 def check_no_session_does_not_pretend():
     server._myt_session = None
     saved, server._MYT_FILE = server._MYT_FILE, os.path.join(HERE, "no-such-myt.json")
@@ -681,6 +754,8 @@ def main():
                check_event_keeps_what_matters,
                check_timezone_is_resolved_not_assumed,
                check_meeting_times_are_converted_to_the_employee_timezone,
+               check_refresh_tool_does_the_capture_exchange,
+               check_status_verifies_instead_of_doing_arithmetic,
                check_no_session_does_not_pretend,
                check_fixture_still_matches_capture):
         fn()

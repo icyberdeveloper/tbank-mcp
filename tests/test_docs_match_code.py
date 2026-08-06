@@ -221,6 +221,7 @@ def test_every_tool_declares_what_it_does_to_the_world():
         "calendar_respond",                                  # answer everyone on the meeting sees
         "calendar_cancel",                                   # cancels a meeting for its participants
         "parking_book",                                      # takes a parking place for a day
+        "myt_refresh_session",                               # rotates a live credential
     }
 
     for name, tool in sorted(tools.items()):

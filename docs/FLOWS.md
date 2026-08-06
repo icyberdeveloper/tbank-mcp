@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **84 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **85 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -500,9 +500,18 @@ comes back empty.
 **This is not the bank.** MyT is T-Bank's corporate app; the calendar lives behind
 `kairos.tbank.ru` with its own login. A bank session gives no access to it and
 `refresh_session()` cannot fix it. Check with `myt_status()`; if there is no
-session, the user runs `.venv/bin/python login_cli.py --myt <login>` in their own shell — the
-corporate password never goes through the agent, and there is deliberately no tool
-that takes it.
+session, the user runs `.venv/bin/python login_cli.py --myt <login>` in their own
+shell — the corporate password never goes through the agent, and there is
+deliberately no tool that takes it.
+
+The token exchange itself IS exposed. `POST magentbep.tcsbank.ru/v3/auth/token` with
+`grantType: refresh_token` is what keeps the session alive, and it runs by itself
+before every request (120 s before expiry) — so a zero countdown in `myt_status()`
+means «an hour passed», not «dead». `myt_refresh_session()` forces that exchange now:
+useful to test the REFRESH token specifically (an access token can be alive while the
+refresh one has been revoked) or to renew before a long chain of calls. Unlike the
+bank's, this refresh token does NOT rotate on use — the server returns the same one,
+so calling it repeatedly burns nothing. Only a dead refresh token needs the CLI.
 
 1. `calendar_schedule(date_from, date_to)` — one request per day (that is how the
    app itself reads it), max 14 days per call. Prints the full appointment id,

@@ -4,7 +4,7 @@
 
 ## Features
 
-- **84 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **85 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers (including payment by bank requisites, from a
   scanned invoice QR), messenger, investments, plus the corporate MyT app — work
   calendar and office parking
@@ -178,7 +178,8 @@ Russian and so is the person reading the answer.
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Work calendar** (MyT) | `calendar_schedule`, `calendar_event`, `calendar_respond`, `calendar_cancel` |
-| **Office parking** (MyT) | `parking_places`, `parking_book`, `office_bookings`, `myt_status` |
+| **Office parking** (MyT) | `parking_places`, `parking_book`, `office_bookings` |
+| **MyT session** | `myt_status`, `myt_refresh_session` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
@@ -315,7 +316,7 @@ present the tests additionally check the fixtures have not drifted from it.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
   rather than defaulting to anything. Three kinds: 64 are `readOnlyHint: true` and
-  may run without a prompt; 15 write something that costs nothing (a cart, a
+  may run without a prompt; 16 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file, a meeting reply) and are marked
   `destructiveHint: false`; 5 debit an account — `transfer`, `transfer_requisites`,
   `grocery_checkout`, `ticket_pay`, `pay_bill` — and are the only ones carrying
