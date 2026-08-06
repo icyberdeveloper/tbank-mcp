@@ -96,7 +96,7 @@ _ECHOES_USER_TEXT = {"messenger_send", "messenger_messages", "messenger_conversa
                      # myt_status печатает корпоративный ЛОГИН сотрудника, а «login»
                      # уже объявлен чувствительным ключом в observability. Группировать
                      # его голову всё равно нечем: там счётчик секунд, разный каждый раз.
-                     "myt_status"}
+                     "myt_status", "myt_refresh_session"}
 
 # Tools whose successful answer NAMES THE OTHER PARTY. «Отправлено 23 600 RUB →
 # ООО «Ромашка» со счёта #» — _RE_LONG_ID scrubs the digits and leaves the company,
