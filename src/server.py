@@ -1105,26 +1105,41 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
                 short = float(min_sum) - float(cart_sum or 0)
                 totals += (f" | минимальный заказ {min_sum} ₽"
                            + (f" — не хватает {short:.0f} ₽" if short > 0 else " ✓"))
-            totals += "\n"
+            # Point at the quote rather than at this number. Weight goods (бананы 0.8,
+            # виноград 0.54) are repriced by the backend during delivery, so this total
+            # is not what gets charged — and expected_sum is compared to the kopeck.
+            # Naming the next call here is what stops the sum being re-typed from the
+            # screen, which is how 3700.63 became 3700 and cost two checkout rounds.
+            totals += (f"\n→ дальше: grocery_checkout(app_id={app_id}, point_id={point_id}, "
+                       f"dry_run=True) — он вернёт финальную сумму (весовые товары "
+                       f"пересчитываются при оформлении доставки), её и подтверждай.\n")
         return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{totals}{body}"
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
 async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = False,
-                           account_id: str = "", expected_sum: float = 0) -> str:
+                           account_id: str = "", expected_sum: float = 0,
+                           dry_run: bool = False) -> str:
     """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
+
+    dry_run=True — ПРЕДПРОСМОТР: доводит до доставки и возвращает финальную сумму,
+    НЕ создавая заказ и НЕ списывая деньги. Вызывай его ВСЕГДА перед оплатой: только
+    бэкенд знает, во что пересчитаются весовые товары, и только магазин знает, отдаёт
+    ли он сейчас слот доставки. Сумму из предпросмотра показывай пользователю и её же
+    передавай в expected_sum — тогда оплата проходит с первой попытки.
 
     СЧЁТ СПИСАНИЯ по умолчанию — тот, которым пользователь последний раз платил
     за продукты В ПРИЛОЖЕНИИ (банк отдаёт его сам), а НЕ первый счёт с балансом.
     Хочешь другой — передай account_id из list_accounts(). Списанный счёт печатается
     в ответе.
 
-    expected_sum — сумма, которую подтвердил пользователь. Передавай её ВСЕГДА:
-    после подтверждения банк дважды пересчитывает корзину (веб-корзина, затем
-    доставка — весовые товары меняются), и без этого параметра оплатится новая
-    сумма молча. Расхождение больше 0.01 ₽ отменяет чекаут ДО создания заказа.
+    expected_sum — сумма, которую подтвердил пользователь. Передавай её ВСЕГДА и
+    РОВНО как есть, до копейки (3700.63, не 3700): сравнение точное, допуск 0.01 ₽.
+    Без неё оплатится молча любая новая сумма — банк дважды пересчитывает корзину
+    уже ПОСЛЕ подтверждения (веб-корзина, затем доставка). Расхождение отменяет
+    чекаут ДО создания заказа.
 
     При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
     сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
@@ -1137,14 +1152,42 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
     проверь `python -m playwright install chromium` (в окружении MCP)."""
     try:
         return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force,
-                                       account_id, expected_sum)
+                                       account_id, expected_sum, dry_run)
     except Exception as e:
         # errors before an attempt was created (NO_SESSION, NO_STORE_CONTEXT, etc.)
         return _err(e)
 
 
+def _format_quote(app_id: str, point_id: str, q: dict) -> str:
+    """Render a dry-run quote so the next two steps need no arithmetic: the number to
+    read out to the user, and the exact call to make after they say yes."""
+    total = q.get("sum")
+    pre = q.get("pre_delivery_sum")
+    lines = [f"[store appId={app_id} pointId={point_id}] ПРЕДПРОСМОТР — заказ НЕ создан, "
+             f"деньги НЕ списаны.",
+             f"Доставка: магазин оформил (попыток: {q.get('delivery_tries', 1)})",
+             f"К ОПЛАТЕ: {total} ₽  ← финальная сумма банка"]
+    try:
+        if pre is not None and abs(float(pre) - float(total)) > 0.01:
+            diff = float(total) - float(pre)
+            lines.append(f"Корзина до доставки была {pre} ₽ — весовые товары пересчитаны "
+                         f"при оформлении ({diff:+.2f} ₽)")
+    except (TypeError, ValueError):
+        pass
+    lines.append(f"Позиций: {q.get('item_count')}")
+    if q.get("pre_item_count") is not None and q.get("item_count") is not None \
+            and q["item_count"] < q["pre_item_count"]:
+        lines.append(f"⚠ позиций стало меньше ({q['pre_item_count']} → {q['item_count']}) — "
+                     f"часть товаров отвалилась при оформлении, покажи корзину заново")
+    lines.append(f"Дальше: назови пользователю ИМЕННО {total} ₽, и после явного «да» — "
+                 f"grocery_checkout(app_id={app_id}, point_id={point_id}, "
+                 f"expected_sum={total})")
+    return "\n".join(lines)
+
+
 def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
-                         account_id: str = "", expected_sum: float = 0) -> str:
+                         account_id: str = "", expected_sum: float = 0,
+                         dry_run: bool = False) -> str:
     """Sync checkout body — runs in a worker thread (no running event loop there, so
     Playwright's sync API works; calling it directly in FastMCP's loop raises
     "It looks like you are using Playwright Sync API inside the asyncio loop")."""
@@ -1170,7 +1213,30 @@ def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
                     f"attempt={last.get('attempt_id')}, order={last.get('order_id') or '-'}). Заказ мог быть "
                     f"создан/оплачен — сначала grocery_attempts() и проверь заказ в приложении. "
                     f"Принудительный повтор (force=True) — только если пользователь подтвердил отсутствие заказа.")
-        # 3. new journal attempt + run the web checkout. checkout resolves the payment
+        # 3. A quote posts nothing, so it gets NO journal attempt. Journal attempts are
+        #    keyed by cart hash and the NEWEST one decides whether a retry is blocked —
+        #    recording a preview here would lift a block that a real unresolved attempt
+        #    put in place. It still gets a trace id, so diagnostics() can follow it.
+        if dry_run:
+            import uuid as _uuid
+            trace_id = _uuid.uuid4().hex[:12]
+            obs.emit("checkout_quote_start", attempt_id=trace_id, app_id=app_id,
+                     point_id=point_id, amount=amount, item_count=len(goods))
+            try:
+                # trace_id, not None: checkout() writes NOTHING to the journal before
+                # the dry-run return (the first _safe_record is past it), so this only
+                # tags the observability events — and untagged events are unfollowable.
+                q = s.grocery_checkout(app_id=app_id, point_id=point_id, sum_val=amount,
+                                       attempt_id=trace_id, account=account_id,
+                                       expected_sum=0, dry_run=True)
+            except CheckoutError as e:
+                obs.emit("checkout_quote", attempt_id=trace_id, result="failed",
+                         error=str(e)[:160], blame="client")
+                return (f"[store appId={app_id} pointId={point_id}] ПРЕДПРОСМОТР не удался "
+                        f"(заказ НЕ создавался): {_err(e)}")
+            return _format_quote(app_id, point_id, q)
+
+        # 4. new journal attempt + run the web checkout. checkout resolves the payment
         #    agreement from user/payment/account/last (capture-verified) + customer email
         #    from get-customer-information. #8/#9
         attempt_id = journal.new_attempt(app_id, point_id, chash, amount)

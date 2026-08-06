@@ -92,8 +92,11 @@ You normally just call a read tool; the above runs under the hood. Call
 7. POST payment_gate_pay **immediately** (before auto-cancel) with
    `amount.currencyCode=643` (RUB). Returns `{paymentId, stage:{status:"SUCCESS"}}`.
 
-> **Out-of-stock items** block order/create (code=211). Remove unavailable goods
-> before ordering. Orders auto-cancel if not paid quickly — pay immediately.
+> **Out-of-stock items** block the order — remove unavailable goods before ordering.
+> `code=211` has been seen on the deliveries step (HTTP 200 + the store's own code),
+> but its meaning is NOT capture-verified: there is no error response for grocery in
+> captures.xml at all. Treat it as "the store refused", report it as that, and do not
+> tell the user what the code means. Orders auto-cancel if not paid quickly — pay immediately.
 > `grocery_order_create`, `checkout_process_order`, `payment_gate_pay` move real
 > money — review the body before calling.
 
@@ -502,6 +505,18 @@ comes back empty.
 - On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
   no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
   (login + OTP + password).
+- `grocery_checkout(dry_run=True)` quotes the order — it runs the cart + delivery
+  steps and returns the sum that would actually be charged, creating nothing. Use it
+  before every payment: the cart total is NOT the charge (weight goods are repriced
+  by the backend during delivery), and a store that refuses delivery surfaces here
+  rather than after the user has confirmed. `expected_sum` is then a number the agent
+  copies rather than one it computes. A quote writes no journal attempt (attempts are
+  keyed by cart hash and the newest decides whether a retry is blocked), and a cart
+  already held for reconciliation is not quoted either.
+- A deliveries step the store refuses (HTTP 200 + its own code, a 5xx, or a dropped
+  fetch) is retried inside `grocery_checkout` — nothing is posted at that point and
+  the same call seconds later routinely works. A 4xx is not retried. The error names
+  the blame and whether a retry can help.
 - `grocery_checkout` contract is verified against captures.xml: agreement from
   `user/payment/account/last`, clientEmail from `get-customer-information`,
   post-delivery sum from deliveries `payload.cartPrice`, and no blind sleep (it polls

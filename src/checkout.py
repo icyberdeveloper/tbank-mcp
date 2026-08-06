@@ -77,6 +77,68 @@ def _envelope_error(body) -> tuple[str, str]:
 CART_READY_TIMEOUT_MS = 20000
 CART_POLL_INTERVAL_MS = 500
 
+# A deliveries call the STORE rejects — HTTP 200 with an app error code, a 5xx, or a
+# fetch that never landed — is not a checkout bug, and at that point nothing has been
+# posted. The same request seconds later routinely succeeds, so retry it here instead
+# of spending a whole user-visible attempt on a blip. A 4xx is NOT retried: that
+# request is wrong and repeating it only costs the user time.
+DELIVERY_TRIES = 3
+DELIVERY_RETRY_DELAY_MS = 4000
+
+
+def _deliveries_once(page, app_id: str, point_id: str) -> tuple[dict, dict, str, str, int]:
+    """POST deliveries once. Returns (raw, body, app_code, error_message, duration_ms).
+
+    The app code and the error message are read from BOTH shapes this API uses: the
+    flat errorCode/errorMessage pair and the {"status":"Error","payload":{…}} envelope
+    — a rejection that arrives in the envelope reads as HTTP 200 and, unchecked, used
+    to let the checkout proceed to pay for a delivery the store had refused."""
+    t0 = time.time()
+    raw = page.evaluate(_js("""
+        return await _f('/api/supreme/lifestyle/api/grocery/deliveries?' + a.qs
+            + '&appId=' + a.appId + '&pointId=' + a.pointId, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({serviceKeys: ["FEE", "DYNAMIC_CASHBACK", "PICKING_CART_SUM"]})
+        }, a.ms);
+    """), {"appId": app_id, "pointId": point_id, "qs": GROCERY_WEB_QS,
+           "ms": FETCH_TIMEOUT_MS})
+    dur = int((time.time() - t0) * 1000)
+    body = raw.get("body", {}) if isinstance(raw, dict) else {}
+    code = err = ""
+    if isinstance(body, dict):
+        err = str(body.get("errorMessage") or "")
+        code = str(body.get("errorCode") or body.get("resultCode") or body.get("code") or "")
+    env_code, env_msg = _envelope_error(body)
+    return raw, body, (code or env_code), (err or env_msg), dur
+
+
+def _delivery_error_text(deliv: dict, code: str, err: str, blame: str, tries: int) -> str:
+    """Name who failed and what to do about it.
+
+    The old message was `deliveries failed (http=200, code=211, err=…)` and nothing
+    else, so the agent had to infer from diagnostics() whose fault it was — and an
+    agent that cannot tell "the store is down" from "your request is wrong" either
+    retries something that will never work or gives up on something that would have
+    worked on the next try."""
+    head = (f"доставка не оформлена: http={deliv.get('status')}, code={code or '—'}"
+            + (f", «{_cut(err, 120)}»" if err else "")
+            + f" (попыток: {tries})")
+    tail = {
+        "app": "Ответил сам магазин — HTTP 200 плюс его собственный код ошибки, то есть "
+               "отказ пришёл с его стороны, а не от банка и не из-за формата запроса. "
+               "Заказ НЕ создан, деньги не списаны, корзина цела. По порядку: "
+               "(1) проверь состав корзины — товар, которого нет в наличии, магазин "
+               "отклоняет так же; (2) если с товарами всё в порядке — повтори тот же "
+               "вызов через 5–10 минут; (3) если повторяется — предложи другой магазин. "
+               "Что именно значит код магазина, в контракте НЕ зафиксировано (в захватах "
+               "его нет) — не объясняй его пользователю догадкой.",
+        "backend": "Ошибка сервера (5xx). Заказ НЕ создан — повтори через несколько минут.",
+        "network": "Запрос доставки не дошёл или не вернулся. Заказ НЕ создан, повтор безопасен.",
+        "client": "Запрос отвергнут как неверный (4xx) — повтор не поможет. Проверь, что "
+                  "app_id/point_id те же, что у корзины, и что сессия жива.",
+    }.get(blame, "Заказ НЕ создан, повтор безопасен.")
+    return head + ". " + tail
+
 
 def _poll_until_ready(probe, ready, *, timeout_ms: int, interval_ms: int):
     """Call `probe` until `ready(result)`, then return (result, elapsed_ms).
@@ -173,7 +235,7 @@ def _safe_record(attempt_id, step, status, **fields):
 def checkout(session, app_id: str = "", point_id: str = "",
              client_email: str = "", sum_val: float = 0,
              account: str = "", attempt_id: str | None = None,
-             expected_sum: float = 0,
+             expected_sum: float = 0, dry_run: bool = False,
              cart_ready_timeout_ms: int = CART_READY_TIMEOUT_MS) -> dict:
     """Run the grocery checkout via headless browser. `session` is a MobileSession
     with a valid access_token + cookies (from login/silent_relogin).
@@ -196,8 +258,15 @@ def checkout(session, app_id: str = "", point_id: str = "",
       - post-delivery sum = deliveries response payload.cartPrice (weight items recompute)
     `attempt_id` = journal attempt id (created by the caller); steps are recorded.
 
-    Returns {order_id, payment_id, status, sum} or raises CheckoutError (safe retry)
-    / CheckoutUnknown (retry blocked)."""
+    `dry_run` stops after the delivery step and returns the quote — the post-delivery
+    sum the bank would charge — without creating or paying for anything. It exists
+    because the caller cannot compute that number: only the backend knows what the
+    weight goods reprice to, and only the store knows whether it is serving delivery
+    slots at all. Quoting first turns both into a free answer instead of a burnt
+    checkout attempt.
+
+    Returns {order_id, payment_id, status, sum}, or the quote dict when `dry_run`, or
+    raises CheckoutError (safe retry) / CheckoutUnknown (retry blocked)."""
     from playwright.sync_api import sync_playwright
 
     if not app_id:
@@ -299,36 +368,33 @@ def checkout(session, app_id: str = "", point_id: str = "",
 
             # 3. POST deliveries (appId + pointId) → CHECK status. Fire-and-forget
             # was the old bug: a delivery failure silently led to a stale sum + bad order.
-            _t0 = time.time()
-            deliv = page.evaluate(_js("""
-                return await _f('/api/supreme/lifestyle/api/grocery/deliveries?' + a.qs
-                    + '&appId=' + a.appId + '&pointId=' + a.pointId, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({serviceKeys: ["FEE", "DYNAMIC_CASHBACK", "PICKING_CART_SUM"]})
-                }, a.ms);
-            """), {"appId": app_id, "pointId": point_id, "qs": GROCERY_WEB_QS,
-                   "ms": FETCH_TIMEOUT_MS})
-            _dur = int((time.time() - _t0) * 1000)
-            dbody = deliv.get("body", {}) if isinstance(deliv, dict) else {}
-            d_err = ""
-            d_code = ""
-            if isinstance(dbody, dict):
-                d_err = str(dbody.get("errorMessage") or "")
-                d_code = str(dbody.get("errorCode") or dbody.get("resultCode") or dbody.get("code") or "")
-            # The top-level checks above miss the {"status":"Error","payload":{...}}
-            # envelope the lifestyle API also uses — check it too, or a rejected
-            # delivery reads as success and checkout proceeds to pay for it.
-            env_code, env_msg = _envelope_error(dbody)
-            d_err = d_err or env_msg
-            d_code = d_code or env_code
-            obs.emit("delivery", attempt_id=attempt_id, app_id=app_id, point_id=point_id,
-                     item_count=pre_count, http_status=deliv.get("status"), app_code=d_code,
-                     duration_ms=_dur, blame=obs.blame_of(deliv.get("status"), d_code))
-            if deliv.get("status", 0) >= 400 or d_err:
-                raise CheckoutError(
-                    f"deliveries failed (http={deliv.get('status')}, "
-                    f"code={d_code}, err={_cut(d_err, 120)})")
-            _log(f"[checkout] deliveries ok (http={deliv.get('status')})")
+            # Retried while the failure is one a retry can fix — see DELIVERY_TRIES.
+            deliv: dict = {}
+            dbody: dict = {}
+            d_code = d_err = d_blame = ""
+            d_failed = False
+            tries = 0
+            while tries < DELIVERY_TRIES:
+                tries += 1
+                deliv, dbody, d_code, d_err, _dur = _deliveries_once(page, app_id, point_id)
+                d_blame = obs.blame_of(deliv.get("status"), d_code)
+                # status 0 is `_f`'s "the fetch never landed" (aborted or network
+                # error), and it used to pass this check: not >= 400, no error body.
+                # A deliveries call that never happened left the slots uninitialised
+                # and the checkout went on to create an order anyway.
+                d_http = deliv.get("status") or 0
+                d_failed = d_http == 0 or d_http >= 400 or bool(d_err)
+                obs.emit("delivery", attempt_id=attempt_id, app_id=app_id, point_id=point_id,
+                         item_count=pre_count, http_status=deliv.get("status"), app_code=d_code,
+                         duration_ms=_dur, try_no=tries, blame=d_blame)
+                if not d_failed or d_blame == "client" or tries == DELIVERY_TRIES:
+                    break
+                _log(f"[checkout] deliveries rejected (try {tries}/{DELIVERY_TRIES}, "
+                     f"code={d_code}, blame={d_blame}) — retrying in {DELIVERY_RETRY_DELAY_MS} ms")
+                time.sleep(DELIVERY_RETRY_DELAY_MS / 1000.0)
+            if d_failed:
+                raise CheckoutError(_delivery_error_text(deliv, d_code, d_err, d_blame, tries))
+            _log(f"[checkout] deliveries ok (http={deliv.get('status')}, try {tries})")
 
             # 4. post-delivery: the deliveries RESPONSE carries payload.cartPrice (weight
             # items recompute here — e.g. 1630.00 → 1600.20). Use it as the authoritative
@@ -353,6 +419,22 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 # items dropped after recalculation (out of stock?) — surface it
                 _log(f"[checkout] WARN: item count changed {pre_count} → {len(post_goods)} after delivery")
 
+            # A quote, not a purchase. Everything above either reads or recomputes;
+            # the two calls that commit money are still below. Stopping here lets the
+            # caller show the user the number the bank will ACTUALLY charge — this
+            # one, not the cart's — and come back with it as expected_sum. Both ways a
+            # first attempt burns surface here, before the user is asked anything: a
+            # sum that moved under the weight goods, and a store that is not serving
+            # delivery slots.
+            if dry_run:
+                obs.emit("checkout_quote", attempt_id=attempt_id, app_id=app_id,
+                         point_id=point_id, amount=actual_sum, item_count=len(post_goods))
+                _log(f"[checkout] dry run → quote {actual_sum}; nothing was posted")
+                return {"dry_run": True, "status": "QUOTE", "sum": actual_sum,
+                        "pre_delivery_sum": pre_sum, "item_count": len(post_goods),
+                        "pre_item_count": pre_count, "delivery_point_id": sel_point,
+                        "delivery_tries": tries}
+
             # actual_sum is final here, and it was decided by the backend — twice —
             # AFTER the user approved a number. Refuse now, while refusing is still
             # free: nothing has been posted, so this stays a CheckoutError (safe to
@@ -361,7 +443,10 @@ def checkout(session, app_id: str = "", point_id: str = "",
                 raise CheckoutError(
                     f"сумма изменилась после подтверждения: подтверждено "
                     f"{expected_sum} ₽, к оплате {actual_sum} ₽. Заказ НЕ создан. "
-                    f"Покажи корзину заново (grocery_cart) и подтверди новую сумму.")
+                    f"Если пользователь подтвердит новую сумму — повтори с "
+                    f"expected_sum={actual_sum} (ровно это число, до копейки). "
+                    f"Если сумму никто не подтверждал — покажи корзину заново "
+                    f"(grocery_cart) и спроси.")
             _safe_record(attempt_id, "delivery", "delivery_ready", amount=actual_sum)
 
             # 5. resolve the payment agreement + customer email from the capture-
