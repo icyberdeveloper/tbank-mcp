@@ -107,7 +107,8 @@ def login_bank(phone):
     # Check if we already have a session (OTP was enough)
     if s.access_token:
         srv._session = s
-        srv._save_session(s)
+        if not srv._save_session(s):
+            return _save_failed()
         print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
         _success_bank()
         return 0
@@ -134,10 +135,18 @@ def login_bank(phone):
             return 1
 
     srv._session = s
-    srv._save_session(s)
+    if not srv._save_session(s):
+        return _save_failed()
     print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
     _success_bank()
     return 0
+
+
+def _save_failed():
+    """Вход состоялся, файла нет. Это провал: SMS уже потрачена, а MCP поднимет пустоту."""
+    print(f"\n✗ Вход прошёл, но сессию НЕ удалось сохранить в {srv._SESSION_FILE}.")
+    print(f"  Проверь права на {os.path.dirname(srv._SESSION_FILE)} и повтори вход.")
+    return 1
 
 
 def _success_bank():
