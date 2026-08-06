@@ -56,16 +56,19 @@ USAGE = """Usage:
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if len(args) != 1:
+    # Ровно один позиционный аргумент и никаких флагов. Отбрасывать флаги молча
+    # нельзя: пока в скрипте жил `--myt`, фильтр стоял в паре с отказом на
+    # неизвестный флаг, а при выносе MyT отказ ушёл, фильтр остался — и команда
+    # из истории шелла запускала БАНКОВСКИЙ логин с корпоративным логином вместо
+    # телефона, без единого слова.
+    args = sys.argv[1:]
+    if len(args) != 1 or args[0].startswith("-"):
         print(USAGE)
         return 1
-    return login_bank(args[0])
+    return login(args[0])
 
 
-# ── банк ────────────────────────────────────────────────────────────────────
-
-def login_bank(phone):
+def login(phone):
     s = srv._blank_session()
 
     # Step 1: login(phone) → SMS OTP
@@ -94,7 +97,7 @@ def login_bank(phone):
         if not srv._save_session(s):
             return _save_failed()
         print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
-        _success_bank()
+        _success()
         return 0
 
     # Step 3: password (if bank asked)
@@ -122,7 +125,7 @@ def login_bank(phone):
     if not srv._save_session(s):
         return _save_failed()
     print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
-    _success_bank()
+    _success()
     return 0
 
 
@@ -133,7 +136,7 @@ def _save_failed():
     return 1
 
 
-def _success_bank():
+def _success():
     print(f"\n✓ ГОТОВО! Сессия сохранена: {srv._SESSION_FILE} (права 0600).")
     print("  MCP читает этот же файл — путь совпадает без ручной настройки.")
     print("  Запусти Claude Code в этом репозитории.")
