@@ -594,6 +594,201 @@ def test_the_caller_can_choose_which_account_pays():
     print("  checkout: the caller picks the account, and the answer says which paid")
 
 
+# The store answering HTTP 200 with an error code of its own — the shape a real
+# outage took: the delivery request reached ВкусВилл, and ВкусВилл said no.
+DELIV_STORE_DOWN = {"status": 200, "body": {"status": "Error", "payload": {
+    "code": "211", "message": "Сервис временно недоступен"}}}
+DELIV_BAD_REQUEST = {"status": 400, "body": {"errorMessage": "unknown pointId"}}
+
+
+def test_a_quote_prices_the_order_without_creating_one():
+    """The caller cannot compute the number that will be charged: weight goods
+    (бананы 0.8, виноград 0.54) are repriced by the backend during delivery, so the
+    cart total and the charge are different numbers — 1630.00 and 1600.20 here.
+    Before dry_run the only way to learn the second one was to attempt a real
+    checkout and be refused by the expected_sum guard, which cost a whole
+    user-visible attempt per guess.
+
+    A quote must therefore return the POST-delivery sum, and must not touch either
+    call that commits money."""
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    res, exc, page, _ = run_checkout(routes(paid), dry_run=True)
+
+    check(exc is None, f"a dry run must not raise: {exc!r}")
+    check(res and res.get("dry_run") is True and res.get("status") == "QUOTE",
+          f"the quote must announce itself as one: {res}")
+    check(res and res.get("sum") == 1600.2,
+          f"the quote must be the post-delivery charge, not the cart total: {res}")
+    check(res and res.get("pre_delivery_sum") == 1630.0,
+          f"the quote must carry the pre-delivery sum too, or the user cannot be "
+          f"told what moved: {res}")
+    check("deliveries" in page.log,
+          f"a quote that skips deliveries has not priced anything: {page.log}")
+    for committing in ("order/create", "payment-gate/payments"):
+        check(committing not in page.log,
+              f"a dry run POSTed {committing} — it is not a dry run: {page.log}")
+
+
+def test_a_store_that_blinks_does_not_cost_the_user_an_attempt():
+    """HTTP 200 + an app error code means the request reached the store and the STORE
+    refused — nothing has been posted, and the same call seconds later routinely
+    works. Three consecutive user-visible checkouts died on one such blip because the
+    first refusal ended the attempt."""
+    import src.checkout as co
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    r = routes(paid)
+    r["deliveries"] = [DELIV_STORE_DOWN, DELIV_OK]
+
+    saved = co.DELIVERY_RETRY_DELAY_MS
+    co.DELIVERY_RETRY_DELAY_MS = 1                  # keep the suite fast, keep the loop real
+    try:
+        res, exc, page, _ = run_checkout(r)
+    finally:
+        co.DELIVERY_RETRY_DELAY_MS = saved
+
+    check(exc is None and res and res.get("sum") == 1600.2,
+          f"a single store-side refusal must be retried, not surfaced: {res} / {exc!r}")
+    check(page.log.count("deliveries") == 2,
+          f"expected exactly one retry, got {page.log.count('deliveries')} attempts: {page.log}")
+
+
+def test_a_store_that_stays_down_is_named_as_the_cause():
+    """`deliveries failed (http=200, code=211)` said nothing about WHOSE fault it was
+    or whether retrying could ever help, so the agent had to reconstruct that from
+    diagnostics() afterwards. The message must carry the verdict itself."""
+    from src.checkout import CheckoutError
+    import src.checkout as co
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    r = routes(paid)
+    r["deliveries"] = [DELIV_STORE_DOWN]            # the same answer every time
+
+    saved = co.DELIVERY_RETRY_DELAY_MS
+    co.DELIVERY_RETRY_DELAY_MS = 1
+    try:
+        res, exc, page, _ = run_checkout(r)
+    finally:
+        co.DELIVERY_RETRY_DELAY_MS = saved
+
+    check(isinstance(exc, CheckoutError),
+          f"a store that never accepts the delivery must fail the checkout: {res} / {exc!r}")
+    check(page.log.count("deliveries") == co.DELIVERY_TRIES,
+          f"the retry budget must be spent before giving up: {page.log}")
+    msg = str(exc)
+    check("магазин" in msg.lower() or "Магазин" in msg,
+          f"the refusal must name the store as the cause: {msg}")
+    check("НЕ создан" in msg, f"the refusal must say no order exists: {msg}")
+    check("211" in msg, f"the store's own code must survive into the message: {msg}")
+    check("order/create" not in page.log,
+          f"an order was created despite no delivery: {page.log}")
+
+
+def test_a_delivery_request_that_is_simply_wrong_is_not_retried():
+    """A 4xx is the checkout's own fault (wrong store context, dead session) and will
+    answer the same way forever. Retrying it only makes the user wait three times as
+    long for the same failure."""
+    from src.checkout import CheckoutError
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    r = routes(paid)
+    r["deliveries"] = [DELIV_BAD_REQUEST]
+
+    res, exc, page, _ = run_checkout(r)
+    check(isinstance(exc, CheckoutError), f"a 400 must fail the checkout: {res} / {exc!r}")
+    check(page.log.count("deliveries") == 1,
+          f"a 4xx must not be retried, got {page.log.count('deliveries')} attempts")
+    check("повтор не поможет" in str(exc),
+          f"the message must stop the agent from retrying: {exc}")
+
+
+def test_a_delivery_call_that_never_landed_is_not_success():
+    """`_f` reports an aborted or failed fetch as status 0 with an empty body, and the
+    old check — `status >= 400 or an error message` — let that through as a healthy
+    delivery. The slots were then never initialised and the checkout went on to create
+    an order against a sum nothing had confirmed."""
+    from src.checkout import CheckoutError
+    import src.checkout as co
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    r = routes(paid)
+    r["deliveries"] = [{"status": 0, "body": {}, "timedOut": True, "error": "AbortError"}]
+
+    saved = co.DELIVERY_RETRY_DELAY_MS
+    co.DELIVERY_RETRY_DELAY_MS = 1
+    try:
+        res, exc, page, _ = run_checkout(r)
+    finally:
+        co.DELIVERY_RETRY_DELAY_MS = saved
+
+    check(isinstance(exc, CheckoutError),
+          f"a delivery that never landed must stop the checkout: {res} / {exc!r}")
+    check("order/create" not in page.log,
+          f"an order was created on top of a delivery call that never happened: {page.log}")
+    check(page.log.count("deliveries") == co.DELIVERY_TRIES,
+          f"a dropped fetch is exactly what a retry is for: {page.log}")
+    check("не дошёл" in str(exc), f"the message must name the network as the cause: {exc}")
+
+
+def test_a_refused_sum_names_the_number_to_pass_next():
+    """The guard already named both sums, and the agent still came back with 3701 and
+    then 3700 for a 3700.63 cart — it re-typed the number instead of copying it. The
+    refusal now spells out the parameter, so there is nothing left to re-type."""
+    paid = {"status": 200, "body": {"paymentId": "PAY-1", "stage": {"status": "SUCCESS"}}}
+    _, exc, _, _ = run_checkout(routes(paid), expected_sum=1630.0)
+    check("expected_sum=1600.2" in str(exc),
+          f"the refusal must hand over the exact literal to pass: {exc}")
+
+
+def test_a_quote_is_not_an_attempt():
+    """Journal attempts are keyed by cart hash and the NEWEST one decides whether a
+    retry is blocked. A preview that recorded an attempt would therefore lift the
+    block an unresolved real checkout had put in place — turning a "the order may
+    already exist" hold into a silent second order. A quote posts nothing, so it
+    records nothing; and a cart that is already blocked does not get previewed
+    either, because the answer the agent needs there is reconciliation, not a price."""
+    from src import journal
+    from src import server as S
+
+    goods = [{"id": "g1"}, {"id": "g2"}]
+    quote = {"dry_run": True, "status": "QUOTE", "sum": 1600.2,
+             "pre_delivery_sum": 1630.0, "item_count": 2, "pre_item_count": 2,
+             "delivery_point_id": "700", "delivery_tries": 1}
+
+    class FakeSession:
+        def ensure_fresh(self):
+            pass
+
+        def grocery_cart_get(self, app_id="", point_id=""):
+            return {"cart": {"goods": goods, "goodsSum": 3700.63}}
+
+        def grocery_checkout(self, **kw):
+            check(kw.get("dry_run") is True,
+                  f"the tool asked for a quote and the session ran a real checkout: {kw}")
+            return quote
+
+    saved_require = S._require
+    S._require = lambda: FakeSession()
+    try:
+        before = len(journal.recent(0))
+        out = S._do_grocery_checkout("204", "700", False, dry_run=True)
+        after = len(journal.recent(0))
+
+        check(after == before,
+              f"a dry run wrote {after - before} journal record(s) — a preview must not "
+              f"become the newest attempt for this cart")
+        check("expected_sum=1600.2" in out,
+              f"the quote must hand the agent the exact call to make next: {out!r}")
+        check("1600.2" in out and "НЕ создан" in out,
+              f"the quote must state the price and that nothing was created: {out!r}")
+
+        # Same cart, now with an unresolved real attempt on file.
+        chash = journal.cart_hash_of(goods)
+        aid = journal.new_attempt("204", "700", chash, 3700.63)
+        journal.record(aid, "order_create", "unknown")
+        blocked_out = S._do_grocery_checkout("204", "700", False, dry_run=True)
+        check("BLOCKED" in blocked_out,
+              f"a cart held for reconciliation must not be previewed either: {blocked_out!r}")
+    finally:
+        S._require = saved_require
+
+
 def test_the_checkout_tool_runs_playwright_off_the_event_loop():
     """sync_playwright() raises "It looks like you are using Playwright Sync API
     inside the asyncio loop" when called in FastMCP's loop, which is where sync
@@ -814,6 +1009,13 @@ def main():
         test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout,
         test_lost_payment_answer_is_reconciled_not_declared_unknown,
         test_the_sum_the_user_approved_is_the_sum_that_gets_paid,
+        test_a_quote_prices_the_order_without_creating_one,
+        test_a_store_that_blinks_does_not_cost_the_user_an_attempt,
+        test_a_store_that_stays_down_is_named_as_the_cause,
+        test_a_delivery_request_that_is_simply_wrong_is_not_retried,
+        test_a_delivery_call_that_never_landed_is_not_success,
+        test_a_refused_sum_names_the_number_to_pass_next,
+        test_a_quote_is_not_an_attempt,
         test_the_caller_can_choose_which_account_pays,
         test_the_checkout_tool_runs_playwright_off_the_event_loop,
         test_payment_gate_problem_json_reaches_the_user,

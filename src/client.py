@@ -3405,19 +3405,20 @@ class MobileSession:
     def grocery_checkout(self, app_id: str = "", point_id: str = "",
                          client_email: str = "", account: str = "",
                          sum_val: float = 0, attempt_id: str | None = None,
-                         expected_sum: float = 0) -> dict:
+                         expected_sum: float = 0, dry_run: bool = False) -> dict:
         """Full grocery checkout (web flow): deliveries → order/create → payment_gate_pay.
         `app_id`/`point_id` scope the store; `account` names the account to debit and
         wins over the bank's last-used one when given; `sum_val` is a mobile-cart
         fallback sum (the post-delivery WEB sum is used inside); `expected_sum` is the
         amount the user approved and refuses the checkout, before the order exists, if
-        the backend's final number diverges; `attempt_id` records progress in the
-        journal. Raises checkout.CheckoutError (safe to retry) or
-        checkout.CheckoutUnknown (order may exist — retry must be blocked)."""
+        the backend's final number diverges; `dry_run` stops after the delivery step
+        and returns the quote without creating or paying for an order; `attempt_id`
+        records progress in the journal. Raises checkout.CheckoutError (safe to retry)
+        or checkout.CheckoutUnknown (order may exist — retry must be blocked)."""
         from .checkout import checkout as _checkout
         return _checkout(self, app_id=app_id, point_id=point_id, client_email=client_email,
                          sum_val=sum_val, account=account, attempt_id=attempt_id,
-                         expected_sum=expected_sum)
+                         expected_sum=expected_sum, dry_run=dry_run)
 
     def messenger_send(self, conversation_id: str, text: str) -> dict:
         """Send a text message to a conversation. Encapsulates the vendor
