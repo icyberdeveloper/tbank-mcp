@@ -183,7 +183,13 @@ def login_myt(username):
 
     srv._myt_session = s
     s._on_persist = lambda: srv._save_myt(s)
-    srv._save_myt(s)
+    try:
+        srv._save_myt(s)
+    except OSError as e:
+        # Логин без записи на диск бесполезен: MCP поднимет старую сессию или ничего.
+        print(f"\n✗ Вход прошёл, но сессию НЕ удалось сохранить: {e}")
+        print(f"  Проверь права на {os.path.dirname(srv._MYT_FILE)} и повтори.")
+        return 1
     print(f"\n✓ ГОТОВО! Корпоративная сессия сохранена: {srv._MYT_FILE} (права 0600).")
     print(f"  Сотрудник: {s.username}, токен живёт {s.expires_in} с и обновляется сам.")
     print("  Банковская сессия не тронута — это отдельный файл.")

@@ -243,6 +243,7 @@ class MytSession:
         # Ставится владельцем (server) — каждый refresh РОТИРУЕТ refresh_token, и
         # не записанная на диск ротация сжигает токен для следующего процесса.
         self._on_persist = None
+        self._persist_error = None   # заполняется _persist(), читается тулами
         # Пояс сотрудника: считается один раз за процесс. Обычный атрибут, не поле
         # датакласса — _save_myt сериализует поля, а пояс это факт о человеке
         # СЕГОДНЯ (он может переехать), не часть сессии.
@@ -275,11 +276,25 @@ class MytSession:
         return bool(self.access_token and self.refresh_token)
 
     def _persist(self) -> None:
-        if self._on_persist:
-            try:
-                self._on_persist()
-            except Exception:
-                pass
+        """Сохранить сессию и ЗАПОМНИТЬ, если не вышло.
+
+        Раньше здесь стоял голый `except: pass`, и обмен токена рапортовал «успешно»
+        даже когда на диск ничего не легло: ошибка уходила в stderr, которого агент
+        не видит. Если сервер когда-нибудь начнёт ротировать refresh-токен, такая
+        пара — новый токен в памяти, старый на диске — оставляет следующий процесс
+        с потраченным токеном, то есть с мёртвой сессией и без объяснения."""
+        self._persist_error = None
+        if not self._on_persist:
+            self._persist_error = "владелец сессии не установил хук сохранения"
+            return
+        try:
+            self._on_persist()
+        except Exception as e:
+            self._persist_error = f"{type(e).__name__}: {e}"
+
+    @property
+    def persisted(self) -> bool:
+        return not self._persist_error
 
     def _auth_headers(self) -> dict:
         return {

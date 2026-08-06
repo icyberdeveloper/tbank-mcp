@@ -619,6 +619,75 @@ def check_meeting_times_are_converted_to_the_employee_timezone():
     print("  время: UTC → пояс сотрудника, подпись в шапке, ключ отмены не тронут")
 
 
+def check_a_lost_save_is_never_reported_as_success():
+    """Обмен, не доехавший до диска, — не успех.
+
+    Раньше `_persist` глотал исключение, а `_save_myt` печатал сбой в stderr, и тул
+    отвечал «обмен прошёл, сессия свежая», когда на диске не было ничего. Новый
+    токен жил до конца процесса; следующий запуск поднимал прежний — и если сервер
+    ротировал refresh, сессия была мертва без единого объяснения."""
+    import tempfile
+    ro = tempfile.mkdtemp()
+    os.chmod(ro, 0o500)                      # каталог только на чтение
+    saved_path, server._MYT_FILE = server._MYT_FILE, os.path.join(ro, "myt.json")
+    try:
+        s = with_session(session({("POST", "/v3/auth/token"): FakeResp(200, {
+            "accessToken": "новый", "refreshToken": "ротированный",
+            "expiresIn": 3600, "tokenType": "Bearer"})}))
+        s._on_persist = lambda: server._save_myt(s)
+        out = json.loads(server.myt_refresh_session())
+        check(out["сохранено_на_диск"] is False, f"запись провалилась — это надо сказать: {out}")
+        check("НЕ сохранена" in out["статус"], f"статус не должен звучать как успех: {out['статус']}")
+        check("почему" in out and out["почему"], "причину сбоя записи надо назвать")
+        check("перелогин" in out.get("последствие", ""),
+              f"надо сказать, чем это грозит: {out.get('последствие')}")
+        check(s.persisted is False, "сессия должна знать, что не сохранилась")
+
+        # А успешная запись не должна поднимать ложную тревогу.
+        server._MYT_FILE = os.path.join(tempfile.mkdtemp(), "myt.json")
+        s2 = with_session(session({("POST", "/v3/auth/token"): FakeResp(200, {
+            "accessToken": "новый2", "refreshToken": "r", "expiresIn": 3600,
+            "tokenType": "Bearer"})}))
+        s2._on_persist = lambda: server._save_myt(s2)
+        ok = json.loads(server.myt_refresh_session())
+        check(ok["сохранено_на_диск"] is True, f"успешная запись — без тревоги: {ok}")
+        check("почему" not in ok, "при успехе лишних полей быть не должно")
+    finally:
+        os.chmod(ro, 0o700)
+        server._MYT_FILE = saved_path
+    print("  сохранение: провал записи называется провалом, а не «сессия свежая»")
+
+
+def check_corporate_login_does_not_reach_the_trace():
+    """Корпоративный логин — не то, что должно оседать в calls.jsonl.
+
+    `_RE_LONG_ID` маскирует прогоны из 4+ цифр, а логин вида «i.ivanov» под это не
+    попадает; поэтому оба MyT-статусных тула глушат голову ответа целиком."""
+    from src import trace
+    for name in ("myt_status", "myt_refresh_session"):
+        check(name in trace._ECHOES_USER_TEXT,
+              f"{name} печатает данные сотрудника — его голова не должна писаться дословно")
+    print("  трассировка: голова обоих статусных тулов не пишется дословно")
+
+
+def check_status_stays_a_read_tool():
+    """myt_status помечен read-only, значит не должен ДЕЛАТЬ обновление целью.
+
+    Продление всё равно случится внутри `_call`, если пора, — ровно как у любого
+    другого читающего тула и как у банковского session_status. Но отдельного
+    ensure_fresh здесь быть не должно: хост вправе звать read-only тул без спроса."""
+    import inspect
+    src = inspect.getsource(server.myt_status.__wrapped__ if hasattr(server.myt_status, "__wrapped__")
+                            else server.myt_status)
+    check("ensure_fresh()" not in src,
+          "myt_status не должен звать ensure_fresh явно — это делает обновление его целью")
+    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
+    check(tools["myt_status"].annotations.readOnlyHint is True, "myt_status остаётся read-only")
+    check(tools["myt_refresh_session"].annotations.readOnlyHint is False,
+          "myt_refresh_session меняет состояние намеренно — read-only ему нельзя")
+    print("  классификация: обновление — цель только у refresh, у статуса оно попутное")
+
+
 def check_refresh_tool_does_the_capture_exchange():
     """myt_refresh_session — тот самый обмен из захвата, запись #28.
 
@@ -754,6 +823,9 @@ def main():
                check_event_keeps_what_matters,
                check_timezone_is_resolved_not_assumed,
                check_meeting_times_are_converted_to_the_employee_timezone,
+               check_a_lost_save_is_never_reported_as_success,
+               check_corporate_login_does_not_reach_the_trace,
+               check_status_stays_a_read_tool,
                check_refresh_tool_does_the_capture_exchange,
                check_status_verifies_instead_of_doing_arithmetic,
                check_no_session_does_not_pretend,
