@@ -5,22 +5,13 @@
 читаются из env. Они НИКОГДА не попадают в контекст модели (LLM) — скрипт
 запускается напрямую из шелла.
 
-Два независимых аккаунта, один скрипт:
-
-    .venv/bin/python login_cli.py +79991234567     → банк, session.json
-    .venv/bin/python login_cli.py --myt n.ivanov   → MyT,  myt.json
+    .venv/bin/python login_cli.py +79991234567
 
 Интерпретатор — из .venv репозитория: там стоят зависимости, и там же MCP берёт
 тот же файл сессии. Системный python3 упадёт на импорте.
 
-MyT — РАБОЧЕЕ приложение Т-Банка (календарь встреч, парковка в офисе). Аккаунт
-другой: банковская сессия к нему доступа не даёт, и наоборот. Флаг выбирает,
-какую из двух сессий обновляем; вторая при этом не трогается — поэтому логин в
-MyT не выкидывает из банка, а перелогин в банке не роняет календарь.
-
 С паролем в env:
     TBANK_PASSWORD="пароль" .venv/bin/python login_cli.py +79991234567
-    MYT_PASSWORD="пароль"   .venv/bin/python login_cli.py --myt n.ivanov
 
 Без env пароль спросит сам скрипт:
     .venv/bin/python login_cli.py +79991234567
@@ -37,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from src.client import TbankApiError
-    from src import myt
     from src import server as srv
 except ModuleNotFoundError as _e:
     # Скрипт запускают руками, и первым делом — системным python3, потому что
@@ -59,24 +49,18 @@ except ModuleNotFoundError as _e:
 
 
 USAGE = """Usage:
-  .venv/bin/python login_cli.py +79991234567     — банк (счета, переводы, продукты)
-  .venv/bin/python login_cli.py --myt n.ivanov   — MyT (рабочий календарь и парковка)
+  .venv/bin/python login_cli.py +79991234567
 
-  TBANK_PASSWORD / MYT_PASSWORD env — пароль (или спросит через getpass)
+  TBANK_PASSWORD env — пароль (или спросит через getpass)
   TBANK_PIN env — PIN, если банк попросит"""
 
 
 def main():
-    argv = sys.argv[1:]
-    flags = {a for a in argv if a.startswith("-")}
-    args = [a for a in argv if not a.startswith("-")]
-    unknown = flags - {"--myt"}
-    if unknown or len(args) != 1:
-        if unknown:
-            print(f"Неизвестный флаг: {' '.join(sorted(unknown))}\n")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if len(args) != 1:
         print(USAGE)
         return 1
-    return login_myt(args[0]) if "--myt" in flags else login_bank(args[0])
+    return login_bank(args[0])
 
 
 # ── банк ────────────────────────────────────────────────────────────────────
@@ -155,57 +139,6 @@ def _success_bank():
     print("  Запусти Claude Code в этом репозитории.")
     print("  Пароль НЕ передан агенту — он работает с сохранённой сессией.")
     print("  Тулы: list_accounts, grocery_search, transfer, ...")
-
-
-# ── MyT: рабочий календарь и парковка ───────────────────────────────────────
-
-def login_myt(username):
-    """grantType=password на корпоративном контуре.
-
-    Тула логина в MCP для этого НЕТ намеренно, и флаг здесь ничего не меняет:
-    рабочий пароль открывает не один счёт, а все рабочие системы, и цена его
-    попадания в транскрипт несопоставима с удобством."""
-    s = myt.MytSession()
-
-    if os.environ.get("MYT_PASSWORD"):
-        password = os.environ["MYT_PASSWORD"]
-        print("[1/2] Пароль из MYT_PASSWORD env.")
-    else:
-        password = getpass.getpass("[1/2] Пароль (не отображается): ")
-
-    # Первый вызов без кода — он и ЗАКАЗЫВАЕТ SMS. Сервер отвечает ошибкой
-    # sms_required: это штатный шаг протокола, а не сбой.
-    try:
-        s.login(username, password)
-        print("    SMS не потребовалась.")
-    except TbankApiError as e:
-        if e.result_code != "sms_required":
-            print(f"    ОШИБКА: {e}")
-            return 1
-        print(f"    SMS отправлена: {e.message}")
-        code = getpass.getpass("[2/2] SMS-код: ")
-        try:
-            s.login(username, password, code)
-        except TbankApiError as e2:
-            print(f"    ОШИБКА: {e2}")
-            return 1
-
-    srv._myt_session = s
-    s._on_persist = lambda: srv._save_myt(s)
-    try:
-        srv._save_myt(s)
-    except OSError as e:
-        # Логин без записи на диск бесполезен: MCP поднимет старую сессию или ничего.
-        print(f"\n✗ Вход прошёл, но сессию НЕ удалось сохранить: {e}")
-        print(f"  Проверь права на {os.path.dirname(srv._MYT_FILE)} и повтори.")
-        return 1
-    print(f"\n✓ ГОТОВО! Корпоративная сессия сохранена: {srv._MYT_FILE} (права 0600).")
-    print(f"  Сотрудник: {s.username}, токен живёт {s.expires_in} с и обновляется сам.")
-    print("  Банковская сессия не тронута — это отдельный файл.")
-    print("  Тулы: calendar_schedule, calendar_event, calendar_respond, calendar_cancel,")
-    print("        parking_places, parking_book, office_bookings, myt_status.")
-    print("  Пароль НЕ передан агенту.")
-    return 0
 
 
 if __name__ == "__main__":

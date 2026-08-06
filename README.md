@@ -4,13 +4,12 @@
 
 ## Features
 
-- **85 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **76 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, orders, transfers (including payment by bank requisites, from a
-  scanned invoice QR), messenger, investments, plus the corporate MyT app — work
-  calendar and office parking
-- **13 skills**, entered through the `tbank` router skill: grocery order, tickets,
+  scanned invoice QR), messenger, investments
+- **11 skills**, entered through the `tbank` router skill: grocery order, tickets,
   travel search, transfer, bill pay, cards & documents, messenger, budget analysis,
-  invest advisor, login, work calendar, office parking
+  invest advisor, login
 - **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which no
   OS ships and every `*.t-bank-app.ru` host needs — that is most of the 22 hosts this
   MCP talks to. Shipped in `ca/roots/`, pinned by SHA-256. Leaf/intermediate rotation
@@ -111,33 +110,9 @@ Both options need the SMS code typed in either way, so there is no unattended
 login: `TBANK_PASSWORD` / `TBANK_PHONE` are not read anywhere in this codebase,
 and a section here used to claim otherwise.
 
-### MyT (work calendar and office parking) — the same CLI, `--myt`
-
-The corporate app is a different product with a different account, so it has its own
-session file (`~/.local/share/tbank-mcp/myt.json`). Same script, one flag — and the
-bank session is not touched, so logging into one never signs you out of the other:
-
-```bash
-.venv/bin/python login_cli.py --myt <corporate-login>
-# [1/2] Пароль (не отображается): ****
-#     SMS отправлена: +7 XXX ***-**-XX     ← the bank masks it; shown as it comes
-# [2/2] SMS-код: ****
-#
-# ✓ ГОТОВО! Корпоративная сессия сохранена: ~/.local/share/tbank-mcp/myt.json (права 0600).
-```
-
-There is **no Option 2 here**: no tool takes the corporate password, and the flag does
-not change that. A work password opens far more than one bank account, and the
-convenience of typing it at the agent is not worth putting it into a transcript.
-`myt_status()` says whether the session is alive; the token refreshes itself for as
-long as it does.
-
-**Timezone.** kairos returns meeting times in true UTC, and the tools convert them to
-the employee's own zone — resolved from their office building (workplacer lists 66
-buildings across eight offsets, +02:00…+10:00), never assumed. Set `TBANK_MYT_TZ`
-(`+05:00` or `Asia/Yekaterinburg`) to override it when you are away from your office;
-without it the tools fall back to Moscow and say so in the header rather than
-silently showing the wrong hour.
+> **Работа с MyT (рабочий календарь и парковка) переехала** в отдельный MCP:
+> [tbank-myt](https://github.com/icyberdeveloper/tbank-myt). Другой аккаунт, другая
+> сессия, свой `login_cli.py` — здесь их больше нет.
 
 ## Other agents (Codex, ChatGPT, Hermes, OpenClaw)
 
@@ -177,9 +152,6 @@ Russian and so is the person reading the answer.
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_file`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
-| **Work calendar** (MyT) | `calendar_schedule`, `calendar_event`, `calendar_respond`, `calendar_cancel` |
-| **Office parking** (MyT) | `parking_places`, `parking_book`, `office_bookings` |
-| **MyT session** | `myt_status`, `myt_refresh_session` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
@@ -201,8 +173,6 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank-budget-analyzer` | Spending analysis, subscription audit, savings tips |
 | `tbank-invest-advisor` | Portfolio, P&L, rebalancing, tax optimization |
 | `tbank-login` | Multi-step login, session management |
-| `myt-calendar` | Work calendar (MyT): schedule, meeting details, accept/decline, cancel |
-| `myt-parking` | Office parking (MyT): free places, booking, current bookings |
 
 ## Example requests
 
@@ -315,9 +285,9 @@ present the tests additionally check the fixtures have not drifted from it.
   `pay_bill`) require confirmation of a specific amount — "buy it" is not a confirmation.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 64 are `readOnlyHint: true` and
-  may run without a prompt; 16 write something that costs nothing (a cart, a
-  booking, a message, an OTP, a token, a local file, a meeting reply) and are marked
+  rather than defaulting to anything. Three kinds: 59 are `readOnlyHint: true` and
+  may run without a prompt; 12 write something that costs nothing (a cart, a
+  booking, a message, an OTP, a token, a local file) and are marked
   `destructiveHint: false`; 5 debit an account — `transfer`, `transfer_requisites`,
   `grocery_checkout`, `ticket_pay`, `pay_bill` — and are the only ones carrying
   `destructiveHint`, which
