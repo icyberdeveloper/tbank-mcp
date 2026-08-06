@@ -266,14 +266,38 @@ def _write_json_0600(path: str, d: dict, label: str) -> None:
     print(f"[tbank] {label} saved: {path} ({os.path.getsize(path)} bytes, 0600)", file=sys.stderr)
 
 
-def _save_session(s):
-    """Save session to disk with 0600 permissions (owner-only read/write).
-    Persists _minted_at for correct expiry tracking across restarts."""
+def _save_session(s) -> bool:
+    """Save session to disk with 0600 permissions. Returns whether it landed.
+
+    Persists _minted_at for correct expiry tracking across restarts.
+
+    The failure is still not raised — a read-only HOME must not break reads, which
+    is why MobileSession._persist swallows it too. But «не сломало чтение» и «можно
+    отвечать ОК» — разные вещи: тулы, чья ЦЕЛЬ оставить после себя рабочую сессию
+    (confirm_*, refresh_session), обязаны знать, что записи не было, иначе они
+    рапортуют «Сессия активна» про сессию, которой после перезапуска не будет.
+    Отсюда возвращаемое значение вместо голого None."""
     try:
         d = {k: v for k, v in s.__dict__.items() if not k.startswith("_") or k == "_minted_at"}
         _write_json_0600(_SESSION_FILE, d, "session")
+        return True
     except OSError as e:
         print(f"[tbank] session save failed: {e}", file=sys.stderr)
+        return False
+
+
+# Что сказать, когда сессия жива в памяти, но на диск не легла. Для банка это не
+# приговор: refresh_token ротируется при обмене, зато остаётся silent_relogin по
+# долгоживущему SSO_SESSION — то есть следующий запуск обычно вылечится сам, без
+# OTP. Но «обычно» это не «точно», и молчать об этом нельзя.
+_SAVE_FAILED = ("OK, сессия активна В ЭТОМ ПРОЦЕССЕ, но на диск НЕ записана "
+                f"({{}}) — после перезапуска она не поднимется. Проверь права на "
+                f"{os.path.dirname(_SESSION_FILE)} и повтори; иначе понадобится "
+                f"полный логин.")
+
+
+def _saved_or_warn(s) -> str:
+    return "OK. Сессия активна." if _save_session(s) else _SAVE_FAILED.format(_SESSION_FILE)
 
 
 def _load_session():
@@ -573,8 +597,7 @@ def confirm_otp(otp: str) -> str:
     if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("otp", otp)
-        _save_session(_session)
-        return "OK. Сессия активна."
+        return _saved_or_warn(_session)
     except Exception as e:
         return _err(e)
 
@@ -585,8 +608,7 @@ def confirm_password(password: str) -> str:
     if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("password", password)
-        _save_session(_session)
-        return "OK. Сессия активна."
+        return _saved_or_warn(_session)
     except Exception as e:
         return _err(e)
 
@@ -597,8 +619,7 @@ def confirm_pin(pin: str) -> str:
     if not _session: return _err(_NO_SESSION_YET)
     try:
         _session.confirm_step("pin", pin)
-        _save_session(_session)
-        return "OK. Сессия активна."
+        return _saved_or_warn(_session)
     except Exception as e:
         return _err(e)
 
@@ -625,9 +646,9 @@ def refresh_session() -> str:
                 obs.emit("refresh", grant="none", result="reauth_required", blame="app",
                          error="refresh_token invalid, no SSO_SESSION")
                 return "REAUTH_REQUIRED: refresh_token истёк и нет SSO_SESSION. Нужен полный логин (login + OTP + password)."
-        _save_session(s)
-        obs.emit("refresh", grant=grant, result="ok")
-        return "OK. Сессия активна."
+        stored = _save_session(s)
+        obs.emit("refresh", grant=grant, result="ok" if stored else "not_persisted")
+        return "OK. Сессия активна." if stored else _SAVE_FAILED.format(_SESSION_FILE)
     except Exception as e:
         try:
             from . import observability as obs

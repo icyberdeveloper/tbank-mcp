@@ -339,6 +339,60 @@ def test_orders_prints_the_payment_id_a_receipt_needs():
     print("  orders: the paymentId column is there, and absent when the order has none")
 
 
+def test_a_session_that_never_reached_disk_is_not_reported_as_active():
+    """«OK. Сессия активна» про сессию, которой после перезапуска не будет.
+
+    _save_session ловит OSError и печатает сбой в stderr — правильно для ЧТЕНИЙ:
+    read-only HOME не должен ронять list_accounts. Но confirm_otp/password/pin и
+    refresh_session существуют ровно затем, чтобы оставить после себя рабочий файл,
+    и они отвечали «OK» независимо от того, легло ли что-то на диск. Худший случай:
+    пользователь проходит логин через агента, тратит SMS, трижды видит «OK»,
+    перезапускает Claude Code — и сессии нет, без единого объяснения.
+
+    На банке это не приговор (refresh_token ротируется, но остаётся silent_relogin
+    по SSO_SESSION), однако «обычно вылечится» — не повод рапортовать успех."""
+    import tempfile
+    from src.client import MobileSession
+
+    class _Stub(MobileSession):
+        # Заглушки МЕТОДАМИ, не атрибутами: _save_session сериализует __dict__, и
+        # лямбда, положенная на экземпляр, ложится туда же и роняет json.dump.
+        def confirm_step(self, kind, value):
+            return None
+
+        def refresh(self):
+            return None
+
+    s = server._with_persist(_Stub(mobile_sessionid="x", refresh_token="r"))
+    s.access_token = "a"
+    ro = tempfile.mkdtemp()
+    os.chmod(ro, 0o500)                       # каталог только на чтение
+    saved_file, saved_sess = server._SESSION_FILE, server._session
+    server._SESSION_FILE, server._session = os.path.join(ro, "session.json"), s
+    try:
+        for name, call in (("confirm_otp", lambda: server.confirm_otp("1234")),
+                           ("confirm_password", lambda: server.confirm_password("p")),
+                           ("confirm_pin", lambda: server.confirm_pin("1111")),
+                           ("refresh_session", lambda: server.refresh_session())):
+            out = call()
+            check("НЕ записана" in out,
+                  f"{name}: запись провалилась, а ответ звучит как успех: {out[:80]}")
+            check("перезапуск" in out,
+                  f"{name}: надо сказать, чем это грозит: {out[:80]}")
+        check(server._save_session(s) is False,
+              "_save_session обязан сообщать результат, а не возвращать None")
+
+        os.chmod(ro, 0o700)                   # теперь запись возможна
+        out = server.confirm_otp("1234")
+        check(out == "OK. Сессия активна.",
+              f"при успешной записи ответ не должен пугать: {out}")
+        check(server._save_session(s) is True, "успешная запись должна возвращать True")
+    finally:
+        os.chmod(ro, 0o700)
+        server._SESSION_FILE, server._session = saved_file, saved_sess
+    print("  сессия, не легшая на диск, не выдаётся за активную")
+
+
 def main():
     print("previously unpinned fixes:")
     test_an_unknown_checkout_blocks_the_next_one_for_the_same_cart()
@@ -348,6 +402,7 @@ def main():
     test_setting_a_cart_refuses_when_the_current_one_cannot_be_read()
     test_a_tls_error_does_not_replay_a_payment()
     test_orders_prints_the_payment_id_a_receipt_needs()
+    test_a_session_that_never_reached_disk_is_not_reported_as_active()
     if failures:
         print("\nFAILED:")
         for f in failures:
