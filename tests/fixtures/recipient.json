@@ -65,7 +65,7 @@
     "displayFields": [
      {
       "name": "bankMemberId",
-      "value": "100000000111"
+      "value": "400000000002"
      },
      {
       "name": "maskedFIO",
@@ -99,7 +99,7 @@
     "displayFields": [
      {
       "name": "bankMemberId",
-      "value": "100000000005"
+      "value": "400000000003"
      },
      {
       "name": "maskedFIO",
@@ -156,7 +156,7 @@
     "isUrgentTransfer": "false",
     "isTransferStatus": "false",
     "providerFields": {
-     "bankMemberId": "100000000111",
+     "bankMemberId": "400000000002",
      "pointer": "+79991234567",
      "maskedFIO": "И. И.",
      "pointerType": "8276",
@@ -174,7 +174,7 @@
     "provider": "p2p-anybank",
     "providerFields": {
      "pointer": "+79991234567",
-     "bankMemberId": "100000000005",
+     "bankMemberId": "400000000003",
      "pointerType": "8276",
      "pointerLinkId": "10000000002",
      "maskedFIO": "И. И."

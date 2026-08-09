@@ -433,9 +433,18 @@ def build_recipient():
     phone = phones[0]
 
     links = {}         # real pointerLinkId → synthetic, in encounter order
+    members = {}       # real bankMemberId  → synthetic, in encounter order
 
     def fake_link(real):
         return links.setdefault(str(real), f"1000000000{len(links)}")
+
+    def fake_member(real):
+        """SBP member ids are public — they name a bank, not a person — but they are
+        twelve digits copied out of a capture, which is the shape and the provenance
+        tests/test_no_personal_data.py exists to stop at the door. Which bank a
+        candidate is survives in brand.name, so nothing the fixture proves needs the
+        real number."""
+        return members.setdefault(str(real), f"40000000000{len(members) + 2}")
 
     def scrub_candidate(c):
         c = json.loads(json.dumps(c))
@@ -443,6 +452,8 @@ def build_recipient():
         for f in c.get("displayFields") or []:
             if f.get("name") == "maskedFIO":
                 f["value"] = FAKE_FIO
+            elif f.get("name") == "bankMemberId":
+                f["value"] = fake_member(f.get("value"))
         return c
 
     resolves, commissions = {}, []
@@ -468,6 +479,8 @@ def build_recipient():
             pf["pointer"] = FAKE_PHONE
             pf["maskedFIO"] = FAKE_FIO
             pf["pointerLinkId"] = fake_link(pf.get("pointerLinkId"))
+            if "bankMemberId" in pf:
+                pf["bankMemberId"] = fake_member(pf["bankMemberId"])
             pp["account"] = "0000000000"
             resp = json.loads(T._raw(item, "response").partition(b"\r\n\r\n")[2])
             commissions.append({
