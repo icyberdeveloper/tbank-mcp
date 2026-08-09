@@ -297,9 +297,10 @@ def test_the_signed_payment_body_carries_the_quantised_amount():
         def ensure_fresh(self, *a, **kw):
             return None
 
-        def resolve_sbp_recipient(self, phone):
+        def resolve_recipient(self, phone):
             return [{"bank_member_id": "1", "masked_fio": "И.", "pointer_link_id": "2",
-                     "bank_name": "Б", "is_default_bank": True}]
+                     "bank_name": "Б", "is_default_bank": True,
+                     "workflow_type": "SBPTransfer", "is_tbank": False}]
 
         def _call_signed(self, key, body_str, extra_query=None):
             self.body = body_str

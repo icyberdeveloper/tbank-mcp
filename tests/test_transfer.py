@@ -115,10 +115,11 @@ class CaptureSession(MobileSession):
         return [{"id": "1111111111", "accountType": "Current",
                  "moneyAmount": {"value": 5000, "currency": {"name": "RUB"}}}]
 
-    def resolve_sbp_recipient(self, phone):
+    def resolve_recipient(self, phone):
         return [{"bank_member_id": "100000000000", "masked_fio": "И. И.",
                  "pointer_link_id": "10000000000", "bank_name": "Банк",
-                 "is_default_bank": True}]
+                 "is_default_bank": True, "workflow_type": "SBPTransfer",
+                 "is_tbank": False}]
 
     def _call_signed(self, template_key, body_str, extra_query=None):
         self.url, self.headers, self.body = self._signed_parts(
@@ -632,13 +633,15 @@ def test_the_recipient_bank_the_user_picked_is_the_one_used():
             super().__init__()
             self.resolved = 0
 
-        def resolve_sbp_recipient(self, phone):
+        def resolve_recipient(self, phone):
             self.resolved += 1
             return [
                 {"bank_member_id": "111", "masked_fio": "Дефолтный Б.",
-                 "pointer_link_id": "aaa", "bank_name": "Дефолт", "is_default_bank": True},
+                 "pointer_link_id": "aaa", "bank_name": "Дефолт", "is_default_bank": True,
+                 "workflow_type": "SBPTransfer", "is_tbank": False},
                 {"bank_member_id": "222", "masked_fio": "Выбранный Б.",
-                 "pointer_link_id": "bbb", "bank_name": "Выбор", "is_default_bank": False},
+                 "pointer_link_id": "bbb", "bank_name": "Выбор", "is_default_bank": False,
+                 "workflow_type": "SBPTransfer", "is_tbank": False},
             ]
 
     # The two ids the docs promise, no masked_fio — the documented call.
@@ -666,6 +669,212 @@ def test_the_recipient_bank_the_user_picked_is_the_one_used():
     check(s3.sent_pay_parameters()["providerFields"]["bankMemberId"] == "111",
           "with no choice given, the default bank is the documented behaviour")
     print("  recipient: the caller's chosen SBP bank survives; auto-resolve only without one")
+
+
+RECIPIENT_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "fixtures", "recipient.json")
+
+
+def recipient_fixture():
+    with open(RECIPIENT_FIXTURE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+class ResolvingSession(CaptureSession):
+    """Answers /v1/get_requisites from the fixture, per pointerSource, and records
+    the query it was asked with."""
+
+    # CaptureSession stubs the lookup out; here it is the thing under test.
+    resolve_recipient = MobileSession.resolve_recipient
+
+    def __init__(self):
+        super().__init__()
+        self.fx = recipient_fixture()
+        self.asked = []
+
+    def ensure_client_session(self, *a, **kw):
+        return None
+
+    def _call_read(self, template_key, *, overrides=None, **kw):
+        check(template_key == "get_requisites",
+              f"unexpected read during a recipient lookup: {template_key!r}")
+        overrides = overrides or {}
+        self.asked.append(dict(overrides))
+        source = overrides.get("pointerSource")
+        return {"payload": self.fx[source]["payload"] if source in self.fx else []}
+
+
+def test_the_recipients_own_tbank_account_is_found():
+    """A phone whose owner banks with T-Bank came back as «Sber and VTB, no T-Bank»:
+    only pointerSource=external was ever asked, and withTinkoff=true on that call does
+    not fold the internal answer in. The recipient the user could see in the app was
+    unreachable through the tool, and the commission preview that seemed to say
+    otherwise was an unfinishedFlag=true non-answer."""
+    fx = recipient_fixture()
+    s = ResolvingSession()
+    cands = s.resolve_recipient(fx["phone"])
+
+    check([a.get("pointerSource") for a in s.asked] == ["internal", "external"],
+          f"both pointerSources must be asked, internal first: {s.asked}")
+    # The client context (appVersion, origin, deviceId, sessionid…) comes from the
+    # endpoint template; the overrides are the RECIPIENT half of the query, and that
+    # is what must equal the app's — including the two flags the internal call does
+    # NOT carry. Sending withTinkoff on it would be the same class of invention as
+    # believing withTinkoff on the external one covers T-Bank.
+    from src.endpoints import BUILTIN_ENDPOINTS
+    template = set(BUILTIN_ENDPOINTS["get_requisites"]["params"])
+    for asked, source in zip(s.asked, ("internal", "external")):
+        check(set(asked) == set(fx[source]["query_keys"]) - template,
+              f"{source} query differs from the app's: ours={sorted(asked)} "
+              f"real={sorted(set(fx[source]['query_keys']) - template)}")
+
+    check(len(cands) == 3, f"expected the T-Bank account + two SBP banks: {cands}")
+    check(cands[0]["is_tbank"] and cands[0]["bank_name"] == "Т-Банк",
+          f"the T-Bank account must be present and first: {cands}")
+    check([c["is_tbank"] for c in cands[1:]] == [False, False],
+          f"the SBP banks must not be marked as internal: {cands[1:]}")
+    check("bankMemberId" not in cands[0]["provider_fields"],
+          f"an internal recipient has no bankMemberId — the key must be ABSENT, not "
+          f"empty: {cands[0]['provider_fields']}")
+    for c in cands[1:]:
+        check(c["provider_fields"].get("bankMemberId"),
+              f"an SBP recipient must keep its bankMemberId: {c['provider_fields']}")
+    check(all(c["masked_fio"] == fx["masked_fio"] for c in cands),
+          f"every candidate carries the recipient's name: {cands}")
+    print("  resolve: the recipient's own T-Bank account is found, not just SBP")
+
+
+def test_paying_a_tbank_recipient_sends_the_body_the_app_sends():
+    """The gate demanded bank_member_id AND pointer_link_id, so choosing the T-Bank
+    account — which has no member id — read as "nothing chosen" and went back to
+    auto-resolution. With no default among the SBP banks that surfaced as a refusal
+    listing banks the user had not chosen; with one, it silently became a transfer to
+    that bank instead (the test below). The body is checked against the REAL signed /v1/pay for exactly this
+    recipient shape (captures-pay.xml, 200 + paymentId) — the SBP capture in
+    transfer.json cannot stand in for it, because the one field in dispute is the one
+    it carries and this one does not."""
+    fx = recipient_fixture()
+    real = fx["internal_pay"]["pay_parameters"]
+
+    s = ResolvingSession()
+    s.transfer(10000, fx["phone"], account="0000000000",
+               pointer_link_id=real["providerFields"]["pointerLinkId"])
+    got = s.sent_pay_parameters()
+    pf = got["providerFields"]
+
+    check(sorted(got) == sorted(real),
+          f"payParameters keys differ from the app's internal transfer\n"
+          f"    ours={sorted(got)}\n    real={sorted(real)}")
+    for field in ("provider", "currency", "cellularService", "frontCamera",
+                  "isTransferStatus", "isUrgentTransfer"):
+        check(got.get(field) == real.get(field),
+              f"payParameters.{field}: ours={got.get(field)!r} real={real.get(field)!r}")
+    check("paymentType" not in got,
+          "paymentType belongs to payment_commission, not to an internal /v1/pay")
+    check(sorted(pf) == sorted(real["providerFields"]),
+          f"providerFields keys differ from the app's internal transfer\n"
+          f"    ours={sorted(pf)}\n    real={sorted(real['providerFields'])}")
+    check("bankMemberId" not in pf,
+          f"bankMemberId must not be sent for an internal transfer: {pf}")
+    check(pf["pointerLinkId"] == real["providerFields"]["pointerLinkId"],
+          f"the chosen T-Bank account was replaced: {pf}")
+    check(pf["maskedFIO"] == fx["masked_fio"],
+          f"the display name must be resolved for the chosen candidate: {pf}")
+    check(pf["pointerType"] == real["providerFields"]["pointerType"],
+          f"an internal transfer still uses the phone pointer type: {pf}")
+
+    # The form the app posts alongside — it dropped shortcutId between the two
+    # captures, and ours never sent one, so this is now checked rather than skipped.
+    check(sorted(s.sent_form()) == sorted(fx["internal_pay"]["form_keys"]),
+          f"pay form keys differ\n    ours={sorted(s.sent_form())}"
+          f"\n    real={sorted(fx['internal_pay']['form_keys'])}")
+    print("  pay: a T-Bank recipient is payable — body matches the real signed /v1/pay")
+
+
+def test_choosing_the_tbank_account_is_not_overridden_by_a_default_sbp_bank():
+    """The money-losing shape of the old gate, and the reason it is the link id alone
+    that now counts as a choice.
+
+    A recipient with a T-Bank account AND a DEFAULT SBP bank: the caller passes the
+    T-Bank candidate's pointer_link_id, which is everything that candidate has. The
+    old gate wanted a bank_member_id too, did not get one, treated the call as
+    unspecified and resolved to the default — a completed transfer to the right
+    person's OTHER bank, reported as success, with nothing in the result line to show
+    the substitution."""
+    fx = recipient_fixture()
+    tbank_link = fx["internal_pay"]["pay_parameters"]["providerFields"]["pointerLinkId"]
+
+    class WithDefault(ResolvingSession):
+        def _call_read(self, template_key, *, overrides=None, **kw):
+            payload = super()._call_read(template_key, overrides=overrides, **kw)
+            for c in payload["payload"]:
+                # The SBP side has a default here; the internal candidate never does
+                # in any capture (isDefaultBank is false on all three).
+                if c.get("workflowType") == "SBPTransfer":
+                    c["isDefaultBank"] = True
+                    break
+            return payload
+
+    s = WithDefault()
+    s.transfer(10000, fx["phone"], account="0000000000", pointer_link_id=tbank_link)
+    pf = s.sent_pay_parameters()["providerFields"]
+    check(pf["pointerLinkId"] == tbank_link,
+          f"the chosen T-Bank account was replaced by the default SBP bank: {pf}")
+    check("bankMemberId" not in pf,
+          f"the substitution would show up as a bankMemberId appearing: {pf}")
+    print("  choice: a default SBP bank cannot override an explicitly chosen T-Bank account")
+
+
+def test_a_recipient_with_several_accounts_is_never_picked_silently():
+    """Three candidates and no default: the tool must refuse and show all three,
+    T-Bank among them — picking one would send the money to the wrong account of the
+    right person, invisibly."""
+    from src.client import TbankApiError
+
+    fx = recipient_fixture()
+    s = ResolvingSession()
+    try:
+        s.transfer(10000, fx["phone"], account="0000000000")
+        failures.append("three candidates with no default must not be resolved silently")
+    except TbankApiError as e:
+        check(e.result_code == "RECIPIENT_MULTIPLE_BANKS",
+              f"expected RECIPIENT_MULTIPLE_BANKS, got {e.result_code!r}")
+        for bank in ("Т-Банк", "Сбербанк", "ВТБ"):
+            check(bank in str(e), f"{bank} missing from the choice offered: {e}")
+    check(s.url is None, "a refused transfer must never reach the wire")
+    print("  choice: all candidates including T-Bank are surfaced, none auto-picked")
+
+
+def test_the_recipient_fixture_still_matches_the_capture():
+    """Same contract as the /v1/pay fixture: regenerating from the capture must
+    reproduce what is committed, or the app changed and a human should look."""
+    if not os.path.exists(CAPTURE):
+        print(f"  (capture absent at {CAPTURE} — recipient fixture-vs-capture drift "
+              f"check skipped; the contract above was verified against the fixture)")
+        return
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fixtures"))
+    import regen                                            # noqa: E402
+    regen.T.CAPTURE = CAPTURE
+    try:
+        fresh = regen.build_recipient()
+    except FileNotFoundError as e:
+        # The internal /v1/pay lives in its own capture file. Absent, the drift check
+        # cannot run — but say WHICH capture is missing rather than report a failure
+        # that looks like the fixture went stale.
+        print(f"  (capture absent at {e} — recipient fixture-vs-capture drift check "
+              f"skipped; the contract above was verified against the fixture)")
+        return
+    except Exception as e:                                  # noqa: BLE001
+        failures.append(f"recipient.json can no longer be regenerated from the "
+                        f"capture ({type(e).__name__}: {e})")
+        return
+    mine = recipient_fixture()
+    for key in ("internal", "external", "commissions", "internal_pay"):
+        check(mine.get(key) == fresh.get(key),
+              f"fixtures/recipient.json {key} drifted from captures.xml — rerun "
+              f"tests/fixtures/regen.py and read the diff before committing")
+    print("  fixture vs capture: both get_requisites calls still match")
 
 
 MOSENERGO = {
@@ -863,6 +1072,11 @@ def main():
     test_payment_commission_rejects_a_body_it_cannot_use()
     test_a_refusal_is_not_reported_as_a_possible_charge()
     test_the_recipient_bank_the_user_picked_is_the_one_used()
+    test_the_recipient_fixture_still_matches_the_capture()
+    test_the_recipients_own_tbank_account_is_found()
+    test_paying_a_tbank_recipient_sends_the_body_the_app_sends()
+    test_choosing_the_tbank_account_is_not_overridden_by_a_default_sbp_bank()
+    test_a_recipient_with_several_accounts_is_never_picked_silently()
     if failures:
         print("\nFAILED:")
         for f in failures:

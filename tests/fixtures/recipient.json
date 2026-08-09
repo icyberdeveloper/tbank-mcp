@@ -1,0 +1,299 @@
+{
+ "_note": "Scrubbed from captures.xml: /v1/get_requisites for ONE phone, both pointerSources, plus the /v1/payment_commission bodies the app then sends for each candidate. `internal_pay` is the signed /v1/pay for the T-Bank-internal candidate, from captures-pay.xml. Query keys, workflowType, brands and the providerFields key sets are real; the phone, the name, the ids and the amount are synthetic. Regenerate with tests/fixtures/regen.py.",
+ "phone": "+79991234567",
+ "masked_fio": "И. И.",
+ "internal": {
+  "query_keys": [
+   "appName",
+   "appVersion",
+   "ccc",
+   "connectionType",
+   "cpswc",
+   "inache",
+   "origin",
+   "platform",
+   "pointer",
+   "pointerSource",
+   "pointerType"
+  ],
+  "payload": [
+   {
+    "workflowType": "TinkoffInner",
+    "displayFields": [
+     {
+      "name": "maskedFIO",
+      "value": "И. И."
+     }
+    ],
+    "pointerLinkId": "10000000000",
+    "providerPriority": 1,
+    "brand": {
+     "name": "Т-Банк",
+     "baseTextColor": "333333",
+     "fileLink": "https://brands-prod.cdn-tinkoff.ru/general_logo/tinkoff-new.png",
+     "baseColor": "ffdd2d",
+     "logoFile": "tinkoff-new.png",
+     "logo": "https://brands-prod.cdn-tinkoff.ru/general_logo/tinkoff-new.png",
+     "id": "11256",
+     "roundedLogo": false
+    },
+    "receiverCurrencies": [],
+    "isDefaultBank": false,
+    "messageAllowed": true
+   }
+  ]
+ },
+ "external": {
+  "query_keys": [
+   "appName",
+   "appVersion",
+   "ccc",
+   "connectionType",
+   "cpswc",
+   "gapBanks",
+   "inache",
+   "origin",
+   "platform",
+   "pointer",
+   "pointerSource",
+   "pointerType",
+   "withTinkoff"
+  ],
+  "payload": [
+   {
+    "workflowType": "SBPTransfer",
+    "displayFields": [
+     {
+      "name": "bankMemberId",
+      "value": "100000000111"
+     },
+     {
+      "name": "maskedFIO",
+      "value": "И. И."
+     }
+    ],
+    "pointerLinkId": "10000000001",
+    "providerPriority": 3,
+    "brand": {
+     "name": "Сбербанк",
+     "baseTextColor": "ffffff",
+     "fileLink": "https://brands-prod.cdn-tinkoff.ru/general_logo/sber.png",
+     "link": "www.sberbank.ru",
+     "baseColor": "21A038",
+     "logoFile": "sber.png",
+     "logo": "https://brands-prod.cdn-tinkoff.ru/general_logo/sber.png",
+     "id": "11242",
+     "roundedLogo": false
+    },
+    "requisitesSource": "CACHE",
+    "order": 200,
+    "receiverCurrencies": [],
+    "isDefaultBank": false,
+    "messageAllowed": true,
+    "minAmountMe2me": 10.0,
+    "maxAmountMe2me": 30000000.0,
+    "isMe2meSupported": true
+   },
+   {
+    "workflowType": "SBPTransfer",
+    "displayFields": [
+     {
+      "name": "bankMemberId",
+      "value": "100000000005"
+     },
+     {
+      "name": "maskedFIO",
+      "value": "И. И."
+     }
+    ],
+    "pointerLinkId": "10000000002",
+    "providerPriority": 3,
+    "brand": {
+     "name": "ВТБ",
+     "baseTextColor": "ffffff",
+     "fileLink": "https://brands-prod.cdn-tinkoff.ru/general_logo/vtbbank.png",
+     "link": "www.vtb.ru",
+     "baseColor": "0a2896",
+     "logoFile": "vtbbank.png",
+     "logo": "https://brands-prod.cdn-tinkoff.ru/general_logo/vtbbank.png",
+     "id": "11366",
+     "roundedLogo": false
+    },
+    "requisitesSource": "CACHE",
+    "order": 400,
+    "receiverCurrencies": [],
+    "isDefaultBank": false,
+    "messageAllowed": true,
+    "minAmountMe2me": 10.0,
+    "maxAmountMe2me": 30000000.0,
+    "isMe2meSupported": true
+   }
+  ]
+ },
+ "commissions": [
+  {
+   "pay_parameters": {
+    "isTransferStatus": "false",
+    "paymentType": "Transfer",
+    "moneyAmount": 0,
+    "currency": "RUB",
+    "provider": "p2p-anybank",
+    "isUrgentTransfer": "false",
+    "account": "0000000000",
+    "providerFields": {
+     "maskedFIO": "И. И.",
+     "pointerLinkId": "10000000000",
+     "pointer": "+79991234567",
+     "pointerType": "8276"
+    }
+   },
+   "unfinished_flag": true
+  },
+  {
+   "pay_parameters": {
+    "provider": "p2p-anybank",
+    "paymentType": "Transfer",
+    "isUrgentTransfer": "false",
+    "isTransferStatus": "false",
+    "providerFields": {
+     "bankMemberId": "100000000111",
+     "pointer": "+79991234567",
+     "maskedFIO": "И. И.",
+     "pointerType": "8276",
+     "pointerLinkId": "10000000001"
+    },
+    "moneyAmount": 0,
+    "currency": "RUB",
+    "account": "0000000000"
+   },
+   "unfinished_flag": true
+  },
+  {
+   "pay_parameters": {
+    "isUrgentTransfer": "false",
+    "provider": "p2p-anybank",
+    "providerFields": {
+     "pointer": "+79991234567",
+     "bankMemberId": "100000000005",
+     "pointerType": "8276",
+     "pointerLinkId": "10000000002",
+     "maskedFIO": "И. И."
+    },
+    "moneyAmount": 0,
+    "currency": "RUB",
+    "isTransferStatus": "false",
+    "account": "0000000000",
+    "paymentType": "Transfer"
+   },
+   "unfinished_flag": true
+  }
+ ],
+ "internal_pay": {
+  "query_keys": [
+   "appName",
+   "appVersion",
+   "ccc",
+   "colorDepth",
+   "connectionType",
+   "cpswc",
+   "debug",
+   "deviceId",
+   "device_screen_height",
+   "device_screen_width",
+   "emulator",
+   "inache",
+   "jailbreak",
+   "javaEnabled",
+   "javaScriptEnabled",
+   "language",
+   "notificationUrl",
+   "oldDeviceId",
+   "origin",
+   "platform",
+   "sessionid",
+   "timezone"
+  ],
+  "query_static": {
+   "appName": "mobile",
+   "appVersion": "7.39.1",
+   "ccc": "true",
+   "colorDepth": "24",
+   "connectionType": "WiFi",
+   "cpswc": "true",
+   "debug": "0",
+   "device_screen_height": "2736",
+   "device_screen_width": "1260",
+   "emulator": "0",
+   "inache": "airpilotlogt",
+   "jailbreak": "false",
+   "javaEnabled": "false",
+   "javaScriptEnabled": "true",
+   "language": "ru-CY",
+   "notificationUrl": "https://api.t-bank-app.ru/v1/3ds",
+   "origin": "mobile,ib5,loyalty,platform",
+   "platform": "ios",
+   "timezone": "180"
+  },
+  "form_keys": [
+   "colorDepth",
+   "debug",
+   "device_screen_height",
+   "device_screen_width",
+   "emulator",
+   "jailbreak",
+   "javaEnabled",
+   "javaScriptEnabled",
+   "language",
+   "notificationUrl",
+   "payParameters",
+   "timezone"
+  ],
+  "pay_parameters": {
+   "account": "0000000000",
+   "providerFields": {
+    "pointerLinkId": "10000000000",
+    "pointer": "+79991234567",
+    "pointerType": "8276",
+    "maskedFIO": "И. И."
+   },
+   "userPaymentId": "1700000000000",
+   "provider": "p2p-anybank",
+   "moneyAmount": 1000,
+   "isTransferStatus": "false",
+   "currency": "RUB",
+   "cellularService": "WiFi",
+   "isUrgentTransfer": "false",
+   "frontCamera": "true"
+  },
+  "pay_response": {
+   "paymentId": "100000000001",
+   "commissionInfo": {
+    "amount": {
+     "currency": {
+      "name": "RUB",
+      "strCode": "643",
+      "code": 643
+     },
+     "value": 1000.0
+    },
+    "commission": {
+     "currency": {
+      "name": "RUB",
+      "strCode": "643",
+      "code": 643
+     },
+     "value": 0.0
+    },
+    "amountWithCommission": {
+     "currency": {
+      "name": "RUB",
+      "strCode": "643",
+      "code": 643
+     },
+     "value": 1000.0
+    }
+   },
+   "extraFields": {}
+  }
+ }
+}
