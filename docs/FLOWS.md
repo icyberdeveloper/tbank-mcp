@@ -109,19 +109,37 @@ You normally just call a read tool; the above runs under the hood. Call
 
 ## 4. P2P transfer / bill pay  (signed)
 
-1. `transfer_sbp_resolve(phone)` → resolve a phone to its SBP recipient banks
-   (`GET /v1/get_requisites`, read-only). Returns `bankMemberId`/`maskedFIO`/
-   `pointerLinkId` per bank + `isDefaultBank`. **Required for a NEW (unsaved)
-   recipient** before commission/transfer; if several banks and no default, ask the
-   user which bank (never silently pick — wrong bank = money gone).
+1. `transfer_sbp_resolve(phone)` → resolve a phone to everywhere it can be paid
+   (`GET /v1/get_requisites`, read-only). **TWO calls, as the app makes them:**
+   `pointerSource=internal` → the recipient's own T-Bank account, if they are a
+   T-Bank client (`workflowType:"TinkoffInner"`, `maskedFIO` + `pointerLinkId`, and
+   **no `bankMemberId`** — an internal transfer is not routed through SBP; that call
+   carries neither `withTinkoff` nor `gapBanks`); `pointerSource=external&
+   withTinkoff=true&gapBanks=true` → their SBP banks (`workflowType:"SBPTransfer"`,
+   `bankMemberId`/`maskedFIO`/`pointerLinkId` + `isDefaultBank`). `withTinkoff=true`
+   does NOT fold the internal answer into the external one — measured on the same
+   phone: external = Sber + VTB, internal = the T-Bank account. Asking only the
+   external one is why a recipient plainly visible in the app resolved to «no
+   T-Bank». **Required for a NEW (unsaved) recipient** before commission/transfer;
+   if several candidates and no default, ask the user which one (never silently
+   pick — wrong account = money gone).
 2. `payment_commission(body)` → preview the fee. `payParameters` with the resolved
    `providerFields`, `pointerType:"8276"`, `pointer:"+7…"` — plus
    **`paymentType:"Transfer"`, which commission REQUIRES and the transfer itself must
    NOT carry**: it appears in every captured commission body and in none of the three
    captured `/v1/pay` bodies. Do NOT use `pointerType:"ACCOUNT"`, the bank rejects it
-   → INVALID_REQUEST_DATA.
+   → INVALID_REQUEST_DATA. `"unfinishedFlag": true` in the reply means the preview is
+   not a quote: the bank answers that to `moneyAmount:0` and to any body whose
+   `providerFields` do not identify a recipient, and pairs it with «Комиссия не
+   взимается» and a 3 000 000 ₽ ceiling for any phone at all. Only
+   `unfinishedFlag:false` is a fee.
 3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
-   pointer_link_id, from_account, force)` → moves REAL money. `provider=
+   pointer_link_id, from_account, force)` → moves REAL money. Two capture-verified
+   flavours of the same `p2p-anybank` envelope, differing by ONE providerFields key:
+   SBP carries `bankMemberId` (captures.xml #1477), a transfer to the recipient's own
+   T-Bank account does NOT (captures-pay.xml — same `pointerType:"8276"` and phone
+   pointer, 200 + `paymentId`). Choosing the internal one = pass its `pointer_link_id`
+   with an empty `bank_member_id`. `provider=
    "transfer-legal"` raises `WRONG_METHOD` and names `transfer_requisites` instead:
    nine requisite fields do not fit this signature (see «By bank requisites» below).
    The HMAC

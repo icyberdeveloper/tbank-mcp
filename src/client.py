@@ -42,6 +42,10 @@ ID_BASE = "https://id.t-bank-app.ru"
 # stored an explicit empty "" token_url (the old default) can never make
 # refresh() POST to "" (the original MissingSchema('') crash).
 DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
+# workflowType the bank puts on a get_requisites candidate that is the recipient's
+# own T-Bank account rather than an SBP route to another bank. Such a candidate has
+# no bankMemberId — there is no member to route to.
+TBANK_INNER_WORKFLOW = "TinkoffInner"
 # SBP "pointer type" enum for a phone-number pointer. Verified CONSTANT across all
 # phone/SBP transfers in captures.xml (6 different recipients, different bankMemberId,
 # always pointerType="8276") — it is NOT the recipient's bank code (that's bankMemberId),
@@ -3458,15 +3462,77 @@ class MobileSession:
             "Посмотри list_accounts() и укажи счёт явно: "
             "transfer(..., from_account=\"…\") или ticket_pay(..., account_id=\"…\").")
 
-    def resolve_sbp_recipient(self, phone: str) -> list[dict]:
-        """Resolve a phone to its SBP recipient banks (GET /v1/get_requisites,
-        capture-verified). READ-ONLY — no money moves. A phone can map to SEVERAL
-        banks (the recipient has accounts in multiple SBP banks), so the caller
-        picks one (prefer isDefaultBank=True). Returns [{bank_member_id,
-        masked_fio, pointer_link_id, bank_name, bank_id, is_default_bank,
-        provider_fields}] per bank — provider_fields is the ready SBP providerFields
-        object (pointerType from the SBP_PHONE_POINTER_TYPE constant) to paste into
-        payment_commission(). Empty list = not registered in SBP / wrong number.
+    def _requisites(self, ptr: str, source: str) -> list[dict]:
+        """One GET /v1/get_requisites for one pointerSource, parsed into candidates.
+
+        The app sends the two sources with DIFFERENT query params — the internal
+        lookup carries neither withTinkoff nor gapBanks — and both shapes are in
+        captures.xml, so neither is guessed."""
+        extra = ({"withTinkoff": "true", "gapBanks": "true"}
+                 if source == "external" else {})
+        r = self._call_read("get_requisites", overrides={
+            "pointerType": "phone", "pointer": ptr,
+            "pointerSource": source, **extra,
+        })
+        items = r if isinstance(r, list) else (
+            (r.get("payload") if isinstance(r, dict) else None) or [])
+        out: list[dict] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            df = {d.get("name"): d.get("value")
+                  for d in (it.get("displayFields") or []) if isinstance(d, dict)}
+            brand = it.get("brand") or {}
+            bmi, mfio, plid = (str(df.get("bankMemberId", "")),
+                               str(df.get("maskedFIO", "")),
+                               str(it.get("pointerLinkId", "")))
+            # ready providerFields — paste into payment_commission() so the agent
+            # never hand-writes the 8276 pointer-type code. bankMemberId is OMITTED,
+            # not blanked, when the bank did not send one: the T-Bank-internal
+            # commission body in captures.xml has no such key, and an empty string
+            # there is a value we have never seen the app send.
+            pf = {"pointerType": SBP_PHONE_POINTER_TYPE, "pointer": ptr,
+                  "maskedFIO": mfio, "pointerLinkId": plid}
+            if bmi:
+                pf["bankMemberId"] = bmi
+            out.append({
+                "bank_member_id": bmi,
+                "masked_fio": mfio,
+                "pointer_link_id": plid,
+                "bank_name": str(brand.get("name", "")),
+                "bank_id": str(brand.get("id", "")),
+                "is_default_bank": bool(it.get("isDefaultBank")),
+                "workflow_type": str(it.get("workflowType", "")),
+                "is_tbank": str(it.get("workflowType", "")) == TBANK_INNER_WORKFLOW,
+                "provider_fields": pf,
+            })
+        return out
+
+    def resolve_recipient(self, phone: str) -> list[dict]:
+        """Resolve a phone to every account it can be paid to (GET
+        /v1/get_requisites, capture-verified). READ-ONLY — no money moves.
+
+        TWO requests, because the bank answers two different questions and the app
+        asks both, in this order:
+
+          pointerSource=internal → the recipient's T-BANK account, if they are a
+            T-Bank client. workflowType='TinkoffInner', maskedFIO and pointerLinkId,
+            and NO bankMemberId — an internal transfer is not routed through SBP.
+          pointerSource=external → the recipient's SBP banks.
+            workflowType='SBPTransfer', each with its own bankMemberId.
+
+        Asking only the second one is why a recipient the user could plainly see in
+        the app came back as «Sber and VTB, no T-Bank»: `withTinkoff=true` on the
+        external call does NOT fold the internal answer in — measured on the same
+        phone in captures.xml, the external list is Sber+VTB and the internal one is
+        the T-Bank account, and nothing about the external response hints that a
+        second list exists.
+
+        A phone can therefore map to SEVERAL candidates, so the caller picks one
+        (prefer isDefaultBank=True). Returns [{bank_member_id, masked_fio,
+        pointer_link_id, bank_name, bank_id, is_default_bank, workflow_type,
+        is_tbank, provider_fields}], T-Bank first. Empty list = neither a T-Bank
+        client nor registered in SBP (or the number is wrong).
 
         RAISES THE SESSION LEVEL FIRST. This endpoint validates the mobile sessionid,
         not just the Bearer, and its CLIENT window is ~11 minutes against the token's
@@ -3481,36 +3547,12 @@ class MobileSession:
         (for the display name), so a guard on the tool layer would miss that path."""
         self.ensure_client_session()
         ptr = _normalize_phone(phone)
-        r = self._call_read("get_requisites", overrides={
-            "pointerType": "phone", "pointer": ptr,
-            "pointerSource": "external", "withTinkoff": "true", "gapBanks": "true",
-        })
-        items = r if isinstance(r, list) else (
-            (r.get("payload") if isinstance(r, dict) else None) or [])
-        out: list[dict] = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            df = {d.get("name"): d.get("value")
-                  for d in (it.get("displayFields") or []) if isinstance(d, dict)}
-            brand = it.get("brand") or {}
-            bmi, mfio, plid = (str(df.get("bankMemberId", "")),
-                               str(df.get("maskedFIO", "")),
-                               str(it.get("pointerLinkId", "")))
-            out.append({
-                "bank_member_id": bmi,
-                "masked_fio": mfio,
-                "pointer_link_id": plid,
-                "bank_name": str(brand.get("name", "")),
-                "bank_id": str(brand.get("id", "")),
-                "is_default_bank": bool(it.get("isDefaultBank")),
-                # ready SBP providerFields — paste into payment_commission() so the
-                # agent never hand-writes the 8276 pointer-type code.
-                "provider_fields": {"pointerType": SBP_PHONE_POINTER_TYPE,
-                                    "pointer": ptr, "bankMemberId": bmi,
-                                    "maskedFIO": mfio, "pointerLinkId": plid},
-            })
-        return out
+        # The internal lookup is the cheap one and the one whose absence caused the
+        # bug, so it goes first and its failure is NOT swallowed: a T-Bank recipient
+        # silently missing from the list is exactly the state this method exists to
+        # end. Both calls hit the same endpoint with the same session, so there is no
+        # failure mode where one is reachable and the other is not.
+        return self._requisites(ptr, "internal") + self._requisites(ptr, "external")
 
     def transfer(self, amount: float, to_account: str, description: str = "",
                  provider: str = "p2p-anybank", pointer_type: str = SBP_PHONE_POINTER_TYPE,
@@ -3522,15 +3564,23 @@ class MobileSession:
         mechanism (_signed_parts) is unchanged — it was proven byte-exact.
 
         phone/SBP (default: provider='p2p-anybank', pointer_type='8276'):
-          to_account = recipient phone. If bank_member_id/masked_fio/pointer_link_id
-          are NOT passed, the recipient is AUTO-RESOLVED via resolve_sbp_recipient()
-          (GET /v1/get_requisites): the default bank is picked, or the single match;
-          if several banks with no default → RECIPIENT_MULTIPLE_BANKS (surface list,
-          never silently pick). For a NEW recipient, call transfer_sbp_resolve(phone)
-          first to show the user the candidate banks, then pass the chosen fields.
+          to_account = recipient phone. If pointer_link_id is NOT passed, the
+          recipient is AUTO-RESOLVED via resolve_recipient() (GET
+          /v1/get_requisites, both pointerSources): the default is picked, or the
+          single match; if several with no default → RECIPIENT_MULTIPLE_BANKS
+          (surface list, never silently pick). For a NEW recipient, call
+          transfer_sbp_resolve(phone) first to show the user the candidates, then
+          pass the chosen fields. A candidate that is the recipient's own T-BANK
+          account has no bankMemberId — pass its pointer_link_id and leave
+          bank_member_id empty, and the key is omitted from providerFields.
           pay body is capture-verified (providerFields.pointerType='8276', pointer
           '+7XXXXXXXXXX'). paymentType='Transfer' belongs to payment_commission,
           NOT to pay — no real pay body carries it.
+
+          Both flavours are pinned to a real signed /v1/pay that the bank answered
+          200 to: the SBP one to captures.xml #1477, the T-Bank-internal one to
+          captures-pay.xml (same provider and envelope, providerFields WITHOUT
+          bankMemberId). Neither is an inference from a commission preview.
         between own accounts (provider='transfer-inner'): NOT supported for the
           PAYMENT. providerFields = {'bankContract': to_account} is a plausible
           envelope, but unlike p2p-anybank (capture-verified) there is no captured
@@ -3604,26 +3654,36 @@ class MobileSession:
             # silently replaced the bank the user had picked and confirmed. Same
             # person, different account, and invisible: the result line prints the
             # recipient only when masked_fio is set.
-            if not (bank_member_id and pointer_link_id):
+            # pointer_link_id ALONE is the caller's explicit choice — the gate used to
+            # demand bank_member_id too, and a T-Bank-internal recipient does not have
+            # one. With the old gate, picking the recipient's T-Bank account was not
+            # expressible: passing its link id with an empty member id looked like
+            # "nothing chosen" and re-resolved to some SBP bank instead.
+            if not pointer_link_id:
                 # Auto-resolve the recipient via get_requisites (read-only). Pick the
                 # default bank if any, else the single match; if several with NO
                 # default, refuse + surface the list — money safety: never silently
                 # pick a bank (could send to the wrong bank/account).
-                resolved = self.resolve_sbp_recipient(to_account)
+                resolved = self.resolve_recipient(to_account)
                 if not resolved:
                     raise TbankApiError("RECIPIENT_NOT_RESOLVED",
-                        f"{to_account} is not registered in SBP (or the number is wrong). "
+                        f"{to_account} has no T-Bank account and is not registered in "
+                        "SBP (or the number is wrong). "
                         "Call transfer_sbp_resolve(phone) to check.")
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]
                 if pick is None:
                     raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
-                        f"{to_account} maps to {len(resolved)} SBP banks — pick one:\n" +
-                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']} | "
-                                  f"bankMemberId={x['bank_member_id']} | pointerLinkId={x['pointer_link_id']}"
+                        f"{to_account} maps to {len(resolved)} accounts — pick one:\n" +
+                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']}"
+                                  + (" (счёт в Т-Банке, перевод внутри банка)"
+                                     if x["is_tbank"] else "")
+                                  + f" | bankMemberId={x['bank_member_id'] or '—'}"
+                                  f" | pointerLinkId={x['pointer_link_id']}"
                                   for x in resolved) +
-                        "\nPass the chosen bank_member_id + pointer_link_id to transfer().")
+                        "\nPass the chosen pointer_link_id (+ bank_member_id for an "
+                        "SBP bank; a T-Bank account has none) to transfer().")
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]
@@ -3639,7 +3699,10 @@ class MobileSession:
                 # a request is still absent from the sentence a person checks before
                 # the money moves.
                 try:
-                    match = next((x for x in self.resolve_sbp_recipient(to_account)
+                    # An empty bank_member_id means the caller chose the recipient's
+                    # T-Bank account, and that candidate is the one with no member id
+                    # — so the same comparison selects it, deliberately.
+                    match = next((x for x in self.resolve_recipient(to_account)
                                   if str(x.get("bank_member_id")) == str(bank_member_id)), None)
                     masked_fio = (match or {}).get("masked_fio", "")
                 except TbankApiError:
@@ -3649,8 +3712,14 @@ class MobileSession:
                     masked_fio = ""
 
             pf = {"pointerType": pointer_type, "pointer": _normalize_phone(to_account),
-                  "bankMemberId": bank_member_id, "maskedFIO": masked_fio,
-                  "pointerLinkId": pointer_link_id}
+                  "maskedFIO": masked_fio, "pointerLinkId": pointer_link_id}
+            if bank_member_id:
+                # Present for an SBP route (captures.xml #1477), ABSENT for a T-Bank
+                # -internal one: the captured internal commission body has no such
+                # key, and the bank answers a bodiless bankMemberId with
+                # unfinishedFlag=true — "recipient not fully identified" — which is
+                # exactly what a blank string would reproduce.
+                pf["bankMemberId"] = bank_member_id
         if description:
             # The app carries the note here, not as a top-level field
             # (captures2.xml #595: providerFields.message = "Hi").

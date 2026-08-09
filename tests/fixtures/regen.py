@@ -375,6 +375,196 @@ def build_transfer_legal():
     }
 
 
+def build_recipient():
+    """Both halves of a phone lookup, from captures.xml: the app asks
+    /v1/get_requisites TWICE per number — pointerSource=internal for the recipient's
+    own T-Bank account, pointerSource=external for their SBP banks — and only the
+    two together are the answer to "where can this phone be paid".
+
+    The number picked is the one where the difference is visible: external returns
+    Sber and VTB, internal returns a T-Bank account, and nothing in the external
+    response says a second list exists. `withTinkoff=true` on the external call does
+    not fold it in, which is the whole reason this fixture exists.
+
+    Kept real: the query keys of both calls (the internal one carries neither
+    withTinkoff nor gapBanks), workflowType, the brand block, and the providerFields
+    key set of the commission the app then sends for each candidate — the internal
+    one has NO bankMemberId key at all. Replaced: the phone, the name and the ids.
+
+    The commissions are the app's opening probe, moneyAmount=0, so every one of them
+    comes back unfinishedFlag=true; the flag is kept because a preview that carries
+    it is not a quote, whatever number sits next to it."""
+    import urllib.parse
+
+    import test_cart_body_matches_capture as T
+
+    FAKE_PHONE, FAKE_FIO = "+79991234567", "И. И."
+
+    def parsed(item):
+        """(path, query, request bytes) for one capture item, or None."""
+        raw = T._raw(item, "request")
+        line = raw.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+        path = line.split(" ")[1] if line.count(" ") >= 2 else ""
+        if "?" not in path:
+            return path, {}, raw
+        return path, urllib.parse.parse_qs(path.split("?", 1)[1]), raw
+
+    # The sample phone is chosen by PROPERTY, never written down: the one number in
+    # the capture whose internal AND external lookups both answer with candidates.
+    # A literal here would put a real person's phone in a committed file.
+    items = T._items()
+    answered = {}
+    for item in items:
+        path, query, _ = parsed(item)
+        if "/v1/get_requisites" not in path:
+            continue
+        pointer = (query.get("pointer") or [""])[0]
+        source = (query.get("pointerSource") or [""])[0]
+        body = T._raw(item, "response").partition(b"\r\n\r\n")[2].strip()
+        if not pointer or source not in ("internal", "external") or not body:
+            continue
+        if json.loads(body).get("payload"):
+            answered.setdefault(pointer, set()).add(source)
+    phones = [p for p, s in answered.items() if s == {"internal", "external"}]
+    if not phones:
+        raise SystemExit("no phone in the capture has BOTH an internal and an "
+                         "external get_requisites answer — the fixture would not "
+                         "show the difference it exists to show")
+    phone = phones[0]
+
+    links = {}         # real pointerLinkId → synthetic, in encounter order
+
+    def fake_link(real):
+        return links.setdefault(str(real), f"1000000000{len(links)}")
+
+    def scrub_candidate(c):
+        c = json.loads(json.dumps(c))
+        c["pointerLinkId"] = fake_link(c.get("pointerLinkId"))
+        for f in c.get("displayFields") or []:
+            if f.get("name") == "maskedFIO":
+                f["value"] = FAKE_FIO
+        return c
+
+    resolves, commissions = {}, []
+    for item in items:
+        path, query, raw = parsed(item)
+        if "/v1/get_requisites" in path and phone in (query.get("pointer") or []):
+            source = (query.get("pointerSource") or [""])[0]
+            body = T._raw(item, "response").partition(b"\r\n\r\n")[2].strip()
+            if source not in ("internal", "external") or not body:
+                continue
+            resolves[source] = {
+                "query_keys": sorted(k for k in query if k not in
+                                     ("sessionid", "deviceId", "oldDeviceId")),
+                "payload": [scrub_candidate(c)
+                            for c in (json.loads(body).get("payload") or [])],
+            }
+        elif "/v1/payment_commission" in path:
+            form = urllib.parse.parse_qs(raw.partition(b"\r\n\r\n")[2].decode())
+            pp = json.loads(form["payParameters"][0])
+            pf = pp.get("providerFields") or {}
+            if pf.get("pointer") != phone:
+                continue
+            pf["pointer"] = FAKE_PHONE
+            pf["maskedFIO"] = FAKE_FIO
+            pf["pointerLinkId"] = fake_link(pf.get("pointerLinkId"))
+            pp["account"] = "0000000000"
+            resp = json.loads(T._raw(item, "response").partition(b"\r\n\r\n")[2])
+            commissions.append({
+                "pay_parameters": pp,
+                "unfinished_flag": (resp.get("payload") or {}).get("unfinishedFlag"),
+            })
+
+    return {
+        "_note": ("Scrubbed from captures.xml: /v1/get_requisites for ONE phone, both "
+                  "pointerSources, plus the /v1/payment_commission bodies the app "
+                  "then sends for each candidate. `internal_pay` is the signed "
+                  "/v1/pay for the T-Bank-internal candidate, from captures-pay.xml. "
+                  "Query keys, workflowType, brands and the providerFields key sets "
+                  "are real; the phone, the name, the ids and the amount are "
+                  "synthetic. Regenerate with tests/fixtures/regen.py."),
+        "phone": FAKE_PHONE,
+        "masked_fio": FAKE_FIO,
+        "internal": resolves["internal"],
+        "external": resolves["external"],
+        "commissions": commissions,
+        "internal_pay": build_internal_pay(FAKE_PHONE, FAKE_FIO),
+    }
+
+
+# The transfer to a T-Bank client by phone, captured end to end after the SBP-only
+# lookup was found to hide such a recipient. Its own file: it is a later session on a
+# later app build, and folding it into captures.xml would blur which capture proves
+# what.
+CAPTURE_PAY = os.environ.get("TBANK_CAPTURE_PAY",
+                             os.path.expanduser("~/tbank-app/captures-pay.xml"))
+
+
+def build_internal_pay(fake_phone, fake_fio):
+    """The signed /v1/pay for a T-Bank-INTERNAL recipient, from captures-pay.xml.
+
+    This is the request the repo had no capture of: same provider and endpoint as the
+    SBP transfer in transfer.json, but providerFields carry pointerLinkId and NO
+    bankMemberId — the recipient is an account inside the bank, not a member to route
+    to. Until it existed the internal body was an inference from the commission
+    preview; now it is pinned.
+
+    Kept: the query keys, the form keys, the payParameters KEY SET and the protocol
+    constants, plus the two query values that differ from the older capture
+    (appVersion, inache) — recorded, not asserted, because they are the app build the
+    repo replays, not this flow's contract. Replaced: the payer account, the
+    recipient, the ids and the amount."""
+    import urllib.parse
+
+    if not os.path.exists(CAPTURE_PAY):
+        raise FileNotFoundError(CAPTURE_PAY)
+    with open(CAPTURE_PAY, "rb") as fh:
+        blob = fh.read().decode("utf-8", "replace")
+
+    import test_cart_body_matches_capture as T
+
+    for item in re.findall(r"<item>(.*?)</item>", blob, re.S):
+        url = re.search(r"<url>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</url>", item, re.S)
+        if not url or "/v1/pay?" not in url.group(1):
+            continue
+        raw = T._raw(item, "request")
+        head, _, body = raw.partition(b"\r\n\r\n")
+        query = urllib.parse.parse_qs(
+            head.split(b"\r\n")[0].decode().split("?", 1)[1].split(" ")[0])
+        form = urllib.parse.parse_qs(body.decode())
+        pp = json.loads(form["payParameters"][0])
+        pf = pp.get("providerFields") or {}
+        if pp.get("provider") != "p2p-anybank" or "bankMemberId" in pf:
+            continue          # an SBP transfer — transfer.json already pins that one
+
+        pp["account"] = "0000000000"
+        pp["userPaymentId"] = "1700000000000"
+        pp["moneyAmount"] = 1000
+        pf["pointer"] = fake_phone
+        pf["maskedFIO"] = fake_fio
+        pf["pointerLinkId"] = "10000000000"
+
+        resp = json.loads(T._raw(item, "response").partition(b"\r\n\r\n")[2])
+        payload = resp.get("payload", resp)
+        payload["paymentId"] = "100000000001"
+        info = payload.get("commissionInfo") or {}
+        for key in ("amount", "amountWithCommission"):
+            if isinstance(info.get(key), dict):
+                info[key]["value"] = float(pp["moneyAmount"])
+
+        secret = {"sessionid", "deviceId", "oldDeviceId"}
+        return {
+            "query_keys": sorted(query),
+            "query_static": {k: v[0] for k, v in sorted(query.items())
+                             if k not in secret},
+            "form_keys": sorted(form),
+            "pay_parameters": pp,
+            "pay_response": payload,
+        }
+    raise SystemExit(f"no T-Bank-internal /v1/pay (p2p-anybank, no bankMemberId) "
+                     f"in {CAPTURE_PAY}")
+
+
 def write(name, data):
     out = os.path.join(HERE, name)
     with open(out, "w", encoding="utf-8") as fh:
@@ -395,6 +585,10 @@ def main():
     except FileNotFoundError as e:
         print(f"booking fixture skipped: {e}")
     write("transfer.json", build_transfer())
+    try:
+        write("recipient.json", build_recipient())
+    except FileNotFoundError as e:
+        print(f"recipient fixture skipped: {e}")
     try:
         write("transfer_legal.json", build_transfer_legal())
     except FileNotFoundError as e:

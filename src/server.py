@@ -134,7 +134,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "messenger_file": ("Вложение из чата", READ),
     "messenger_send": ("Отправка сообщения", WRITE),
     # money
-    "transfer_sbp_resolve": ("Получатель СБП по телефону", READ),
+    "transfer_sbp_resolve": ("Получатель по телефону — Т-Банк + СБП", READ),
     "payment_qr": ("Разбор платёжного QR", READ),
     "payment_commission": ("Предпросмотр комиссии", READ),
     "payment_providers": ("Каталог платёжных провайдеров", READ),
@@ -1823,25 +1823,34 @@ def messenger_file(conversation_id: str, file_id: str,
 
 @mcp.tool()
 def transfer_sbp_resolve(phone: str) -> str:
-    """Резолвинг получателя СБП по номеру (read-only, БЕЗ денег). Возвращает банки
-    получателя (маскированное имя + банк + isDefaultBank) и готовый provider_fields.
-    Используй ПЕРЕД transfer()/payment_commission() для НОВОГО (несохранённого)
-    получателя. provider_fields вставь в payParameters.providerFields комиссии — не
-    пиши 8276 руками. Для transfer() передай bank_member_id+pointer_link_id (или
-    ничего — выберется дефолт); при нескольких банках без дефолта нужен явный выбор."""
+    """Резолвинг получателя по номеру (read-only, БЕЗ денег) — счёт в Т-Банке И банки
+    СБП. Возвращает маскированное имя + банк + isDefaultBank и готовый
+    provider_fields. Используй ПЕРЕД transfer()/payment_commission() для НОВОГО
+    (несохранённого) получателя. provider_fields вставь в
+    payParameters.providerFields комиссии — не пиши 8276 руками.
+
+    Счёт в Т-Банке — отдельный кандидат (перевод внутри банка, не через СБП): у него
+    НЕТ bankMemberId. Если он в списке, получатель — клиент Т-Банка, даже когда в
+    СБП Т-Банка не видно; это разные списки, и раньше тул показывал только второй.
+    Для transfer() передай pointer_link_id выбранного кандидата (+ bank_member_id,
+    если это банк СБП); ничего не передать — выберется дефолт, а при нескольких
+    кандидатах без дефолта тул откажет и попросит выбрать."""
     try:
         s = _require(); s.ensure_fresh()
-        cands = s.resolve_sbp_recipient(phone)
+        cands = s.resolve_recipient(phone)
         if not cands:
-            return f"{phone}: получатель не зарегистрирован в СБП (или неверный номер)."
-        lines = [f"{phone}: найдено банков СБП — {len(cands)}"]
+            return (f"{phone}: нет счёта в Т-Банке и не зарегистрирован в СБП "
+                    f"(или неверный номер).")
+        lines = [f"{phone}: найдено получателей — {len(cands)}"]
         for c in cands:
             star = " ★ДЕФОЛТ" if c["is_default_bank"] else ""
-            lines.append(f"- {c['masked_fio']} | {c['bank_name']}{star}")
+            inner = " ← счёт в Т-Банке, перевод внутри банка (без СБП)" if c["is_tbank"] else ""
+            lines.append(f"- {c['masked_fio']} | {c['bank_name']}{star}{inner}")
             lines.append(f"  providerFields: {json.dumps(c['provider_fields'], ensure_ascii=False)}")
         lines.append("payment_commission: вставь providerFields в payParameters.providerFields "
                      "(account/moneyAmount/currency/paymentType добавь сам). "
-                     "transfer: передай bank_member_id + pointer_link_id, или ничего (дефолт).")
+                     "transfer: передай pointer_link_id выбранного (+ bank_member_id "
+                     "для банка СБП), или ничего (дефолт).")
         return "\n".join(lines)
     except Exception as e:
         return _err_session(e)
@@ -1879,10 +1888,11 @@ def transfer(amount: float, to_account: str, description: str = "",
     from_account — счёт списания из list_accounts(). Пусто = первый рублёвый Current
     с положительным балансом; это ДОГАДКА, поэтому если пользователь выбирал счёт —
     передай его явно, иначе спишется с другого.
-    phone/СБП (по умолчанию): to_account=телефон. Если bank_member_id/masked_fio/
-    pointer_link_id не переданы — получатель резолвится АВТОМАТИЧЕСКИ
-    (transfer_sbp_resolve): выберется дефолтный банк; при нескольких банках без
-    дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
+    phone/СБП (по умолчанию): to_account=телефон. Если pointer_link_id не передан —
+    получатель резолвится АВТОМАТИЧЕСКИ (transfer_sbp_resolve): выберется дефолтный
+    кандидат; при нескольких без дефолта вернётся RECIPIENT_MULTIPLE_BANKS со списком.
+    Перевод на счёт в Т-Банке (получатель — клиент Т-Банка): передай его
+    pointer_link_id, а bank_member_id оставь пустым — у внутреннего перевода его нет.
     Между своими счетами (provider='transfer-inner') НЕ реализовано — тело платежа
     не сверено с реальным перехватом трафика; переводи между своими счетами в
     приложении.
@@ -2534,10 +2544,17 @@ def payment_commission(body: str = "") -> str:
          "currency": "RUB",
          "paymentType": "Transfer",     // "Payment" для оплаты услуг
          "provider": "p2p-anybank",     // или transfer-inner / id провайдера
-         "providerFields": { ... }      // для СБП — provider_fields из
-       }}                               // transfer_sbp_resolve(), как есть
+         "providerFields": { ... }      // для перевода по телефону —
+       }}                               // provider_fields из одного кандидата
+                                        // transfer_sbp_resolve(), как есть
 
     НЕ пиши pointerType:"ACCOUNT" — банк отвечает INVALID_REQUEST_DATA.
+    providerFields бери ЦЕЛИКОМ у одного кандидата transfer_sbp_resolve().
+    "unfinishedFlag": true в ответе = это НЕ котировка: банк отвечает так на
+    предпросмотр с moneyAmount 0 и на любой, где получатель не определён
+    (providerFields без pointerLinkId). «Комиссия не взимается» рядом с этим флагом
+    не значит ни что комиссии нет, ни что получатель найден. Считай посчитанной
+    только комиссию с unfinishedFlag: false.
     paymentType здесь обязателен, хотя в самом переводе его быть НЕ должно."""
     try:
         s = _require(); s.ensure_fresh()

@@ -105,15 +105,21 @@ class Lapsed(MobileSession):
 # ---- the fix itself -------------------------------------------------------
 
 def test_the_sbp_lookup_raises_the_session_before_asking():
-    """The guard sits in resolve_sbp_recipient, not in the tools: transfer()
+    """The guard sits in resolve_recipient, not in the tools: transfer()
     resolves a SECOND time on its own, and a tool-level guard would miss it."""
     s = Lapsed()
-    s.resolve_sbp_recipient("+79991234567")
+    s.resolve_recipient("+79991234567")
     check(s.raised == 1,
           f"the session level must be raised before /v1/get_requisites, raised "
           f"{s.raised}× — without it the bank answers REQUEST_RATE_LIMIT_EXCEEDED "
           f"to the first call in fourteen minutes")
-    check(s.reads == ["get_requisites"], f"unexpected reads: {s.reads}")
+    # TWO reads, one per pointerSource, and the level is raised ONCE for both: the
+    # app asks internal (the recipient's own T-Bank account) and external (their SBP
+    # banks) separately, and asking only the second is what hid a T-Bank recipient.
+    # The guard living in the lookup rather than around each request is what keeps
+    # the second call from paying for its own re-mint.
+    check(s.reads == ["get_requisites", "get_requisites"],
+          f"unexpected reads: {s.reads}")
 
     # ...and transfer()'s OWN resolve — the one an agent hits without ever calling
     # transfer_sbp_resolve — goes through the same guard. Ids omitted on purpose:
@@ -163,7 +169,7 @@ def test_a_lapsed_session_is_explained_instead_of_read_as_a_rate_limit():
         def boom(*a, **kw):
             raise TbankApiError(code, message)
 
-        s.resolve_sbp_recipient = boom
+        s.resolve_recipient = boom
         out = run(s, server.transfer_sbp_resolve, "+79991234567")
         check(code in out, f"the bank's own code must survive: {out[:120]!r}")
         check("CLIENT" in out and "refresh_session" in out,
@@ -172,7 +178,7 @@ def test_a_lapsed_session_is_explained_instead_of_read_as_a_rate_limit():
     # ...and the hint says plainly that waiting is useless, because the text
     # («слишком много попыток») invites exactly that.
     s = Lapsed()
-    s.resolve_sbp_recipient = lambda *a, **kw: (_ for _ in ()).throw(
+    s.resolve_recipient = lambda *a, **kw: (_ for _ in ()).throw(
         TbankApiError(*MEASURED["get_requisites"]))
     out = run(s, server.transfer_sbp_resolve, "+79991234567")
     check("НЕ значат перебор" in out or "не значат перебор" in out.lower(),
@@ -184,7 +190,7 @@ def test_an_ordinary_failure_is_not_dressed_up_as_a_session_problem():
     """The hint must not fire on everything, or it becomes noise and the real
     session case stops standing out."""
     s = Lapsed()
-    s.resolve_sbp_recipient = lambda *a, **kw: (_ for _ in ()).throw(
+    s.resolve_recipient = lambda *a, **kw: (_ for _ in ()).throw(
         TbankApiError("INVALID_REQUEST_DATA", "поле заполнено неверно"))
     out = run(s, server.transfer_sbp_resolve, "+79991234567")
     check("refresh_session" not in out,
@@ -224,11 +230,12 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
             return [{"id": "1", "accountType": "Current",
                      "moneyAmount": {"value": 100, "currency": {"name": "RUB"}}}]
 
-        def resolve_sbp_recipient(self, phone):
+        def resolve_recipient(self, phone):
             seen["resolved"] = seen.get("resolved", 0) + 1
             return [{"bank_member_id": "1", "masked_fio": "И. И.",
                      "pointer_link_id": "2", "bank_name": "Б",
-                     "is_default_bank": True}]
+                     "is_default_bank": True, "workflow_type": "SBPTransfer",
+                     "is_tbank": False}]
 
         def _call_signed(self, key, body_str, extra_query=None):
             import urllib.parse
@@ -267,7 +274,7 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
     seen.clear()
 
     class NoName(Named):
-        def resolve_sbp_recipient(self, phone):
+        def resolve_recipient(self, phone):
             seen["resolved"] = seen.get("resolved", 0) + 1
             raise TbankApiError(*MEASURED["get_requisites"])
 
@@ -291,7 +298,7 @@ def test_the_bank_code_is_recorded_so_the_next_one_is_findable():
     path = os.path.join(_TMP, "level.jsonl")
     trace.TRACE_FILE = path
     s = Lapsed()
-    s.resolve_sbp_recipient = lambda *a, **kw: (_ for _ in ()).throw(
+    s.resolve_recipient = lambda *a, **kw: (_ for _ in ()).throw(
         TbankApiError(*MEASURED["get_requisites"]))
     run(s, server.transfer_sbp_resolve, "+79991234567")
 
@@ -306,7 +313,7 @@ def test_the_bank_code_is_recorded_so_the_next_one_is_findable():
 
     # A success must not carry a stale code from an earlier failure.
     ok = Lapsed()
-    ok.resolve_sbp_recipient = lambda *a, **kw: []
+    ok.resolve_recipient = lambda *a, **kw: []
     run(ok, server.transfer_sbp_resolve, "+79991234567")
     rows = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
     check(rows[-1].get("err_code") is None,
