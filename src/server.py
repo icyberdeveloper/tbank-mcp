@@ -968,7 +968,12 @@ def grocery_search(query: str, app_id: str = "", point_id: str = "",
 def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -> str:
     """Спланировать заказ: для каждого ингредиента ищет (custom_ordered → global).
     ingredients = JSON массив, напр. ["свёкла","говядина","капуста"].
-    app_id/point_id — из grocery_stores() (обязательны)."""
+    app_id/point_id — из grocery_stores() (обязательны).
+
+    Каждая позиция помечена ✓ (уверенное совпадение) или «⚠ проверь» (нашёл, но токены
+    совпали не полностью — вероятно не тот товар, сверь по имени). Матчинг чинит
+    пунктуацию/порядок слов/словоформы, но синонимы и транслит НЕ угадывает — их
+    добирай сам (см. лестницу в скиле: свои варианты → WebSearch → браузинг категории)."""
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
@@ -983,10 +988,16 @@ def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -
             # "…" mark at all, and for the same reason as grocery_search: the
             # brand/fat%/variant that disambiguates a near-identical product
             # lives at the end of a grocery name.
+            # Confidence, not a blind ✓: a low token-match means the picker took a
+            # plausible-but-wrong hit (ketchup «с помидорами» for «помидоры»). Flag it
+            # so the wrong pick does not hide inside a tidy-looking cart.
+            ok = i.get("match", 1.0) >= MobileSession.GROCERY_MATCH_OK
+            mark = "✓" if ok else "⚠ проверь"
+            warn = "" if ok else f"  ⟵ по запросу «{i.get('query','')}» — сверь, похоже не то"
             lines.append(
-                f"✓ id={i.get('id','?')} | {i['name']} | {i['price']}₽"
+                f"{mark} id={i.get('id','?')} | {i['name']} | {i['price']}₽"
                 f" | {i.get('weight') or '-'}"
-                f" | {'RAW' if i.get('likely_raw') else 'PREP'} | {i['source']}")
+                f" | {'RAW' if i.get('likely_raw') else 'PREP'} | {i['source']}{warn}")
         if plan["missing"]:
             lines.append(f"MISSING: {', '.join(plan['missing'])}")
         lines.append("Проверь вес/форму позиций перед add_to_cart — id можно "

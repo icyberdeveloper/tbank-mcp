@@ -2664,15 +2664,18 @@ class MobileSession:
             # happened to list first, tiny packs and dried forms included.
             cands = []
             for g in custom_once():
-                name = (g.get("name") or "").lower().replace("ё", "е")
-                if q and q in name:
+                gname = g.get("name", "")
+                name = gname.lower().replace("ё", "е")
+                m = self._name_matches(q, gname) if q else 0.0
+                if m > 0:
                     price = g.get("price", {})
                     weight = g.get("weight", {})
                     cands.append({
-                        "id": str(g.get("id", "")), "name": g.get("name", ""),
+                        "id": str(g.get("id", "")), "name": gname,
                         "price": price.get("value", 0) if isinstance(price, dict) else 0,
                         "weight": (f"{weight.get('value','')} {weight.get('unit','')}".strip()
                                    if isinstance(weight, dict) else ""),
+                        "match": m,
                         "likely_raw": name.startswith(q)})
             best = self._pick_candidate(cands, q)
             if best:
@@ -2693,6 +2696,7 @@ class MobileSession:
                     found = {"id": g.get("id", ""), "name": g.get("name", ""),
                              "price": g.get("price", 0), "source": "search", "query": q,
                              "weight": g.get("weight", ""),
+                             "match": g.get("match", 0.0),
                              "likely_raw": g.get("likely_raw", False)}
                     plan["items"].append(found)
                     plan["total_sum"] += found.get("price", 0) or 0
@@ -2738,6 +2742,59 @@ class MobileSession:
         used = set((used_query or "").lower().replace("ё", "е").split())
         return [w[:5] for w in (full - used) if len(w) >= 4]
 
+    # Words that carry no product identity — dropping them lets an order-free
+    # token match work: «фарш из индейки» must match «Фарш индейки».
+    _MATCH_STOPWORDS = frozenset(
+        "из для со с по и на в от до без вкусом со_вкусом".split())
+
+    @staticmethod
+    def _norm_match(s: str) -> str:
+        """Canonicalize a string for matching — deterministic hygiene, NO dictionaries.
+        Lowercase + ё→е; strip the apostrophe family INCLUDING the backtick (that one
+        char is what hid «Чипсы Lay`s» from a `lay's` query); hyphen/slash/punctuation
+        → space so word boundaries are honoured. Cross-script and true synonyms are
+        NOT handled here — that is the agent's job via the web."""
+        s = (s or "").lower().replace("ё", "е")
+        for ch in "`'’‘‛´":
+            s = s.replace(ch, "")
+        for ch in "-/.,:;()\"«»":
+            s = s.replace(ch, " ")
+        return " ".join(s.split())
+
+    @staticmethod
+    def _tokens(s: str) -> list[str]:
+        return [t for t in MobileSession._norm_match(s).split()
+                if t and t not in MobileSession._MATCH_STOPWORDS]
+
+    @staticmethod
+    def _tok_match(t: str, w: str) -> bool:
+        """Does query token `t` match name word `w`? Short tokens (<6) must match in
+        full — so «кола» hits «Кола» but not «колбаса»; long tokens accept a 5-char
+        stem — so «сгущенка» hits «сгущённое» while «магнат» does NOT hit «магний»
+        (they share only «магн», 4 < 5)."""
+        n = 0
+        for a, b in zip(t, w):
+            if a != b:
+                break
+            n += 1
+        m = min(len(t), len(w))
+        need = 5 if m >= 6 else m
+        return n >= need
+
+    @staticmethod
+    def _name_matches(query: str, name: str) -> float:
+        """Fraction 0..1 of query tokens present in `name` (token-AND, order-free,
+        stopword-free, stemmed via _tok_match). 1.0 = every query token found. 0 =
+        no match (skip). A partial value (e.g. кетчуп «с помидорами» for «помидоры»
+        would still be 1.0 here — the false-positive guard is _pick_candidate's
+        scoring plus the confidence flag, not this recall metric)."""
+        qt = MobileSession._tokens(query)
+        if not qt:
+            return 0.0
+        nt = MobileSession._tokens(name)
+        hit = sum(1 for t in qt if any(MobileSession._tok_match(t, w) for w in nt))
+        return hit / len(qt)
+
     def _pick_candidate(self, results: list[dict], query: str,
                         qualifiers: list[str] | None = None) -> dict | None:
         """Choose the best search hit for an ingredient.
@@ -2765,8 +2822,12 @@ class MobileSession:
             # a dropped qualifier ("куриные", "докторская") outranks everything:
             # the right product in the wrong size beats the wrong product
             missed_qualifier = bool(qualifiers) and not any(s in name for s in qualifiers)
+            # token-recall FIRST among the soft signals: «lay's краб» must beat
+            # «Lay`s Max Куриные» even though куриные is cheaper — a fuller match is a
+            # more-right product. Without this the planner picked cheapest-of-anything.
+            low_match = -round(it.get("match", 1.0), 3)
             # lower is better, field order = priority
-            return (missed_qualifier, wrong_form, too_small,
+            return (missed_qualifier, wrong_form, too_small, low_match,
                     not it.get("likely_raw", False), not name.startswith(q), price)
 
         return min(results, key=score)
@@ -3193,6 +3254,7 @@ class MobileSession:
     # («дай всё») ceiling well past the floor.
     GROCERY_SEARCH_FLOOR = 30       # network's natural page — the min ranking pool
     GROCERY_PROBE_FETCH = 100       # the limit=0 ceiling
+    GROCERY_MATCH_OK = 0.67         # plan_order: below this the pick is «⚠ проверь», not ✓
 
     @staticmethod
     def grocery_fetch_cap(limit: int) -> int:
@@ -3246,8 +3308,11 @@ class MobileSession:
                 continue
             name = src.get("name") or ""
             name_norm = name.lower().replace("ё", "е")
-            # must match the query
-            if q not in name_norm:
+            # Token-AND match instead of literal substring: order-free, stopword-free,
+            # punctuation-folded — so «фарш из индейки» hits «Фарш индейки» and a
+            # `lay's` query hits «Lay`s» (backtick). score is 0..1; 0 = skip.
+            score = self._name_matches(query, name)
+            if score == 0:
                 continue
             # no filter — classify: is this likely a raw ingredient?
             prep_words = ("с ", "соус", "маринован", "квашен", "солен", "тушен",
@@ -3271,14 +3336,15 @@ class MobileSession:
                 "unit": wu,
                 "inStock": True,  # inStockFilter is applied to the search
                 "likely_raw": likely_raw,
+                "match": score,
                 "appId": str(app_id),
                 "pointId": str(point_id),
                 "store_app_id": str(src.get("applicationId", app_id)),
                 "imageUrl": src.get("imageUrl", ""),
             })
-        # sort BEFORE the cut: likely_raw first, then by price — so `limit` keeps
-        # the best matches, not whichever ten arrived first.
-        results.sort(key=lambda r: (not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
+        # sort BEFORE the cut: full matches first (score desc), then likely_raw, then
+        # price — so `limit` keeps the best matches, not whichever ten arrived first.
+        results.sort(key=lambda r: (-r.get("match", 0), not r.get("likely_raw", False), r.get("price", 999) if isinstance(r.get("price"), (int, float)) else 999))
         matched = len(results)
         if limit > 0:
             results = results[:limit]
