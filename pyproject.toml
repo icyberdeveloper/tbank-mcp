@@ -5,7 +5,11 @@ description = "MCP server for the T-Bank (Т-Банк) mobile personal-banking A
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.2",
+  # <2 is load-bearing, not caution: mcp 2.0.0 dropped `mcp.server.fastmcp`, and
+  # server.py's first import is `from mcp.server.fastmcp import FastMCP`. A bare
+  # `mcp>=1.2` resolves to 2.0.0 on a fresh install and dies with ModuleNotFoundError
+  # before anything runs. Lifting the ceiling means porting server.py to the 2.0 API.
+  "mcp>=1.2,<2",
   "requests>=2.32",
   "playwright>=1.40",
 ]

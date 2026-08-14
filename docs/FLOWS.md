@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **76 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **78 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -550,8 +550,20 @@ comes back empty.
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools — all five — are REAL: `transfer`, `transfer_requisites`,
-  `pay_bill`, `grocery_checkout`, `ticket_pay`. Confirm the
+- Money tools — all six — are REAL: `transfer`, `transfer_requisites`,
+  `pay_bill`, `grocery_checkout`, `ticket_pay`, and `confirm_payment` (which
+  completes a payment the bank is holding for a second factor). Confirm the
   amount/recipient (transfer), store+sum (grocery_checkout) or sum+seats
   (ticket_pay) with the user before running. A request to buy something is not a
   confirmation to pay for it; the confirmation is an answer to a concrete sum.
+- **WAITING_CONFIRMATION.** A large or risk-flagged `/v1/pay` comes back
+  «ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ»: the bank accepted the payment but is holding it for a
+  second factor. The money has NOT moved, but a pending payment now EXISTS on the
+  backend keyed by its `userPaymentId` — so do NOT repeat `transfer` /
+  `transfer_requisites` / `pay_bill` (a fresh call makes a SECOND pending payment).
+  Take the SMS/push code from the user and call `confirm_payment(attempt_id, otp)`
+  with the `attemptId` from the pending message; check whether it settled with
+  `payment_status(attempt_id)` or `list_operations`. `confirm_otp` is the LOGIN
+  code and cannot confirm a payment. Under the hood `confirm_payment` POSTs the code
+  to `/v1/confirm` (cookie-authorised, the OTP rides as `secretValue`, the ticket as
+  `initialOperationTicket`) — capture-verified, not a guessed endpoint.

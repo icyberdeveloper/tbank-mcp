@@ -100,6 +100,10 @@ ALLOWED = {
     "ST00012",
     # почта — только example.com
     "user@example.com",
+    # координаты по умолчанию для anti-fraud блока /v1/confirm (_CONFIRM_GEO в
+    # client.py): центр Москвы, публичный ориентир, НЕ из трафика — реальная гео
+    # пользователя в захвате была другой (Петербург) и намеренно не использована.
+    "55.751244", "37.618423",
 }
 
 # Binary and vendored content: certificate roots are public, and their base64

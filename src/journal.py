@@ -131,6 +131,16 @@ def last_status_of_attempt(attempt_id: str) -> str:
     return aid_events[-1].get("status", "") if aid_events else ""
 
 
+def latest_event_of_attempt(attempt_id: str) -> dict | None:
+    """The whole last event of one attempt (not just its status), or None. The
+    payment-confirmation tools read the continuation context off it (userPaymentId,
+    confirmation type/id, amount). Never carries the OTP — that is never recorded."""
+    if not attempt_id:
+        return None
+    aid_events = [e for e in _events() if e.get("attempt_id") == attempt_id]
+    return aid_events[-1] if aid_events else None
+
+
 def recent(limit: int = 20) -> list[dict]:
     """Last event of each of the most recent N attempts (for reconciliation UI).
     `limit <= 0` means every attempt on file — spelled out because `order[-0:]`

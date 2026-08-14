@@ -162,7 +162,11 @@ def load_roots(roots_dir: str | None = None) -> list[str]:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
             got = fingerprints(text)
-        except (OSError, UntrustedRoot) as e:
+        except (OSError, UnicodeDecodeError, UntrustedRoot) as e:
+            # UnicodeDecodeError is a ValueError, not an OSError, so it slipped this
+            # clause and crashed the whole login from codecs. A binary file with a
+            # .pem name — a macOS AppleDouble `._root.pem` in a zip is the usual one —
+            # is a bad certificate, not a fatal error: REFUSE it and read the rest.
             _log(f"REFUSED {name}: unreadable or not a certificate ({e})")
             continue
         expected = PINNED_ROOTS.get(name)
@@ -195,7 +199,9 @@ def load_roots(roots_dir: str | None = None) -> list[str]:
             # every certificate in it is announced, because "I pointed at one root"
             # and "the file contained one root" are different statements.
             got = fingerprints(text)
-        except (OSError, UntrustedRoot) as e:
+        except (OSError, UnicodeDecodeError, UntrustedRoot) as e:
+            # Same as above: a human typed this path, and a non-text file (wrong file,
+            # wrong encoding) must be reported and skipped, not crash the process.
             _log(f"TBANK_EXTRA_CA {path}: {e}")
             continue
         _log(f"trusting {len(got)} certificate(s) from TBANK_EXTRA_CA {path} "

@@ -168,6 +168,70 @@ class UnreadableResponse(TbankApiError, requests.exceptions.RequestException):
     safe on the one occasion nobody can know that."""
 
 
+class PaymentConfirmationRequired(TbankApiError):
+    """The bank ACCEPTED a /v1/pay request but is holding it for a second factor
+    (resultCode WAITING_CONFIRMATION): an SMS OTP, a push approval or an in-app
+    approval. This is neither a refusal nor a completed payment — it is a resumable
+    state, and treating it as a terminal `failed` is the bug this class fixes.
+
+    Money has NOT moved yet, but a pending payment now EXISTS on the backend keyed by
+    its ``userPaymentId``. A fresh /v1/pay with a NEW userPaymentId would create a
+    SECOND pending payment; the same id must be carried into the confirmation instead.
+    So this reads as blocking, not as safe-to-retry.
+
+    A plain TbankApiError keeps only (code, message); _unwrap() would raise one and
+    let the rest of the envelope fall on the floor. The WAITING_CONFIRMATION envelope
+    (capture-verified) carries, at the TOP level, everything /v1/confirm needs to
+    continue:
+
+        {"resultCode":"WAITING_CONFIRMATION",
+         "operationTicket":"<uuid>",          # -> initialOperationTicket on /v1/confirm
+         "initialOperation":"pay",            # -> initialOperation on /v1/confirm
+         "confirmations":["SMSBYID"],         # -> confirmationType on /v1/confirm
+         "confirmationData":{"SMSBYID":{"codeLength":4,"paymentId":"<id>",...}}}
+
+    All of it is preserved here. ``payload`` is already redacted at construction. The
+    OTP is deliberately NOT a field: it is entered later, by the user, into
+    confirm_payment(), rides the wire as ``secretValue`` (a 'secret'-keyed field the
+    redactor scrubs) and is never logged."""
+
+    def __init__(self, code: str, message: str, *, http_status=None, payload=None,
+                 operation_ticket: str = "", initial_operation: str = "pay",
+                 confirmation_type: str = "", confirmations=None,
+                 code_length: int = 0, payment_id: str = "",
+                 user_payment_id: str = "", request_id: str = "",
+                 method: str = "POST", url: str = ""):
+        super().__init__(code, message)
+        self.http_status = http_status
+        self.payload = payload if isinstance(payload, dict) else {}
+        self.operation_ticket = str(operation_ticket or "")
+        self.initial_operation = str(initial_operation or "pay")
+        # The LITERAL type the bank wants echoed back (e.g. "SMSBYID"), not a friendly
+        # label — /v1/confirm rejects a normalised value.
+        self.confirmation_type = str(confirmation_type or "")
+        self.confirmations = [str(c) for c in (confirmations
+                              or ([confirmation_type] if confirmation_type else []))]
+        self.code_length = int(code_length or 0)
+        # The bank's own paymentId, embedded in the challenge — the same id the confirm
+        # returns, so it is known even before the code is entered (for reconciliation).
+        self.payment_id = str(payment_id or "")
+        self.user_payment_id = str(user_payment_id or "")
+        self.request_id = str(request_id or "")
+        self.method = method
+        self.url = url
+
+
+# Result codes that mean "accepted, pending a second factor" — a continuation, not a
+# failure. WAITING_CONFIRMATION is the capture-verified money-path code. The others
+# are defensive spellings of the same state; none has been seen in a capture, so none
+# drives a request shape — they only route a response into the pending branch instead
+# of the terminal-failure branch.
+_PAYMENT_CONFIRMATION_CODES = {
+    "WAITING_CONFIRMATION", "CONFIRMATION_NEEDED", "CONFIRMATION_REQUIRED",
+    "NEED_CONFIRMATION", "NEED_CONFIRM",
+}
+
+
 # query/header keys that carry live secrets — substituted fresh at call time.
 _LIVE_QUERY = {"sessionid", "wuid"}
 _LIVE_HEADERS = {"authorization", "cookie"}
@@ -250,6 +314,13 @@ def delivery_eta(nearest: dict | None, now=None) -> tuple[float | None, str]:
 # current value demonstrably works, and nothing in any capture shows what the server
 # does with it — so there is evidence for this constant and none for that one.
 _IOS_VERSION = "26.5.2"
+
+# /v1/confirm carries the device geo in its anti-fraud block. It is a fraud SIGNAL,
+# not a validated field (the captures show it varying — Moscow on one, Petersburg on
+# another), and this session has no stored location, so a stable neutral default
+# (Moscow centre) is sent; TBANK_GEO_LAT/LON override it.
+_CONFIRM_GEO = (os.environ.get("TBANK_GEO_LAT", "55.751244"),
+                os.environ.get("TBANK_GEO_LON", "37.618423"))
 
 # Hosts where the real app sends X-App-Name/X-App-Version/X-Platform (capture-
 # verified per-host header profile). ONLY these — everywhere else (the BFF
@@ -2916,6 +2987,13 @@ class MobileSession:
             if code and str(code).lower() not in ("ok", "0", "success", ""):
                 msg = data.get("errorMessage") or data.get("error_description") or data.get("plainMessage") or ""
                 lc = str(code)
+                # Accepted-pending-a-second-factor comes back through THIS branch (a
+                # non-ok resultCode), but it is not a failure: raise the resumable
+                # exception that keeps the envelope instead of the terminal one that
+                # discards it. Checked before SessionExpired so a confirmation is
+                # never mistaken for a dead session.
+                if lc.upper() in _PAYMENT_CONFIRMATION_CODES:
+                    raise self._payment_confirmation_error(resp, data, lc, str(msg))
                 if lc in _SESSION_EXPIRED or "session" in lc.lower() or "authoriz" in lc.lower() or lc == "invalid_grant":
                     raise SessionExpired(lc, str(msg))
                 raise TbankApiError(lc, str(msg))
@@ -2959,6 +3037,42 @@ class MobileSession:
         if not ok:
             raise self._status_error(resp, data)
         return data
+
+    def _payment_confirmation_error(self, resp: requests.Response, data: dict,
+                                    code: str, msg: str) -> "PaymentConfirmationRequired":
+        """Build the resumable error from a WAITING_CONFIRMATION envelope.
+
+        Field names are capture-verified; everything sits at the TOP LEVEL, not under
+        ``payload`` —
+
+            operationTicket, initialOperation, confirmations:[<type>],
+            confirmationData:{<type>:{codeLength, paymentId, codeType}}
+
+        The confirmation type is kept LITERAL (e.g. "SMSBYID") because /v1/confirm
+        echoes it back verbatim. The whole body is still stored redacted under
+        ``.payload`` for reconciliation."""
+        confirmations = data.get("confirmations")
+        confirmations = [str(c) for c in confirmations] if isinstance(confirmations, list) else []
+        ctype = confirmations[0] if confirmations else str(data.get("confirmationType") or "")
+        cdata = data.get("confirmationData") if isinstance(data.get("confirmationData"), dict) else {}
+        detail = cdata.get(ctype) if isinstance(cdata.get(ctype), dict) else {}
+        request_id = (resp.headers.get("X-Tracking-Id")
+                      or resp.headers.get("x-tracking-id")
+                      or str(data.get("trackingId") or "")) or ""
+        return PaymentConfirmationRequired(
+            code, msg,
+            http_status=resp.status_code,
+            payload=_redact_value(data) if isinstance(data, dict) else {},
+            operation_ticket=str(data.get("operationTicket") or data.get("operation_ticket") or ""),
+            initial_operation=str(data.get("initialOperation") or "pay"),
+            confirmation_type=ctype,
+            confirmations=confirmations,
+            code_length=int(detail.get("codeLength") or 0),
+            payment_id=str(detail.get("paymentId") or ""),
+            request_id=request_id,
+            method="POST",
+            url="",
+        )
 
     def _status_error(self, resp: requests.Response, data: Any) -> TbankApiError:
         """The error for a non-2xx whose body did not declare one itself."""
@@ -3069,6 +3183,22 @@ class MobileSession:
         hits = payload.get("sortedByScoreObjects") or []
         return [h for h in hits if isinstance(h, dict)][:limit]
 
+    # search/fulltext is a paged, relevance-ranked service — SOME ceiling on объектов
+    # is unavoidable, you cannot ask it for the infinite catalogue. These two ARE that
+    # ceiling, and it is NOT silent: server.grocery_search compares `fetched` against
+    # grocery_fetch_cap() and, when the scan saturates, says so in the header (a rare
+    # match may rank past the ceiling — that is the honest signal, not «нет в
+    # магазине»). The floor keeps a small `limit` scanning a useful ranking window
+    # instead of ranking within its own handful; PROBE_FETCH lifts the limit=0
+    # («дай всё») ceiling well past the floor.
+    GROCERY_SEARCH_FLOOR = 30       # network's natural page — the min ranking pool
+    GROCERY_PROBE_FETCH = 100       # the limit=0 ceiling
+
+    @staticmethod
+    def grocery_fetch_cap(limit: int) -> int:
+        floor = MobileSession.GROCERY_SEARCH_FLOOR
+        return max(floor, limit) if limit else MobileSession.GROCERY_PROBE_FETCH
+
     def grocery_search(self, query: str, app_id: str = "", point_id: str = "",
                        limit: int = 10) -> tuple[list[dict], int, int]:
         """Global grocery search via search/fulltext — searches the ENTIRE store
@@ -3076,6 +3206,11 @@ class MobileSession:
         items). Returns (rows, matched, fetched): rows — up to `limit` matches
         (0 = all of them), matched — how many hits matched the query, fetched —
         how many goods the search service returned at all. query = e.g. "свёкла".
+
+        fetched is capped by grocery_fetch_cap(limit): when fetched == that cap the
+        network was saturated and `matched` is a lower bound — more matches may sit
+        past the object ceiling, unreached. limit=0 does NOT mean "the whole
+        catalog", it means "all of the fetched objects".
 
         The old shape collected matches with a `break` at 10 and SORTED AFTER the
         break: a cheaper match at position 11 of the server page was silently
@@ -3088,7 +3223,7 @@ class MobileSession:
             "searchTypes": ["grocery_goods", "grocery_categories"],
             "filters": [{"name": "inStockFilter", "type": "grocery_goods",
                          "mode": "always", "value": True}],
-            "maxObjectsCount": max(30, limit),
+            "maxObjectsCount": self.grocery_fetch_cap(limit),
             "sortTypes": [{"type": "grocery_goods", "name": "default"}],
             "text": query.replace("ё", "е"),
         }
@@ -3884,6 +4019,74 @@ class MobileSession:
         body = "payParameters=" + urllib.parse.quote(
             json.dumps(pay_params, ensure_ascii=False))
         return self.pay(body)
+
+    # ---- payment confirmation (WAITING_CONFIRMATION continuation) ---------
+
+    def confirm_payment(self, *, operation_ticket: str, otp: str,
+                        initial_operation: str = "pay",
+                        confirmation_type: str = "SMSBYID") -> Any:
+        """Submit the second-factor code for a /v1/pay held at WAITING_CONFIRMATION.
+
+        Capture-verified: a real POST /v1/confirm that completes a held legal-entity
+        transfer and answers 200 with the payload's paymentId.
+
+        Two things make this UNLIKE every other money call and unlike the login OTP:
+
+          * It is NOT signed and NOT Bearer-authorised. The captured /v1/confirm
+            carried neither `x-api-signature` nor an `Authorization` header — it
+            authorises on the session COOKIE plus the `sessionid` query param. So it
+            goes out through a bare POST, not _call_signed and not _call_read (which
+            would add the Bearer this endpoint does not want).
+          * The OTP rides as `secretValue`, alongside the ticket from the pay
+            response (`initialOperationTicket`), the operation (`initialOperation`,
+            "pay") and the literal type (`confirmationType`, e.g. "SMSBYID"). The
+            rest of the body is the app's standard device/anti-fraud block.
+
+        `secretValue` carries 'secret', so the observability redactor scrubs it; the
+        OTP is passed straight to the bank and written nowhere else. On success the
+        resultCode-OK envelope unwraps to {paymentId, commissionInfo, extraFields}."""
+        if not operation_ticket:
+            raise TbankApiError("NO_TICKET", "confirm_payment needs the operationTicket "
+                                "from the WAITING_CONFIRMATION response")
+        p = self.PAY_DEVICE_PROFILE
+        lat, lon = _CONFIRM_GEO
+        # Field order mirrors the captured body (fidelity; the server ignores order).
+        fields = {
+            "deviceId": self.device_id,
+            "initialOperation": initial_operation or "pay",
+            "confirmationType": confirmation_type or "SMSBYID",
+            "appVersion": self.app_version or APP_VERSION,
+            "mobile_device_model": self.device_model,
+            "mobile_device_os_version": _IOS_VERSION,
+            "secretValue": str(otp),
+            "root_flag": "false",
+            "screen_height": p.get("device_screen_height", "2736"),
+            "appName": self.app_name,
+            "fingerprint": self._credentials_fingerprint(),
+            "connectionType": self.connection_type,
+            "device_type": "phone",
+            "origin": self.origin,
+            "screen_dpi": "3",
+            "device_location_availability": "when_user",
+            "mobile_device_os": "iOS",
+            "longitude": str(lon),
+            "latitude": str(lat),
+            "platform": self.platform,
+            "initialOperationTicket": operation_ticket,
+            "screen_width": p.get("device_screen_width", "1260"),
+        }
+        query = urllib.parse.urlencode({"sessionid": self.mobile_sessionid,
+                                        "ccc": self.ccc, "cpswc": self.cpswc})
+        host = (self._tpl("v1_pay") or {}).get("host") or self.base_url
+        url = f"{host.rstrip('/')}/v1/confirm?{query}"
+        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=utf-8;",
+                   "Accept": _NATIVE_ACCEPT, "X-Lang": "ru", "Accept-Language": "ru",
+                   "User-Agent": self._mobile_ua()}
+        if self._wide_cookie():
+            headers["Cookie"] = self._wide_cookie()
+        r = self._http.post(url, data=urllib.parse.urlencode(fields),
+                            headers=headers, timeout=30)
+        return self._unwrap(r)
 
 
     # ---- cards, limits, requisites ---------------------------------------

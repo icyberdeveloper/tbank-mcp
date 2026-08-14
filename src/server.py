@@ -20,7 +20,8 @@ from datetime import datetime, timedelta, timezone
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from . import client, trace
-from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period, vertical
+from .client import (MobileSession, TbankApiError, SessionExpired,
+                     PaymentConfirmationRequired, ms_for_period, vertical)
 from .endpoints import VERTICALS, APP_VERSION
 from .observability import redact_text, _redact_value
 
@@ -55,7 +56,9 @@ _untraced_tool = mcp.tool
 #          `readOnlyHint: true` states the opposite. A host that still prompts on
 #          these is applying its own worst-case default; the fix for that belongs
 #          in the client ("always allow"), not in a false claim here.
-#   MONEY  the three tools that debit an account. destructiveHint + never
+#   MONEY  the tools that move money — the three that START a debit (transfer,
+#          transfer_requisites, pay_bill) plus confirm_payment, which COMPLETES one
+#          the bank is holding for a second factor. destructiveHint + never
 #          idempotent: the loudest signal the protocol has.
 #
 # A tool missing from this table raises at import. That is deliberate: the
@@ -141,6 +144,10 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "pay_bill": ("Оплата счёта", MONEY),
     "transfer": ("Перевод денег", MONEY),
     "transfer_requisites": ("Перевод по реквизитам юрлицу", MONEY),
+    # Completes a payment the bank is holding at WAITING_CONFIRMATION — the second
+    # half of a debit, so MONEY + destructiveHint like the three that start one.
+    "confirm_payment": ("Подтверждение платежа (второй фактор)", MONEY),
+    "payment_status": ("Состояние платёжной попытки", READ),
     # invest
     "invest_accounts": ("Инвест-счета", READ),
     "invest_portfolio": ("Статистика портфеля", READ),
@@ -922,13 +929,31 @@ def grocery_search(query: str, app_id: str = "", point_id: str = "",
         app_id, point_id = _store(app_id, point_id)
         results, matched, fetched = s.grocery_search(query, app_id=app_id,
                                                      point_id=point_id, limit=limit)
+        cap = s.grocery_fetch_cap(limit)
+        # The search service was saturated: it returned as many objects as we asked
+        # for, so `matched` counts matches only WITHIN that horizon — a rarer match
+        # can sit past it, unseen. Saying «нет в магазине» on this basis is exactly
+        # the false-negative that split a grocery order across stores.
+        saturated = fetched >= cap
         if not results:
-            return f"[store appId={app_id} pointId={point_id}]\nНе нашёл '{query}'"
+            note = ""
+            if saturated:
+                note = (f"\n⚠ сеть отдала предел в {fetched} товаров — совпадений среди "
+                        f"них нет, но за этим горизонтом они могут быть. Уточни запрос "
+                        f"(бренд/категория), а не увеличивай limit — поиск ранжирует "
+                        f"по релевантности.")
+            return f"[store appId={app_id} pointId={point_id}]\nНе нашёл '{query}'{note}"
         head = (f"[store appId={app_id} pointId={point_id}] "
                 f"«{query}»: показано {len(results)} из {matched} подходящих "
                 f"(сеть вернула {fetched})")
         if len(results) < matched:
-            head += "; limit=0 — все подходящие"
+            head += "; limit=0 — все, что попали в выборку"
+        if saturated and limit == 0:
+            # limit=0 is the «дай всё» ask, and it was NOT all: name the ceiling
+            # instead of implying completeness. On a limited search the «показано X
+            # из Y» line already signals there is more, so no note there.
+            head += (f"; но выборка упёрлась в потолок {fetched} — за ним совпадения "
+                     f"могут быть, не проверены (уточни запрос, а не увеличивай limit)")
         # Full name, not cut: brand/fat%/variant that disambiguate near-identical
         # products live at the END of a grocery name, past where a 40-char cut
         # used to land — id/price/weight are already uncut, so a cut name was
@@ -1100,11 +1125,28 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
         min_sum = cart.get("minOrderSum")
         totals = ""
         if cart_sum is not None:
-            totals = f"Итого: {cart_sum} ₽"
+            # «за товары»: this is goodsSum — delivery is NOT in it, and what gets
+            # charged is the quote's cartPrice. Labelling it stops the agent reading
+            # this line as the sum that will be debited.
+            totals = f"Итого за товары: {cart_sum} ₽ (без доставки)"
             if min_sum:
                 short = float(min_sum) - float(cart_sum or 0)
                 totals += (f" | минимальный заказ {min_sum} ₽"
                            + (f" — не хватает {short:.0f} ₽" if short > 0 else " ✓"))
+            # Free-/cheaper-delivery threshold: cart.nextStepDelivery is
+            # {deliveryPrice, minOrderSum} — «spend up to minOrderSum and delivery
+            # becomes deliveryPrice». It decides whether добрать до бесплатной
+            # доставки в ОДНОМ заказе бьёт вторую доставку, so surface it while the
+            # cart is still below the threshold.
+            nsd = cart.get("nextStepDelivery")
+            if isinstance(nsd, dict) and nsd.get("minOrderSum") is not None:
+                step_from = float(nsd["minOrderSum"])
+                step_price = nsd.get("deliveryPrice")
+                gap = step_from - float(cart_sum or 0)
+                if gap > 0:
+                    label = ("бесплатная доставка" if step_price == 0
+                             else f"доставка {float(step_price):.0f} ₽")
+                    totals += f"\n{label} от {step_from:.0f} ₽ — добрать {gap:.0f} ₽"
             # Point at the quote rather than at this number. Weight goods (бананы 0.8,
             # виноград 0.54) are repriced by the backend during delivery, so this total
             # is not what gets charged — and expected_sum is compared to the kopeck.
@@ -1867,7 +1909,12 @@ def _transfer_key(amount, to_account, provider, from_account) -> str:
 # duplicate order — but wrong here: sending the same person the same amount twice
 # is an ordinary thing to do, and refusing it would be the tool inventing a rule
 # the user never asked for.
-_TRANSFER_BLOCKING = {"posting", "unknown"}
+#
+# "waiting_confirmation" IS blocking: the payment is pending a second factor and a
+# fresh POST would create a SECOND pending payment. The retry must reuse the original
+# userPaymentId (which _TRANSFER_BLOCKING membership makes the retry_of branch do) and
+# go through confirm_payment(), not through another transfer.
+_TRANSFER_BLOCKING = {"posting", "unknown", "waiting_confirmation"}
 
 
 def _transfer_blocked(key: str):
@@ -1876,6 +1923,57 @@ def _transfer_blocked(key: str):
     if last and last.get("status") in _TRANSFER_BLOCKING:
         return True, last
     return False, last
+
+
+def _pending_confirmation(attempt: str, upid, e: PaymentConfirmationRequired, *,
+                          amount, who: str, src: str, provider: str,
+                          retry_tool: str) -> str:
+    """A /v1/pay came back WAITING_CONFIRMATION: record the resumable state, leave a
+    safe network trace, and tell the agent what to do next — without pretending the
+    money is safe (it is pending) or that it failed (it did not).
+
+    The OTP is not here and never will be in a log: it is collected later by
+    confirm_payment(). What is stored is the continuation context (userPaymentId,
+    confirmation type/id, http status, correlation id) so the payment can be resumed
+    or reconciled by attempt id."""
+    from . import journal
+    from . import observability as obs
+    # The continuation context /v1/confirm needs, by attempt id. operationTicket is a
+    # short-lived challenge id, not a credential — safe to journal; the OTP is not here.
+    journal.record(attempt, "pay", "waiting_confirmation",
+                   user_payment_ms=int(upid), provider=provider, amount=amount,
+                   confirmation_type=e.confirmation_type,
+                   operation_ticket=e.operation_ticket,
+                   initial_operation=e.initial_operation,
+                   code_length=e.code_length, payment_id=e.payment_id,
+                   http_status=e.http_status, request_id=e.request_id)
+    # The money-path network trace: allowlisted, credential-free, key NAMES only.
+    # emit() redacts again on the way out.
+    obs.emit("payment_http", attempt_id=attempt, method=e.method,
+             host="api.t-bank-app.ru", path="/v1/pay", http=e.http_status,
+             resultCode=e.result_code, requestId=e.request_id,
+             userPaymentId=str(upid), confirmationType=e.confirmation_type,
+             responseKeys=sorted((e.payload or {}).keys())[:25])
+    try:
+        trace.note_code(e.result_code)
+    except Exception:
+        pass
+    ct = (e.confirmation_type or "").upper()
+    kind = ("код из SMS" if "SMS" in ct or "OTP" in ct
+            else "подтверждение в приложении" if "PUSH" in ct or "APPROV" in ct
+            else "второй фактор (SMS/пуш)")
+    digits = f"{e.code_length}-значный " if e.code_length else ""
+    return (
+        f"ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ. Банк принял платёж {_money(amount, 'RUB')} → {who} "
+        f"со счёта {src}, но держит его до второго фактора ({kind}). "
+        f"Деньги ПОКА НЕ списаны, но платёж уже висит на стороне банка.\n"
+        f"НЕ повторяй {retry_tool}(...) — это создаст ВТОРОЙ висящий платёж. "
+        f"Когда пользователь продиктует {digits}{kind}, вызови "
+        f"confirm_payment('{attempt}', otp='…'). Проверить исход — "
+        f"payment_status('{attempt}') или list_operations('{src}', days=1).\n"
+        f"status=WAITING_CONFIRMATION attemptId={attempt} "
+        f"userPaymentId={upid} confirmationType={e.confirmation_type} "
+        f"nextTool=confirm_payment safeToRetry=false")
 
 
 @mcp.tool()
@@ -1971,6 +2069,10 @@ def transfer(amount: float, to_account: str, description: str = "",
             # a precedence rule and encodes none; both orderings behave identically,
             # which a mutation test showed by not being able to tell them apart.
             masked_fio = resolved_fio
+        except PaymentConfirmationRequired as e:
+            return _pending_confirmation(
+                attempt, upid, e, amount=amount, who=(masked_fio or to_account),
+                src=src, provider=provider, retry_tool="transfer")
         except Exception as e:
             # Not every failure is an unknown outcome, and saying so has a cost: it
             # tells the user their money may have moved and it BLOCKS the next
@@ -2269,6 +2371,11 @@ def transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
         try:
             res = s.transfer_legal(amount, fields, account=src,
                                    user_payment_id=upid, from_qr=from_qr) or {}
+        except PaymentConfirmationRequired as e:
+            return _pending_confirmation(
+                attempt, upid, e, amount=amount,
+                who=fields.get("addressee") or fields.get("bankAcnt", ""),
+                src=src, provider="transfer-legal", retry_tool="transfer_requisites")
         except Exception as e:
             import requests as _rq
             answered = isinstance(e, (TbankApiError, SessionExpired))
@@ -2299,6 +2406,106 @@ def transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
                 f"{fee_txt}{total_txt}. paymentId={pid} "
                 f"(payment_receipt('{pid}') — чек).\n"
                 + "\n".join(_legal_lines(fields)))
+    except Exception as e:
+        return _err_session(e)
+
+
+@mcp.tool()
+def confirm_payment(attempt_id: str, otp: str) -> str:
+    """Подтвердить платёж, который банк держит на WAITING_CONFIRMATION (второй фактор).
+
+    Это НЕ то же, что confirm_otp — тот подтверждает ЛОГИН и шлёт код в
+    id.t-bank-app.ru/auth/step. Платёжный код идёт другим путём. Вызывай этот тул,
+    когда transfer_requisites / transfer / pay_bill вернули «ТРЕБУЕТСЯ
+    ПОДТВЕРЖДЕНИЕ»: передай attempt_id из того ответа и код, который пользователь
+    получил в SMS или пуше. Код нигде не логируется.
+
+    Продолжение берётся из журнала попытки по attempt_id (operationTicket,
+    initialOperation, тип подтверждения) — новый платёж НЕ создаётся, повторно
+    списать нельзя. Неверный код не двигает состояние — можно ввести заново; новый
+    код — resend через приложение. Судьбу показывает payment_status(attempt_id)."""
+    from . import journal
+    try:
+        ev = journal.latest_event_of_attempt(attempt_id)
+        if not ev:
+            return (f"Не нашёл платёж attempt_id={attempt_id!r}. Подтверждать нечего. "
+                    f"Проверь свежие операции: list_operations(days=1).")
+        status = ev.get("status", "")
+        if status == "paid":
+            return (f"Платёж уже подтверждён (paymentId={ev.get('payment_id','')}). "
+                    f"Повторное подтверждение не нужно.")
+        if status != "waiting_confirmation":
+            return (f"Платёж attempt_id={attempt_id} не ждёт подтверждения "
+                    f"(статус «{status}») — подтверждать нечего. "
+                    f"Состояние: payment_status('{attempt_id}').")
+        ticket = str(ev.get("operation_ticket") or "")
+        if not ticket:
+            return (f"У попытки {attempt_id} нет operationTicket — подтвердить нельзя "
+                    f"(старая запись до этой версии). Проверь list_operations(days=1).")
+        s = _require(); s.ensure_fresh()
+        upid = str(ev.get("user_payment_ms") or "")
+        try:
+            res = s.confirm_payment(
+                operation_ticket=ticket, otp=otp,
+                initial_operation=ev.get("initial_operation", "pay"),
+                confirmation_type=ev.get("confirmation_type", "SMSBYID")) or {}
+        except TbankApiError as e:
+            # A bank «no» (wrong/expired code) leaves the ticket usable: keep the
+            # pending state so the user can re-enter, don't mark it failed/paid.
+            return (f"Подтверждение не прошло: {_err(e)}\n"
+                    f"Платёж всё ещё висит. Проверь код и вызови confirm_payment "
+                    f"снова, либо запроси новый код в приложении. "
+                    f"Исход — payment_status('{attempt_id}').")
+        payload = res.get("payload", res) if isinstance(res, dict) else {}
+        pid = (str(payload.get("paymentId") or payload.get("id") or "")
+               if isinstance(payload, dict) else "")
+        ums = int(upid) if upid.isdigit() else 0
+        journal.record(attempt_id, "confirm", "paid" if pid else "unknown",
+                       user_payment_ms=ums, payment_id=pid)
+        if pid:
+            return (f"Платёж подтверждён — деньги отправлены. paymentId={pid} "
+                    f"(payment_receipt('{pid}') — чек).")
+        return ("Код принят, но банк не вернул paymentId — исход неясен. "
+                "Проверь list_operations(days=1).")
+    except Exception as e:
+        return _err_session(e)
+
+
+@mcp.tool()
+def payment_status(attempt_id: str) -> str:
+    """Состояние платёжной попытки по attempt_id: висит ли она на подтверждении,
+    подтверждена или её исход неизвестен.
+
+    Показывает то, что MCP записал в журнал попытки. Наземная правда — в операциях
+    по счёту: если для висящего платежа списания в list_operations нет, деньги ещё
+    не ушли и его можно подтвердить через confirm_payment(attempt_id, otp)."""
+    from . import journal
+    try:
+        ev = journal.latest_event_of_attempt(attempt_id)
+        if not ev:
+            return f"Нет платёжной попытки attempt_id={attempt_id!r}."
+        status = ev.get("status", "")
+        human = {
+            "waiting_confirmation": "ЖДЁТ ПОДТВЕРЖДЕНИЯ (второй фактор). Деньги ещё не списаны.",
+            "paid": "подтверждён / оплачен.",
+            "posting": "был отправлен, исход не подтверждён.",
+            "unknown": "исход НЕИЗВЕСТЕН — деньги могли уйти.",
+            "failed": "НЕ выполнен (деньги на месте).",
+        }.get(status, status or "неизвестно")
+        lines = [f"Платёж attempt_id={attempt_id}: {human}"]
+        if ev.get("amount") is not None:
+            lines.append(f"Сумма: {_money(ev.get('amount'), 'RUB')}.")
+        if ev.get("provider"):
+            lines.append(f"Тип: {ev.get('provider')}.")
+        if ev.get("payment_id"):
+            lines.append(f"paymentId={ev.get('payment_id')}.")
+        if ev.get("user_payment_ms"):
+            lines.append(f"userPaymentId={ev.get('user_payment_ms')}.")
+        if status == "waiting_confirmation":
+            lines.append(
+                "Сверь с операциями: list_operations(days=1). Списания нет → деньги не "
+                f"ушли, подтвердить — confirm_payment('{attempt_id}', otp='…').")
+        return "\n".join(lines)
     except Exception as e:
         return _err_session(e)
 
@@ -2387,6 +2594,10 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
         try:
             res = s.pay_bill(provider_id, vals, float(amount), account=src,
                              user_payment_id=upid) or {}
+        except PaymentConfirmationRequired as e:
+            return _pending_confirmation(
+                attempt, upid, e, amount=amount, who=(prov.get("name") or provider_id),
+                src=src, provider="bill", retry_tool="pay_bill")
         except Exception as e:
             import requests as _rq
             answered = isinstance(e, (TbankApiError, SessionExpired))

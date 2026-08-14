@@ -347,8 +347,48 @@ def test_a_built_wheel_actually_carries_the_pinned_root():
           f"and FLOWS.md, not just src/*.py")
 
 
+def test_a_nontext_pem_is_refused_not_a_crash():
+    """A file with a .pem name that is not UTF-8 text is a bad certificate, not a
+    fatal error. The usual source is a macOS AppleDouble `._root.pem` riding along in
+    a zip: it passes the extension filter, and reading it in text mode raises
+    UnicodeDecodeError — a ValueError, not an OSError — which used to escape
+    load_roots and surface downstream as an SSLError that read like a dead network
+    (the roots never loaded, so the bank's chain could not verify). It must be
+    REFUSED, and the genuine roots must still load past it."""
+    tmp = tempfile.mkdtemp()
+    try:
+        roots = os.path.join(tmp, "roots")
+        os.makedirs(roots)
+        name = "russian-trusted-root-ca.pem"
+        shutil.copy(os.path.join(tls.ROOTS_DIR, name), os.path.join(roots, name))
+        # An AppleDouble resource-fork file: magic 0x00051607, then non-UTF-8 bytes.
+        open(os.path.join(roots, "._" + name), "wb").write(
+            b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X\x00\x00\xff\xfe\xfd\xfc")
+        try:
+            loaded = tls.load_roots(roots)
+        except UnicodeDecodeError:
+            failures.append("a non-text .pem crashed load_roots instead of REFUSING it")
+            return
+        check(len(loaded) == 1,
+              f"the genuine root must still load past a binary sibling, got {len(loaded)}")
+
+        # TBANK_EXTRA_CA is a human-typed path — a wrong/binary file must skip, not crash.
+        binpath = os.path.join(tmp, "not-text.pem")
+        open(binpath, "wb").write(b"\xff\xfe\x00\x01binary\x80\x81")
+        os.environ["TBANK_EXTRA_CA"] = binpath
+        try:
+            check(tls.load_roots(os.path.join(tmp, "none")) == [],
+                  "a binary TBANK_EXTRA_CA file must be skipped, not crash the process")
+        finally:
+            os.environ.pop("TBANK_EXTRA_CA", None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  robustness: a non-text .pem (AppleDouble) is refused, roots still load")
+
+
 def main():
     print("TLS trust:")
+    test_a_nontext_pem_is_refused_not_a_crash()
     test_a_tampered_shipped_root_is_refused()
     test_a_pinned_file_cannot_smuggle_a_second_certificate()
     test_an_operator_can_add_a_root_without_a_release()
