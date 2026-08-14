@@ -321,6 +321,51 @@ def test_the_venue_list_names_the_tool_its_ids_work_in():
     print("  venues: the listing names the next call per vertical")
 
 
+def test_grocery_cart_total_is_goods_only_and_names_the_free_threshold():
+    """goodsSum is not what gets charged, and the free-delivery threshold that
+    decides one-order-vs-two is in the same payload — both must reach the agent."""
+    cart = Stub(grocery_cart_get={"cart": {
+        "goods": [{"id": "1", "name": "Молоко", "count": 1, "price": {"value": 89.9}}],
+        "goodsSum": 3144.0, "sum": 3243.0, "minOrderSum": 500.0,
+        "nextStepDelivery": {"deliveryPrice": 0.0, "minOrderSum": 3499.0}}})
+    out = run(cart, server.grocery_cart, app_id="204", point_id="5980")
+    check("за товары" in out and "без доставки" in out,
+          f"the total is goodsSum — delivery is NOT in it, say so: {out!r}")
+    check("3499" in out and "бесплатная доставка" in out.lower(),
+          f"the free-delivery threshold is in the payload and changes the "
+          f"one-order-vs-two arithmetic: {out!r}")
+    check("355" in out,
+          f"...and how much to add to reach it (3499−3144=355): {out!r}")
+
+    # No nextStepDelivery in the payload → no invented threshold line.
+    plain = Stub(grocery_cart_get={"cart": {
+        "goods": [{"id": "1", "name": "Молоко", "count": 1, "price": {"value": 89.9}}],
+        "goodsSum": 600.0, "minOrderSum": 500.0}})
+    out2 = run(plain, server.grocery_cart, app_id="204", point_id="5980")
+    check("бесплатная доставка" not in out2.lower(),
+          f"no threshold in the payload → no threshold claim: {out2!r}")
+    print("  grocery_cart: total is goods-only; free-delivery threshold surfaced, not invented")
+
+
+def test_grocery_search_miss_inside_a_saturated_scan_is_not_absence():
+    """A miss when the search service returned as many objects as we asked for is a
+    lower bound, not «нет в магазине» — the false negative that split an order."""
+    saturated = Stub(grocery_search=([], 0, 100))
+    out = run(saturated, server.grocery_search, "рябинки", app_id="204",
+              point_id="5980", limit=0)
+    check("горизонт" in out or "потолок" in out,
+          f"a miss inside a saturated scan must say the scan was capped: {out!r}")
+    check("100" in out, f"...and how deep it actually looked: {out!r}")
+
+    # The network returned fewer than the cap → the catalogue really was exhausted.
+    genuine = Stub(grocery_search=([], 0, 12))
+    out2 = run(genuine, server.grocery_search, "абырвалг", app_id="204",
+               point_id="5980", limit=10)
+    check("горизонт" not in out2 and "потолок" not in out2,
+          f"a miss with the scan NOT saturated must not cry truncation: {out2!r}")
+    print("  grocery_search: a miss inside a saturated scan is flagged; a real miss is not")
+
+
 def main():
     print("honest output:")
     test_a_capped_catalogue_scan_says_what_it_did_not_look_at()
@@ -333,6 +378,8 @@ def main():
     test_a_venue_id_from_the_wrong_vertical_is_named_as_such()
     test_the_venue_list_names_the_tool_its_ids_work_in()
     test_diagnostics_says_how_much_it_is_showing()
+    test_grocery_cart_total_is_goods_only_and_names_the_free_threshold()
+    test_grocery_search_miss_inside_a_saturated_scan_is_not_absence()
     if failures:
         print("\nFAILED:")
         for f in failures:
