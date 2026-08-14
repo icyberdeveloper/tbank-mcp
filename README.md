@@ -256,6 +256,10 @@ present the tests additionally check the fixtures have not drifted from it.
   payment ids — are replaced in the recorded line, both to keep them out and because
   the report groups by that line. The `debug_report` tool reads it. On by default;
   `TBANK_TRACE=0` disables it, `TBANK_TRACE_FILE` moves it, and it rotates at 5 MB.
+- **`TBANK_CONFIRM_ABOVE`** — the ruble threshold from which `transfer_requisites`
+  shows the «Перевести/Отмена» elicitation dialog in clients that support it
+  (default `0`: every transfer asks). Clients without elicitation are unaffected —
+  they keep the text confirmation flow.
 - **Device profile.** Payments carry a 3DS/anti-fraud block whose device facts —
   screen size, locale, timezone, hardware model — default to the device the traffic
   was captured from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` /

@@ -242,10 +242,11 @@ def test_an_unreadable_answer_leaves_the_outcome_unknown():
             raise UnreadableResponse("HTTP_200", "<html>…</html>")
 
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
+    import asyncio
     saved = server._require
     server._require = lambda: Wedged()
     try:
-        out = server.transfer(100, "+79991234567", from_account="1111111111")
+        out = asyncio.run(server.transfer(100, "+79991234567", from_account="1111111111"))
     finally:
         server._require = saved
     check("НЕИЗВЕСТЕН" in out,

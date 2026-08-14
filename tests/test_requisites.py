@@ -27,8 +27,10 @@ additionally checked against it, so it cannot drift.
 
     python3 tests/test_requisites.py
 """
+import asyncio
 import base64
 import gzip
+import inspect
 import json
 import os
 import re
@@ -184,7 +186,12 @@ def run_tool(session, fn, *a, **kw):
     saved = server._require
     server._require = lambda: session
     try:
-        return fn(*a, **kw)
+        out = fn(*a, **kw)
+        if inspect.iscoroutine(out):
+            # Awaited INSIDE the patch window: the async tools run their sync
+            # body via asyncio.to_thread, which calls server._require() there.
+            out = asyncio.run(out)
+        return out
     finally:
         server._require = saved
 

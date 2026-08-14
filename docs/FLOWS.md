@@ -567,3 +567,24 @@ comes back empty.
   code and cannot confirm a payment. Under the hood `confirm_payment` POSTs the code
   to `/v1/confirm` (cookie-authorised, the OTP rides as `secretValue`, the ticket as
   `initialOperationTicket`) — capture-verified, not a guessed endpoint.
+- **Elicitation.** When the client declares MCP elicitation, tools ask the human
+  directly instead of routing choices and confirmations through the agent. A
+  decline, cancel or timeout does NOTHING (no money moves, no message is sent, no
+  order is cancelled) and leaves no journal trace; clients WITHOUT elicitation get
+  the text flow above, byte-for-byte. What each tool asks:
+  - `transfer` — picks the SBP bank when a phone maps to several (before any
+    journal write), offers the debit account when more than one ruble account
+    exists, then a «Перевести/Отмена» button. `transfer_requisites` — collects a
+    missing amount/purpose as a form, offers the account, then the button.
+    `pay_bill` / `ticket_pay` — a button naming the real total (bill: commission
+    too). Threshold: `TBANK_CONFIRM_ABOVE` (default 0 = every payment).
+  - `confirm_payment(attempt_id)` without `otp` — pops the SMS-code form; the code
+    never enters the model's context.
+  - `grocery_checkout` without `expected_sum` — quotes the final sum itself, shows
+    it on the button, and locks it (no more relaying the number through the agent).
+  - `messenger_send`, `ticket_cancel` (states the non-refunded service fee),
+    `grocery_order_cancel`, `card_requisites(reveal=True)` — a confirm button
+    before the irreversible / disclosing action.
+  - `login(phone)` — drives the SMS-code (and PIN, if asked) chain as forms so the
+    one-time codes bypass the model. The password is NEVER a form (it would land in
+    the chat history): that step stops and points at `login_cli.py`.

@@ -19,6 +19,8 @@ in the capture (captures.xml #1477, p2p-anybank via SBP, HTTP 200):
 
     python3 tests/test_transfer.py
 """
+import asyncio
+import inspect
 import json
 import os
 import sys
@@ -40,6 +42,12 @@ from src import server  # noqa: E402
 from src.client import MobileSession  # noqa: E402
 
 failures = []
+
+
+def _run(coro_or_val):
+    """transfer is now an async tool; every call site here passes ctx=None so no
+    dialog fires — just await the coroutine to reach the sync body."""
+    return asyncio.run(coro_or_val) if inspect.iscoroutine(coro_or_val) else coro_or_val
 
 
 def check(cond, msg):
@@ -290,7 +298,7 @@ def test_transfer_refuses_a_non_positive_amount_before_touching_a_session():
     the identical mistake fell through to a raw bank error or an ambiguous
     outcome the retry-guard journal then had to reason about."""
     for bad in (0, -5, -0.01):
-        out = server.transfer(bad, "+79991234567")
+        out = _run(server.transfer(bad, "+79991234567"))
         check("Сумма должна быть больше нуля" in out,
               f"transfer({bad!r}, ...) must be refused with a clear message: {out!r}")
     print("  transfer: amount<=0 is refused before any session/API work, like pay_bill")
@@ -318,19 +326,19 @@ def test_a_lost_transfer_blocks_the_next_identical_one():
     dead = CaptureSession(fail=True)
     server._require = lambda: dead
     try:
-        out = server.transfer(500, "+79991234567", from_account="0000000000")
+        out = _run(server.transfer(500, "+79991234567", from_account="0000000000"))
         check("НЕИЗВЕСТЕН" in out, f"a dropped connection must not read as success: {out}")
         check("force=True" in out, f"the recovery path must be spelled out: {out}")
         check("list_operations" in out, f"the user must be told how to check: {out}")
         first_upid = dead.sent_pay_parameters()["userPaymentId"]
 
-        again = server.transfer(500, "+79991234567", from_account="0000000000")
+        again = _run(server.transfer(500, "+79991234567", from_account="0000000000"))
         check("ЗАБЛОКИРОВАН" in again,
               f"an identical transfer after an unknown outcome must be blocked: {again}")
 
         ok = CaptureSession()
         server._require = lambda: ok
-        forced = server.transfer(500, "+79991234567", from_account="0000000000", force=True)
+        forced = _run(server.transfer(500, "+79991234567", from_account="0000000000", force=True))
         check("paymentId=100000000001" in forced, f"force must go through: {forced}")
         check(ok.sent_pay_parameters()["userPaymentId"] == first_upid,
               f"the retry must reuse the original userPaymentId "
@@ -341,7 +349,7 @@ def test_a_lost_transfer_blocks_the_next_identical_one():
         # the same amount twice is ordinary.
         third = CaptureSession()
         server._require = lambda: third
-        out3 = server.transfer(500, "+79991234567", from_account="0000000000")
+        out3 = _run(server.transfer(500, "+79991234567", from_account="0000000000"))
         check("ЗАБЛОКИРОВАН" not in out3,
               f"a completed transfer must not block a later identical one: {out3}")
         # ...and it must be a NEW payment. Reusing the confirmed transfer's id makes
@@ -356,11 +364,11 @@ def test_a_lost_transfer_blocks_the_next_identical_one():
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         lost = CaptureSession(fail=True)
         server._require = lambda: lost
-        server.transfer(700, "+79991234567", from_account="0000000000")
+        _run(server.transfer(700, "+79991234567", from_account="0000000000"))
         lost_upid = lost.sent_pay_parameters()["userPaymentId"]
         retry = CaptureSession()
         server._require = lambda: retry
-        server.transfer(700, "+79991234567", from_account="0000000000", force=True)
+        _run(server.transfer(700, "+79991234567", from_account="0000000000", force=True))
         check(retry.sent_pay_parameters()["userPaymentId"] == lost_upid,
               f"a forced retry of an UNCONFIRMED transfer must reuse the id "
               f"({lost_upid} -> {retry.sent_pay_parameters()['userPaymentId']})")
@@ -375,8 +383,8 @@ def test_the_result_carries_what_the_agent_needs_next():
     server._require = lambda: s
     try:
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
-        out = server.transfer(1936, "+79991234567", masked_fio="И. И.",
-                              from_account="0000000000")
+        out = _run(server.transfer(1936, "+79991234567", masked_fio="И. И.",
+                              from_account="0000000000"))
         check("100000000001" in out, f"paymentId must be returned: {out}")
         check("payment_receipt" in out, f"the tool that uses it must be named: {out}")
         check("0000000000" in out, f"the debited account must be stated: {out}")
@@ -389,7 +397,7 @@ def test_the_result_carries_what_the_agent_needs_next():
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         blank = CaptureSession(payload={"payload": {}})
         server._require = lambda: blank
-        out2 = server.transfer(50, "+79991234567", from_account="0000000000")
+        out2 = _run(server.transfer(50, "+79991234567", from_account="0000000000"))
         check("не вернул paymentId" in out2, f"a missing paymentId must be flagged: {out2}")
     finally:
         server._require = saved
@@ -411,7 +419,7 @@ def test_the_reported_commission_is_the_commission():
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         free = CaptureSession()
         server._require = lambda: free
-        out = server.transfer(1000, "+79991234567", from_account="0000000000")
+        out = _run(server.transfer(1000, "+79991234567", from_account="0000000000"))
         check("комиссия 0.00 RUB" in out,
               f"a free transfer must report a ZERO fee: {out!r}")
         check("комиссия 1" not in out,
@@ -427,7 +435,7 @@ def test_the_reported_commission_is_the_commission():
                                "commission": _money_obj(90.0),
                                "amountWithCommission": _money_obj(1090.0)}}})
         server._require = lambda: charged
-        out2 = server.transfer(1000, "+79991234567", from_account="0000000000")
+        out2 = _run(server.transfer(1000, "+79991234567", from_account="0000000000"))
         check("комиссия 90.00 RUB" in out2, f"the fee must be the fee: {out2!r}")
         check("1 090.00 RUB" in out2 or "1 090.00 RUB" in out2,
               f"what actually left the account must be stated: {out2!r}")
@@ -436,7 +444,7 @@ def test_the_reported_commission_is_the_commission():
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         silent = CaptureSession(payload={"payload": {"paymentId": "100000000001"}})
         server._require = lambda: silent
-        out3 = server.transfer(1000, "+79991234567", from_account="0000000000")
+        out3 = _run(server.transfer(1000, "+79991234567", from_account="0000000000"))
         check("комиссия" not in out3,
               f"no commissionInfo must mean no claim about the fee: {out3!r}")
     finally:
@@ -583,7 +591,7 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
                            (TbankApiError("INSUFFICIENT_FUNDS", "нет денег"), "bank rejection")):
             open(os.environ["TBANK_ATTEMPTS"], "w").close()
             server._require = lambda e=exc: Refusing(e)
-            out = server.transfer(100, "+79991234567", from_account="0000000000")
+            out = _run(server.transfer(100, "+79991234567", from_account="0000000000"))
             check("НЕИЗВЕСТЕН" not in out,
                   f"a {label} must not claim the money may have moved: {out}")
             check("деньги на месте" in out.lower(),
@@ -591,17 +599,17 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
 
             # ...and it must NOT block the next attempt.
             server._require = lambda: CaptureSession()
-            again = server.transfer(100, "+79991234567", from_account="0000000000")
+            again = _run(server.transfer(100, "+79991234567", from_account="0000000000"))
             check("ЗАБЛОКИРОВАН" not in again,
                   f"a {label} must not block the retry: {again}")
 
         # A transport failure REMAINS unknown and blocking.
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
         server._require = lambda: Refusing(ConnectionError("reset"))
-        lost = server.transfer(100, "+79991234567", from_account="0000000000")
+        lost = _run(server.transfer(100, "+79991234567", from_account="0000000000"))
         check("НЕИЗВЕСТЕН" in lost, f"a dropped connection is still unknown: {lost}")
         server._require = lambda: CaptureSession()
-        blocked = server.transfer(100, "+79991234567", from_account="0000000000")
+        blocked = _run(server.transfer(100, "+79991234567", from_account="0000000000"))
         check("ЗАБЛОКИРОВАН" in blocked, f"an unknown outcome must still block: {blocked}")
     finally:
         server._require = saved
@@ -940,8 +948,8 @@ def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
         s = BillSession()
         server._require = lambda: s
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
-        out = server.pay_bill(MOSENERGO["id"], '{"account": "123456789"}', 100,
-                              group="ЖКХ", from_account="0000000000")
+        out = _run(server.pay_bill(MOSENERGO["id"], '{"account": "123456789"}', 100,
+                              group="ЖКХ", from_account="0000000000"))
         check(s.url is None, f"a refused payment must not reach the bank: {s.url}")
         check(s.commission_calls == 0, "a refused payment must not even be priced")
         check("account" in out and "^\\d{10}$" in out,
@@ -950,8 +958,8 @@ def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
         # A field the provider does not accept at all.
         s2 = BillSession()
         server._require = lambda: s2
-        out2 = server.pay_bill(MOSENERGO["id"], '{"schet": "1234567890"}', 100,
-                               group="ЖКХ", from_account="0000000000")
+        out2 = _run(server.pay_bill(MOSENERGO["id"], '{"schet": "1234567890"}', 100,
+                               group="ЖКХ", from_account="0000000000"))
         check(s2.url is None, "an unknown field must not be sent to the bank")
         check("schet" in out2 and "account" in out2,
               f"the refusal must list the fields the provider does accept: {out2!r}")
@@ -961,8 +969,8 @@ def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
         s3 = BillSession()
         server._require = lambda: s3
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
-        out3 = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
-                               group="ЖКХ", from_account="0000000000")
+        out3 = _run(server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
+                               group="ЖКХ", from_account="0000000000"))
         check(s3.commission_calls == 1,
               f"a valid payment must be priced exactly once first: {s3.commission_calls}")
         check(s3.url and "/v1/pay" in s3.url,
@@ -978,7 +986,7 @@ def test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
         # An unknown provider is refused with a way forward, not a traceback.
         s4 = BillSession()
         server._require = lambda: s4
-        out4 = server.pay_bill("no-such-provider", '{"account": "1"}', 100, group="ЖКХ")
+        out4 = _run(server.pay_bill("no-such-provider", '{"account": "1"}', 100, group="ЖКХ"))
         check(s4.url is None, "an unknown provider must not be paid")
         check("payment_providers" in out4,
               f"the refusal must name the tool that lists providers: {out4!r}")
@@ -1002,8 +1010,8 @@ def test_pricing_a_bill_runs_the_real_commission_contract():
         s = BillSession()
         server._require = lambda: s
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
-        out = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
-                              group="ЖКХ", from_account="0000000000")
+        out = _run(server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 100,
+                              group="ЖКХ", from_account="0000000000"))
         check("AttributeError" not in out,
               f"pay_bill fed payment_commission something it cannot read: {out!r}")
         check("Оплачено" in out, f"a priced, valid payment must go through: {out!r}")
@@ -1038,12 +1046,12 @@ def test_a_bill_payment_respects_the_provider_limits():
                                     "minAmount": 10.0, "maxAmount": 5000.0})
         server._require = lambda: s
         open(os.environ["TBANK_ATTEMPTS"], "w").close()
-        low = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 5,
-                              group="ЖКХ", from_account="0000000000")
+        low = _run(server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 5,
+                              group="ЖКХ", from_account="0000000000"))
         check(s.url is None and "Минимальная" in low,
               f"an amount under the provider minimum must be refused: {low!r}")
-        high = server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 9999,
-                               group="ЖКХ", from_account="0000000000")
+        high = _run(server.pay_bill(MOSENERGO["id"], '{"account": "1234567890"}', 9999,
+                               group="ЖКХ", from_account="0000000000"))
         check(s.url is None and "Максимальная" in high,
               f"an amount over the provider maximum must be refused: {high!r}")
     finally:

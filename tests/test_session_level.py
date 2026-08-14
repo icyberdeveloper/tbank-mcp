@@ -58,10 +58,15 @@ def check(cond, msg):
 
 
 def run(session, fn, *a, **kw):
+    import asyncio
+    import inspect
     saved = server._require
     server._require = lambda: session
     try:
-        return fn(*a, **kw)
+        out = fn(*a, **kw)
+        if inspect.iscoroutine(out):
+            out = asyncio.run(out)
+        return out
     finally:
         server._require = saved
 

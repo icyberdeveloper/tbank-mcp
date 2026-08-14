@@ -3635,9 +3635,11 @@ class MobileSession:
         return self._call_read("messenger_send", body=body,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
-    def _source_account(self) -> str:
-        """First Current RUB account id with a positive balance — the payer/source
-        for transfers (capture: payParameters.account = 10-char source id)."""
+    def ruble_source_accounts(self) -> list[dict]:
+        """Every Current RUB account with a positive balance — the debit candidates,
+        in the bank's order. [{id, name, balance}]. `_source_account` returns the
+        first; a picker offers all of them."""
+        out = []
         for a in (self.list_accounts() or []):
             if not isinstance(a, dict) or (a.get("accountType") or "") != "Current":
                 continue
@@ -3654,7 +3656,16 @@ class MobileSession:
             if cn and str(cn).upper() not in ("RUB", "RUBLES", "РОССИЙСКИЙ РУБЛЬ", "₽"):
                 continue
             if a.get("id"):
-                return str(a["id"])
+                out.append({"id": str(a["id"]), "name": str(a.get("name") or ""),
+                            "balance": bal})
+        return out
+
+    def _source_account(self) -> str:
+        """First Current RUB account id with a positive balance — the payer/source
+        for transfers (capture: payParameters.account = 10-char source id)."""
+        accts = self.ruble_source_accounts()
+        if accts:
+            return accts[0]["id"]
         # Names the way out. This is a guess the caller can always override, and the
         # override is documented on the tools but was absent from the one message the
         # agent actually reads when the guess fails.

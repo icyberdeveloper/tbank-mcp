@@ -248,9 +248,13 @@ def wrap(fn):
         try:
             import inspect
             bound = inspect.signature(fn).bind_partial(*a, **kw)
-            return dict(bound.arguments)
+            args = dict(bound.arguments)
         except (TypeError, ValueError):
-            return dict(kw)
+            args = dict(kw)
+        # FastMCP-injected Context: server plumbing, not an agent argument. Its
+        # repr names internal session objects and says nothing about the call.
+        args.pop("ctx", None)
+        return args
 
     if asyncio.iscoroutinefunction(fn):
         @functools.wraps(fn)
