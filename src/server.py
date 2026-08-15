@@ -192,7 +192,17 @@ def _traced_tool(*a, **kw):
 
 mcp.tool = _traced_tool
 
-# ── Elicitation: first-class dialogs when the client supports them ──────────
+# ── Elicitation: confirmation dialogs when the client supports them ─────────
+#
+# LIVE FINDING (Hermes/Telegram): the client renders ONLY yes/no buttons — it has
+# NO text-input field. So every elicitation that asked the user to TYPE something
+# (payment OTP, login SMS/PIN, missing amount/comment) was rolled back to the
+# old text-through-agent flow. What survives is elicitation WITHOUT input:
+#   • the money gate «действие/Отмена» (accept = the action, decline = cancel), and
+#   • the enum pickers (SBP bank, debit account) — kept per owner's call despite
+#     the yes/no limitation; they degrade to the text flow when not rendered.
+# Non-payment gates (messenger_send, ticket/grocery cancel, card reveal) were also
+# dropped: elicitation is kept strictly for confirming money movements now.
 #
 # Outcomes of _elicit_or. "unavailable" is the ONLY one that means "behave as if
 # elicitation does not exist" (text fallback, today's flow byte-for-byte).
@@ -235,10 +245,6 @@ async def _elicit_or(ctx, message: str, schema):
     if res.action == ELICIT_ACCEPT:
         return ELICIT_ACCEPT, getattr(res, "data", None)
     return res.action, None
-
-
-class _OtpForm(BaseModel):
-    code: str
 
 
 class _TransferGateForm(BaseModel):
@@ -320,18 +326,6 @@ async def _money_gate(ctx, message: str, *, safe: str = "деньги на ме�
         return f"Отменено пользователем (кнопка «Отмена»). Ничего не сделано, {safe}."
     return (f"Подтверждение не получено (окно закрыто или истёк таймаут). "
             f"Ничего не сделано, {safe}. Когда пользователь готов — повтори тот же вызов.")
-
-
-class _CommentForm(BaseModel):
-    comment: str
-
-
-class _AmountForm(BaseModel):
-    amount: float
-
-
-class _PinForm(BaseModel):
-    pin: str
 
 
 _session: MobileSession | None = None
@@ -730,68 +724,18 @@ def _store(app_id: str, point_id: str) -> tuple[str, str]:
 
 # ── LOGIN ───────────────────────────────────────────────────
 
-def _login_step_of(hint: str) -> str:
-    """The next login step, read from the hint's tool name (robust to wording)."""
-    if "confirm_otp" in hint:
-        return "otp"
-    if "confirm_pin" in hint:
-        return "pin"
-    if "confirm_password" in hint:
-        return "password"
-    return ""
-
-
-async def _drive_login_chain(ctx, phone: str, hint: str) -> str:
-    """Walk otp → (pin) steps via elicitation, so one-time codes never enter the
-    model's context. Password is NEVER elicited: a form-mode answer lands in the
-    Telegram chat history, so that step stops and points at login_cli.py."""
-    for _ in range(4):                         # bounded: otp, maybe pin, maybe more
-        step = _login_step_of(hint)
-        if step == "otp":
-            outcome, data = await _elicit_or(ctx, "Код из SMS:", _OtpForm)
-            secret = (data.code.strip() if outcome == ELICIT_ACCEPT and data else "")
-        elif step == "pin":
-            outcome, data = await _elicit_or(ctx, "PIN приложения:", _PinForm)
-            secret = (data.pin.strip() if outcome == ELICIT_ACCEPT and data else "")
-        elif step == "password":
-            return ("Требуется пароль аккаунта — его нельзя вводить через агента "
-                    "или форму: он попадёт в историю чата и в контекст модели. "
-                    "Введи пароль в своём терминале — запусти login_cli.py.\n" + hint)
-        else:
-            return hint                        # unknown step → hand back the text
-        if outcome == ELICIT_UNAVAILABLE:
-            return hint                        # capability vanished mid-flow
-        if outcome != ELICIT_ACCEPT or not secret:
-            return (f"Логин прерван — {step} не введён. "
-                    f"Повтори login('{phone}'), когда будешь готов.")
-        try:
-            await asyncio.to_thread(_session.confirm_step, step, secret)
-            return _saved_or_warn(_session)    # chain completed → session saved
-        except TbankApiError as e:
-            if e.result_code == "NEXT_STEP":
-                hint = e.message               # the bank named the next step
-                continue
-            return _err(e)
-        except Exception as e:
-            return _err(e)
-    return "Логин: слишком много шагов подряд, прерываю. Повтори login(phone)."
-
-
 @mcp.tool()
-async def login(phone: str, ctx: Context = None) -> str:
+def login(phone: str) -> str:
     """Начать логин. Отправляет SMS OTP. Возвращает какой шаг следующий (otp/password/pin).
-    Клиент с элиситацией сам покажет форму ввода кода (и PIN, если банк попросит) —
-    одноразовые коды не проходят через контекст модели. Пароль формой НЕ вводится:
-    для него запусти login_cli.py в своём терминале."""
+    Спроси у пользователя код и вызови confirm_otp(otp); если банк попросит —
+    confirm_pin(pin). Пароль вводится не через агента: запусти login_cli.py в
+    своём терминале."""
     global _session
     _session = _blank_session()
     try:
-        hint = await asyncio.to_thread(_session.login, phone)
+        return _session.login(phone)
     except Exception as e:
         return _err(e)
-    if not _elicitation_available(ctx):
-        return hint
-    return await _drive_login_chain(ctx, phone, hint)
 
 _NO_SESSION_YET = TbankApiError("NO_SESSION", "Сначала вызови login(phone).")
 
@@ -1707,11 +1651,10 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
 
 
 @mcp.tool()
-async def grocery_order_cancel(order_id: str, app_id: str = "",
-                               ctx: Context = None) -> str:
+def grocery_order_cancel(order_id: str, app_id: str = "") -> str:
     """Отменить продуктовый заказ (Город) — оплаченный или ещё нет. Деньги за
-    оплаченный возвращаются на счёт списания. Клиент с элиситацией сам покажет
-    кнопки подтверждения отмены.
+    оплаченный возвращаются на счёт списания. Покажи пользователю заказ и дождись
+    согласия, прежде чем отменять.
 
     paymentId НЕ нужен (в отличие от ticket_cancel): приложение отменяет по
     одному orderId. Вердикт — payload.status ("Success"/"Failed" + code;
@@ -1721,12 +1664,7 @@ async def grocery_order_cancel(order_id: str, app_id: str = "",
     тул сразу перечитает заказ и покажет фактический статус — до перечитывания
     «принято» ещё не значит CANCELED. Если тул вернул ошибку, статус заказа
     НЕИЗВЕСТЕН — grocery_order_status() или приложение."""
-    gate = await _money_gate(
-        ctx, f"Отменить заказ {order_id}? Оплаченный вернёт деньги на счёт списания.",
-        safe="заказ не изменён")
-    if gate is not None:
-        return gate
-    return await asyncio.to_thread(_do_grocery_order_cancel, order_id, app_id)
+    return _do_grocery_order_cancel(order_id, app_id)
 
 
 def _do_grocery_order_cancel(order_id: str, app_id: str = "") -> str:
@@ -1985,18 +1923,13 @@ def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
         return _err(e)
 
 @mcp.tool()
-async def messenger_send(conversation_id: str, text: str, ctx: Context = None) -> str:
+def messenger_send(conversation_id: str, text: str) -> str:
     """Отправить сообщение в чат — НЕОБРАТИМО, его прочитает живой человек
     (обычно поддержка банка). Денег не двигает, но и отозвать нельзя.
 
-    Покажи пользователю текст и дождись согласия, прежде чем отправлять. Клиент с
-    элиситацией сам покажет кнопки «Отправить/Отмена» с текстом — тогда отдельно
-    подтверждать не нужно. conversation_id — из messenger_conversations()."""
-    gate = await _money_gate(ctx, f"Отправить в чат {conversation_id}: «{_cut(text, 80)}»?",
-                             safe="сообщение не отправлено")
-    if gate is not None:
-        return gate
-    return await asyncio.to_thread(_do_messenger_send, conversation_id, text)
+    Покажи пользователю текст и дождись согласия, прежде чем отправлять.
+    conversation_id — из messenger_conversations()."""
+    return _do_messenger_send(conversation_id, text)
 
 
 def _do_messenger_send(conversation_id: str, text: str) -> str:
@@ -2722,28 +2655,10 @@ async def transfer_requisites(amount: float = 0, qr: str = "", comment: str = ""
 
     Ошибка в счёте получателя оплачивает чужой счёт — реквизиты проверяются по
     регуляркам самого банка ДО отправки. Возвращает paymentId для payment_receipt()."""
-    # Fill amount/comment from the QR locally (no network), then ask for whatever
-    # is still missing — before any journal write or HTTP.
-    eff_amount, eff_comment = float(amount or 0), comment
-    if qr:
-        try:
-            parsed = client.parse_payment_qr(qr)
-            eff_amount = eff_amount or float(parsed.get("amount") or 0)
-            eff_comment = eff_comment or parsed.get("requisites", {}).get("comment", "")
-        except Exception:
-            pass
-    if _elicitation_available(ctx) and eff_amount <= 0:
-        outcome, data = await _elicit_or(ctx, "Сумма перевода в рублях:", _AmountForm)
-        if outcome == ELICIT_ACCEPT and data.amount and data.amount > 0:
-            amount = data.amount
-        elif outcome != ELICIT_UNAVAILABLE:
-            return "Сумма не введена — перевод не отправлен, деньги на месте."
-    if _elicitation_available(ctx) and not eff_comment:
-        outcome, data = await _elicit_or(ctx, "Назначение платежа:", _CommentForm)
-        if outcome == ELICIT_ACCEPT and (data.comment or "").strip():
-            comment = data.comment.strip()
-        elif outcome != ELICIT_UNAVAILABLE:
-            return "Назначение платежа не введено — перевод не отправлен, деньги на месте."
+    # Missing amount/comment are NOT elicited: the client has no text field. The
+    # sync body refuses on a missing amount (from QR or arg), and the bank refuses
+    # on a missing comment — same as before elicitation. The from_account picker
+    # and the «Перевести/Отмена» gate below are input-free and stay.
     from_account, src_refusal = await _resolve_source(ctx, from_account)
     if src_refusal is not None:
         return src_refusal
@@ -2876,39 +2791,20 @@ def _do_transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
 
 
 @mcp.tool()
-async def confirm_payment(attempt_id: str, otp: str = "", ctx: Context = None) -> str:
+def confirm_payment(attempt_id: str, otp: str = "") -> str:
     """Подтвердить платёж, который банк держит на WAITING_CONFIRMATION (второй фактор).
 
     Это НЕ то же, что confirm_otp — тот подтверждает ЛОГИН и шлёт код в
     id.t-bank-app.ru/auth/step. Платёжный код идёт другим путём. Вызывай этот тул,
     когда transfer_requisites / transfer / pay_bill вернули «ТРЕБУЕТСЯ
-    ПОДТВЕРЖДЕНИЕ»: передай attempt_id из того ответа и код, который пользователь
-    получил в SMS или пуше. Код нигде не логируется.
-    otp можно не передавать: клиент с поддержкой элиситации сам покажет форму
-    ввода кода; без неё тул попросит вызвать себя ещё раз с otp='…'.
+    ПОДТВЕРЖДЕНИЕ»: спроси у пользователя код из SMS или пуша и передай attempt_id
+    из того ответа и otp='<код>'. Код нигде не логируется.
 
     Продолжение берётся из журнала попытки по attempt_id (operationTicket,
     initialOperation, тип подтверждения) — новый платёж НЕ создаётся, повторно
     списать нельзя. Неверный код не двигает состояние — можно ввести заново; новый
     код — resend через приложение. Судьбу показывает payment_status(attempt_id)."""
-    from . import journal
-    if not otp:
-        # Only pop the form when the journal says there is actually something to
-        # confirm — the not-found / already-paid / no-ticket cases fall through
-        # to the sync body and get its existing guard texts.
-        ev = journal.latest_event_of_attempt(attempt_id)  # local file, fine on the loop
-        if ev and ev.get("status") == "waiting_confirmation" and ev.get("operation_ticket"):
-            digits = ev.get("code_length")
-            msg = (f"Код подтверждения платежа ({digits} цифр) из SMS:" if digits
-                   else "Код подтверждения платежа из SMS/пуша:")
-            outcome, data = await _elicit_or(ctx, msg, _OtpForm)
-            if outcome == ELICIT_ACCEPT and (data.code or "").strip():
-                otp = data.code.strip()
-            elif outcome != ELICIT_UNAVAILABLE:
-                return (f"Код не введён — платёж всё ещё ждёт подтверждения, деньги "
-                        f"не двинуты. Состояние: payment_status('{attempt_id}'); "
-                        f"ввести код позже — confirm_payment('{attempt_id}').")
-    return await asyncio.to_thread(_do_confirm_payment, attempt_id, otp)
+    return _do_confirm_payment(attempt_id, otp)
 
 
 def _do_confirm_payment(attempt_id: str, otp: str) -> str:
@@ -3536,25 +3432,15 @@ def card_limits(ucid: str) -> str:
         return _err(e)
 
 @mcp.tool()
-async def card_requisites(ucid: str, reveal: bool = False, ctx: Context = None) -> str:
+def card_requisites(ucid: str, reveal: bool = False) -> str:
     """Реквизиты карты: держатель, срок, номер. ucid — из list_cards().
 
     По умолчанию номер маскируется, а CVV не выводится вообще.
     reveal=True выдаёт ПОЛНЫЙ номер и CVV — этого достаточно, чтобы платить картой.
     Ставь его ТОЛЬКО когда пользователь явным текстом попросил показать полные
     реквизиты, и предупреди, что они попадут в переписку. «Покажи мою карту» —
-    это не такая просьба. Клиент с элиситацией сам спросит подтверждение на показ.
-
-    Важно: элиситация делает согласие детерминированным, но НЕ прячет номер — при
-    reveal=True он всё равно окажется в переписке."""
-    if reveal:
-        # The dialog makes the consent deterministic; it does not hide the PAN.
-        gate = await _money_gate(
-            ctx, "Показать полный номер карты и CVV? Они попадут в переписку.",
-            safe="реквизиты не показаны")
-        if gate is not None:
-            return gate
-    return await asyncio.to_thread(_do_card_requisites, ucid, reveal)
+    это не такая просьба."""
+    return _do_card_requisites(ucid, reveal)
 
 
 def _do_card_requisites(ucid: str, reveal: bool = False) -> str:
@@ -5137,14 +5023,15 @@ def _ticket_pay_execute(order_id, amount, nfs_payment_token, prep, force):
         return _err(e)
 
 @mcp.tool()
-async def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "",
-                        force: bool = False, ctx: Context = None) -> str:
+def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = "",
+                  force: bool = False) -> str:
     """Отменить заказ билета. kind — "movie" или "concert".
 
     Отменяется заказ, у которого банк сам выставил isCancelAvailable=true — это
     видно в order_details(). Такой заказ уходит в PARTIALLY_CANCELED, а не
     CANCELED: билеты возвращают, сервисный сбор — нет, и «частично» здесь не
-    ошибка. Клиент с элиситацией сам покажет кнопки подтверждения отмены.
+    ошибка. Билеты вернут, сервисный сбор не возвращается — покажи это
+    пользователю и дождись согласия, прежде чем отменять.
 
     Заказ, помеченный isCancelAvailable=false, хост отменять отказывается:
     отвечает status=Failed с кодом и НИЧЕГО не меняет. Повторять такой вызов
@@ -5161,9 +5048,8 @@ async def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = ""
     Если тул вернёт ошибку, считай статус НЕИЗВЕСТНЫМ (не «всё ещё
     забронировано») — проверь orders() и при необходимости отменяй через
     приложение."""
-    # Read the order's own verdict first (network) so we neither confirm a cancel
-    # the bank forbids nor cancel without the human's ok.
-    oc = await asyncio.to_thread(_ticket_cancel_context, order_id)
+    # Read the order's own verdict first so we don't fire a cancel the bank forbids.
+    oc = _ticket_cancel_context(order_id)
     if isinstance(oc, str):
         return oc
     if oc["available"] is False and not force:
@@ -5171,13 +5057,7 @@ async def ticket_cancel(order_id: str, kind: str = "movie", payment_id: str = ""
                 "даёт: isCancelAvailable=false. Запрос не отправлен — он вернул бы "
                 "status=Failed и ничего не изменил.\nОтменяй через приложение или "
                 "поддержку. force=True — отправить всё равно.")
-    gate = await _money_gate(
-        ctx, f"Отменить заказ {order_id}? Билеты вернут, сервисный сбор не "
-             f"возвращается.", safe="заказ не изменён")
-    if gate is not None:
-        return gate
-    return await asyncio.to_thread(
-        _do_ticket_cancel, order_id, kind, payment_id or oc["payment_id"])
+    return _do_ticket_cancel(order_id, kind, payment_id or oc["payment_id"])
 
 
 def _ticket_cancel_context(order_id):

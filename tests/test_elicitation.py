@@ -1,18 +1,18 @@
-"""Elicitation: first-class dialogs for money, with a byte-for-byte text fallback.
+"""Elicitation: the «Перевести/Отмена» money gate, with a byte-for-byte text fallback.
 
-The money path may ask the HUMAN — not the agent — two questions when the client
-supports MCP elicitation: «Перевести/Отмена» before a transfer_requisites POST
-(from TBANK_CONFIRM_ABOVE, default 0 = every one), and the SMS code form when
-confirm_payment is called without an otp. These tests EXECUTE the real tools
-through the same fakes the rest of the suite uses and pin the contract:
+LIVE FINDING: the Telegram/Hermes client renders ONLY yes/no buttons — no text
+field — so the OTP/SMS/amount/comment INPUT forms were rolled back to the text
+flow. What remains, and what these tests pin, is the input-free money gate before a
+transfer_requisites POST (from TBANK_CONFIRM_ABOVE, default 0 = every one):
 
   * no ctx / no capability -> today's flow exactly, nothing elicited;
-  * accept -> the payment POSTs (or the code rides as secretValue);
-  * decline / cancel / client error -> ZERO journal writes, ZERO HTTP for the
-    gate; the pending payment stays waiting_confirmation for the code form;
-  * the code from the form never reaches any log;
-  * the schema agents see has no `ctx`, and `otp` is optional;
+  * accept -> the payment POSTs;
+  * decline / cancel / client error -> ZERO journal writes, ZERO HTTP for the gate;
+  * the schema agents see has no `ctx`;
   * the injected ctx never reaches calls.jsonl.
+
+confirm_payment's OTP path is the plain text flow again — covered by
+test_payment_confirmation.py.
 
 All values are synthetic.
 
@@ -49,10 +49,7 @@ def check(cond, msg):
         failures.append(msg)
 
 
-TICKET = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 AMT = 23600
-UPID = 1700000000001
-PAYMENT_ID = "100000000001"
 # Same synthetic requisites the rest of the suite uses.
 QR = ("ST00012|Name=ООО Тест|PersonalAcc=40702810000000000001"
      "|BIC=044525000|PayeeINN=7700000000|Purpose=Оплата счёта 1|Sum=2360000")
@@ -86,22 +83,6 @@ class FakeCtx:
         return SimpleNamespace(action=self._action)
 
 
-class SrvSession:
-    """confirm_payment double: records the confirm call, returns the payload."""
-
-    def __init__(self):
-        self.seen = None
-
-    def ensure_fresh(self, *a, **k):
-        return None
-
-    def confirm_payment(self, *, operation_ticket, otp, initial_operation,
-                        confirmation_type):
-        self.seen = {"ticket": operation_ticket, "otp": otp,
-                     "io": initial_operation, "ct": confirmation_type}
-        return {"paymentId": PAYMENT_ID, "extraFields": {}}
-
-
 def _mcp_error():
     return McpError(ErrorData(code=-32603, message="elicitation timed out"))
 
@@ -115,15 +96,6 @@ def _reset_logs():
     for p in (journal.ATTEMPTS_FILE, observability.EVENTS_FILE, trace.TRACE_FILE):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         open(p, "w").close()
-
-
-def _seed_waiting():
-    aid = journal.new_attempt("transfer-legal", "••", "k", AMT)
-    journal.record(aid, "pay", "waiting_confirmation", user_payment_ms=UPID,
-                   provider="transfer-legal", amount=AMT,
-                   confirmation_type="SMSBYID", operation_ticket=TICKET,
-                   initial_operation="pay", code_length=4, payment_id=PAYMENT_ID)
-    return aid
 
 
 def _no_threshold():
@@ -259,91 +231,9 @@ def test_qr_only_amount_still_gates():
     print("  qr-only: gate reads Sum from the QR locally")
 
 
-# ---- 8. the OTP form confirms and never logs the code ----------------------
+# ---- 8. the schema agents see: no ctx, otp still optional -------------------
 
-def test_otp_form_confirms_and_never_logs_the_code():
-    _reset_logs()
-    aid = _seed_waiting()
-    OTP = "903175"
-    srv = SrvSession()
-    fctx = FakeCtx(action="accept", data={"code": " %s " % OTP})
-    out = run_tool(srv, server.confirm_payment, aid, ctx=fctx)
-    check(len(fctx.asked) == 1, "the code form must have been shown")
-    if fctx.asked:
-        check("4 цифр" in fctx.asked[0][0],
-              f"the form must state the code length: {fctx.asked[0][0]}")
-    check(srv.seen and srv.seen["otp"] == OTP,
-          f"the trimmed form code must ride as the otp: {srv.seen}")
-    check(srv.seen and srv.seen["ticket"] == TICKET, "the journalled ticket must ride")
-    check(PAYMENT_ID in out and "подтвержд" in out.lower(), f"success text: {out}")
-    ev = journal.latest_event_of_attempt(aid)
-    check((ev or {}).get("status") == "paid", f"must journal paid: {ev}")
-    for p in (journal.ATTEMPTS_FILE, observability.EVENTS_FILE, trace.TRACE_FILE):
-        blob = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
-        check(OTP not in blob, f"the form code leaked into {os.path.basename(p)}")
-    print("  otp form: code rides as secretValue, journal paid, no log leak")
-
-
-# ---- 9. declining the form leaves the payment pending ----------------------
-
-def test_otp_decline_cancel_error_leave_it_pending():
-    for fctx in (FakeCtx(action="decline"), FakeCtx(action="cancel"),
-                 FakeCtx(exc=_mcp_error())):
-        _reset_logs()
-        aid = _seed_waiting()
-        srv = SrvSession()
-        out = run_tool(srv, server.confirm_payment, aid, ctx=fctx)
-        check(srv.seen is None, "no code -> /v1/confirm must not be called")
-        ev = journal.latest_event_of_attempt(aid)
-        check((ev or {}).get("status") == "waiting_confirmation",
-              f"the payment must stay pending: {ev}")
-        check("payment_status" in out and "не двинуты" in out,
-              f"must point at payment_status and say money did not move: {out}")
-    print("  otp decline/cancel/timeout: pending kept, money untouched")
-
-
-# ---- 10. the text fallback without elicitation -----------------------------
-
-def test_otp_fallback_without_elicitation():
-    _reset_logs()
-    aid = _seed_waiting()
-    srv = SrvSession()
-    out = run_tool(srv, server.confirm_payment, aid)          # no ctx, no otp
-    check(srv.seen is None, "no code -> nothing sent")
-    check(f"confirm_payment('{aid}'" in out and "otp=" in out,
-          f"must ask the agent to collect the code: {out}")
-    check("4-значный" in out, f"must state the journalled code length: {out}")
-    ev = journal.latest_event_of_attempt(aid)
-    check((ev or {}).get("status") == "waiting_confirmation", "state must not move")
-
-    # An otp-less call on a non-waiting attempt never pops a form.
-    aid2 = journal.new_attempt("transfer-legal", "••", "k2", AMT)
-    journal.record(aid2, "confirm", "paid", user_payment_ms=UPID,
-                   payment_id=PAYMENT_ID)
-    fctx = FakeCtx(action="accept", data={"code": "0000"})
-    out2 = run_tool(SrvSession(), server.confirm_payment, aid2, ctx=fctx)
-    check(fctx.asked == [], "a paid attempt must not elicit a code")
-    check("уже подтверждён" in out2, f"existing guard text expected: {out2}")
-    print("  otp fallback: agent-text path intact, guards never elicit")
-
-
-# ---- 11. an explicit otp never elicits -------------------------------------
-
-def test_explicit_otp_never_elicits():
-    _reset_logs()
-    aid = _seed_waiting()
-    srv = SrvSession()
-    fctx = FakeCtx(action="accept", data={"code": "1111"})
-    out = run_tool(srv, server.confirm_payment, aid, otp="7788", ctx=fctx)
-    check(fctx.asked == [], "an explicit otp must skip the form")
-    check(srv.seen and srv.seen["otp"] == "7788", f"the explicit otp must ride: {srv.seen}")
-    check(PAYMENT_ID in out, f"must confirm as before: {out}")
-    print("  explicit otp: no form, flows as before")
-
-
-# ---- 12. the schema agents see: no ctx, otp optional -----------------------
-
-def test_schema_has_no_ctx_and_otp_is_optional():
+def test_schema_has_no_ctx():
     import inspect
     listed = server.mcp._tool_manager.list_tools()
     if inspect.isawaitable(listed):
@@ -359,21 +249,18 @@ def test_schema_has_no_ctx_and_otp_is_optional():
           f"transfer_requisites property set changed: {sorted(tr)}")
     cp = tools["confirm_payment"].parameters
     check("otp" not in cp.get("required", []),
-          f"otp must be optional now: {cp.get('required')}")
+          f"otp must be optional: {cp.get('required')}")
     check("attempt_id" in cp.get("required", []), "attempt_id must stay required")
-    print("  schema: no ctx anywhere, otp optional, property sets pinned")
+    print("  schema: no ctx anywhere, otp optional, property set pinned")
 
 
-# ---- 13. the injected ctx never reaches the trace --------------------------
+# ---- 9. the injected ctx never reaches the trace --------------------------
 
 def test_ctx_never_reaches_the_trace():
     _reset_logs()
     fx = fixture()
     run_tool(LegalSession(fx), server.transfer_requisites, amount=AMT,
              ctx=FakeCtx(action="decline"), **_args(fx))
-    aid = _seed_waiting()
-    run_tool(SrvSession(), server.confirm_payment, aid,
-             ctx=FakeCtx(action="accept", data={"code": "903175"}))
     raw = open(trace.TRACE_FILE, encoding="utf-8").read()
     check("FakeCtx" not in raw and "SimpleNamespace" not in raw,
           "a ctx repr leaked into calls.jsonl")
@@ -392,11 +279,7 @@ def main():
               test_decline_moves_nothing,
               test_cancel_and_error_move_nothing,
               test_qr_only_amount_still_gates,
-              test_otp_form_confirms_and_never_logs_the_code,
-              test_otp_decline_cancel_error_leave_it_pending,
-              test_otp_fallback_without_elicitation,
-              test_explicit_otp_never_elicits,
-              test_schema_has_no_ctx_and_otp_is_optional,
+              test_schema_has_no_ctx,
               test_ctx_never_reaches_the_trace):
         t()
     if failures:

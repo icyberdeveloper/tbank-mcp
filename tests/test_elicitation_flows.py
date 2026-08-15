@@ -1,16 +1,15 @@
-"""Elicitation phases 2–5: pickers, gates on every money/destructive tool, and the
-login code chain. Each test EXECUTES the real async tool through a fake ctx and a
-fake session; nothing greps source.
+"""Elicitation (input-free only): pickers + the money gate on every payment tool.
+Each test EXECUTES the real async tool through a fake ctx and a fake session.
 
-Covered:
+LIVE FINDING: the Telegram/Hermes client renders ONLY yes/no buttons — no text
+field. So the input forms (OTP/SMS/PIN/amount/comment) and the non-payment gates
+(messenger_send, ticket/grocery cancel, card reveal) were rolled back. What remains,
+and what these tests pin:
   * transfer     — SBP bank picker BEFORE any journal write; gate; decline is clean.
   * from_account — picker only when >1 ruble account; the pick is what's debited.
   * pay_bill     — gate names the real total+fee; decline posts nothing.
-  * ticket_pay   — gate; the new duplicate guard blocks a repeat, force overrides.
-  * messenger_send / ticket_cancel / grocery_order_cancel / card_requisites(reveal)
-                 — a decline does nothing; accept proceeds.
-  * grocery_checkout — quote→confirm locks the sum without the agent relaying it.
-  * login        — otp/pin chain via forms; password stops and points at login_cli.
+  * ticket_pay   — gate; the duplicate guard blocks a repeat, force overrides.
+  * grocery_checkout — quote→confirm locks the sum; headless never charges unquoted.
 
     python3 tests/test_elicitation_flows.py
 """
@@ -314,121 +313,6 @@ def test_ticket_pay_decline_pays_nothing():
     print("  ticket_pay: decline pays nothing, no journal")
 
 
-# ---- messenger_send gate ---------------------------------------------------
-
-class MsgSession:
-    def __init__(self):
-        self.sent = None
-
-    def ensure_fresh(self, *a, **k):
-        return None
-
-    def messenger_send(self, conversation_id, text):
-        self.sent = {"conv": conversation_id, "text": text}
-        return {"payload": {"id": "M-1"}}
-
-
-def test_messenger_send_gate():
-    s = MsgSession()
-    out = run_tool(s, server.messenger_send, "C-1", "привет",
-                   ctx=FakeCtx(action="decline"))
-    check(s.sent is None, "a declined message must not be sent")
-    check("сообщение не отправлено" in out, f"non-money refusal wording: {out}")
-
-    s2 = MsgSession()
-    out2 = run_tool(s2, server.messenger_send, "C-1", "привет", ctx=FakeCtx(action="accept"))
-    check(s2.sent is not None and "Отправлено" in out2, f"accept sends: {out2}")
-    print("  messenger_send: decline holds, accept sends")
-
-
-# ---- card_requisites reveal gate ------------------------------------------
-
-class CardSession:
-    def ensure_client_session(self, *a, **k):
-        return None
-
-    def card_credentials(self, ucid):
-        return {"cardHolder": "IVAN", "expireDate": "1229",
-                "cardNumber": "5555444433332222", "cvv2": "123"}
-
-
-def test_card_reveal_gate():
-    out = run_tool(CardSession(), server.card_requisites, "u1", reveal=True,
-                   ctx=FakeCtx(action="decline"))
-    check("5555" not in out.replace(" ", "") and "реквизиты не показаны" in out,
-          f"a declined reveal must not print the PAN: {out}")
-
-    shown = run_tool(CardSession(), server.card_requisites, "u1", reveal=True,
-                     ctx=FakeCtx(action="accept"))
-    check("5555 4444 3333 2222" in shown and "CVV: 123" in shown,
-          f"an accepted reveal shows the full PAN + CVV: {shown}")
-
-    masked = run_tool(CardSession(), server.card_requisites, "u1",
-                      ctx=FakeCtx(action="accept"))
-    check("5555444433332222" not in masked.replace(" ", ""),
-          "reveal=False must never elicit or expose the PAN")
-    print("  card_requisites: reveal gated, masked path never asks")
-
-
-# ---- ticket_cancel gate ----------------------------------------------------
-
-class CancelSession:
-    def __init__(self, available=True):
-        self.available = available
-        self.cancelled = None
-
-    def ensure_fresh(self, *a, **k):
-        return None
-
-    def order_cancel_context(self, order_id):
-        return {"available": self.available, "status": "Paid", "payment_id": "P-1"}
-
-    def cancel_ticket_order(self, order_id, kind, payment_id):
-        self.cancelled = {"order": order_id, "payment_id": payment_id}
-        return {"status": "Success"}
-
-
-def test_ticket_cancel_gate_mentions_the_service_fee():
-    s = CancelSession(available=True)
-    out = run_tool(s, server.ticket_cancel, "ORD-C", ctx=FakeCtx(action="decline"))
-    check(s.cancelled is None, "a declined cancel must not hit the host")
-    check("заказ не изменён" in out, f"non-money refusal wording: {out}")
-
-    s2 = CancelSession(available=True)
-    fctx = FakeCtx(action="accept")
-    out2 = run_tool(s2, server.ticket_cancel, "ORD-C", ctx=fctx)
-    check(s2.cancelled is not None and "Success" in out2, f"accept cancels: {out2}")
-    check(fctx.asked and "сервисный сбор" in fctx.asked[0][0],
-          f"the confirmation must state the fee is not refunded: {fctx.asked}")
-    print("  ticket_cancel: gate states the lost fee, decline holds")
-
-
-# ---- grocery_order_cancel gate --------------------------------------------
-
-class GroceryCancelSession:
-    def __init__(self):
-        self.cancelled = None
-
-    def ensure_fresh(self, *a, **k):
-        return None
-
-    def cancel_grocery_order(self, order_id):
-        self.cancelled = order_id
-        return {"status": "Success"}
-
-
-def test_grocery_order_cancel_gate():
-    s = GroceryCancelSession()
-    out = run_tool(s, server.grocery_order_cancel, "G-1", ctx=FakeCtx(action="decline"))
-    check(s.cancelled is None, "a declined grocery cancel must not hit the API")
-    check("заказ не изменён" in out, f"refusal wording: {out}")
-
-    s2 = GroceryCancelSession()
-    out2 = run_tool(s2, server.grocery_order_cancel, "G-1", ctx=FakeCtx(action="accept"))
-    check(s2.cancelled == "G-1" and "принята" in out2, f"accept cancels: {out2}")
-    print("  grocery_order_cancel: decline holds, accept cancels")
-
-
 # ---- grocery_checkout quote → confirm -------------------------------------
 
 def test_grocery_checkout_quote_then_confirm_locks_the_sum():
@@ -506,103 +390,6 @@ def test_headless_checkout_without_expected_sum_refuses_to_charge():
     print("  grocery_checkout headless: no expected_sum refuses+quotes, never charges")
 
 
-# ---- login code chain ------------------------------------------------------
-
-class LoginSession:
-    """Drives the step chain: login → otp → (NEXT_STEP pin) → done, recording the
-    secrets it was handed so we can assert they came from the forms."""
-
-    def __init__(self, chain):
-        self.chain = list(chain)      # e.g. ["otp", "pin"] then success
-        self.steps = []
-
-    def login(self, phone):
-        return "Следующий шаг — otp. Вызови confirm_otp(<код из СМС>)."
-
-    def confirm_step(self, kind, value):
-        self.steps.append({"kind": kind, "value": value})
-        remaining = self.chain[len(self.steps):]
-        if remaining:
-            nxt = remaining[0]
-            hint = {"otp": "confirm_otp(<код>)", "pin": "confirm_pin(<PIN>)",
-                    "password": "confirm_password(<пароль>)"}[nxt]
-            raise TbankApiError("NEXT_STEP", f"Следующий шаг — {nxt}. Вызови {hint}.")
-        return {}
-
-
-def _patch_session(sess):
-    saved_blank = server._blank_session
-    server._blank_session = lambda: sess
-    return saved_blank
-
-
-def test_login_drives_otp_then_pin_via_forms():
-    sess = LoginSession(["otp", "pin"])
-    saved = _patch_session(sess)
-    saved_save = server._save_session
-    server._save_session = lambda s: True
-    try:
-        fctx = FakeCtx(action="accept", data={"code": "123456", "pin": "4321"})
-        out = asyncio.run(server.login("+79991234567", ctx=fctx))
-        kinds = [s["kind"] for s in sess.steps]
-        check(kinds == ["otp", "pin"], f"the chain must run otp then pin: {kinds}")
-        check(sess.steps[0]["value"] == "123456", "otp must come from the form")
-        check(sess.steps[1]["value"] == "4321", "pin must come from the form")
-        check("Сессия активна" in out, f"a completed login must confirm: {out}")
-        check(len(fctx.asked) == 2, f"two forms (otp, pin) expected: {len(fctx.asked)}")
-    finally:
-        server._blank_session = saved
-        server._save_session = saved_save
-    print("  login: otp then pin driven by forms, secrets from the client")
-
-
-def test_login_password_step_stops_and_points_at_cli():
-    sess = LoginSession(["otp", "password"])
-    saved = _patch_session(sess)
-    try:
-        fctx = FakeCtx(action="accept", data={"code": "123456"})
-        out = asyncio.run(server.login("+79991234567", ctx=fctx))
-        check("login_cli" in out, f"the password step must point at the CLI: {out}")
-        check(all(s["kind"] != "password" for s in sess.steps),
-              "the password must never be submitted through the tool")
-    finally:
-        server._blank_session = saved
-    print("  login: the password step stops and points at login_cli.py")
-
-
-def test_login_form_code_never_reaches_a_log():
-    sess = LoginSession(["otp"])
-    saved = _patch_session(sess)
-    saved_save = server._save_session
-    server._save_session = lambda s: True
-    for p in (journal.ATTEMPTS_FILE, observability.EVENTS_FILE, trace.TRACE_FILE):
-        os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").close()
-    CODE = "987654"
-    try:
-        asyncio.run(server.login("+79991234567", ctx=FakeCtx(data={"code": CODE})))
-        check(sess.steps and sess.steps[0]["value"] == CODE,
-              "the code must reach confirm_step")
-        for p in (journal.ATTEMPTS_FILE, observability.EVENTS_FILE, trace.TRACE_FILE):
-            blob = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
-            check(CODE not in blob, f"the login code leaked into {os.path.basename(p)}")
-    finally:
-        server._blank_session = saved
-        server._save_session = saved_save
-    print("  login: the form code reaches confirm_step but never a log")
-
-
-def test_login_without_capability_is_the_old_text_flow():
-    sess = LoginSession(["otp"])
-    saved = _patch_session(sess)
-    try:
-        out = asyncio.run(server.login("+79991234567", ctx=FakeCtx(capable=False)))
-        check("Следующий шаг — otp" in out, f"no capability → the text hint: {out}")
-        check(sess.steps == [], "no capability → nothing is auto-submitted")
-    finally:
-        server._blank_session = saved
-    print("  login: no capability falls back to today's text hint")
-
-
 def main():
     for t in (test_transfer_bank_picker_then_gate_pays_the_chosen_bank,
               test_transfer_bank_picker_declined_writes_no_journal,
@@ -613,16 +400,8 @@ def main():
               test_ticket_pay_gate_pays_on_accept,
               test_ticket_pay_duplicate_guard_blocks_unconfirmed_then_force,
               test_ticket_pay_decline_pays_nothing,
-              test_messenger_send_gate,
-              test_card_reveal_gate,
-              test_ticket_cancel_gate_mentions_the_service_fee,
-              test_grocery_order_cancel_gate,
               test_grocery_checkout_quote_then_confirm_locks_the_sum,
-              test_headless_checkout_without_expected_sum_refuses_to_charge,
-              test_login_drives_otp_then_pin_via_forms,
-              test_login_password_step_stops_and_points_at_cli,
-              test_login_form_code_never_reaches_a_log,
-              test_login_without_capability_is_the_old_text_flow):
+              test_headless_checkout_without_expected_sum_refuses_to_charge):
         t()
     if failures:
         print("\nFAILURES:")
