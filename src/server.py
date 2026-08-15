@@ -329,6 +329,14 @@ async def _money_gate(ctx, message: str, *, safe: str = "деньги на ме�
 
 
 _session: MobileSession | None = None
+# mtime of the file _session was built from. The server lives for hours while a
+# re-login (login_cli.py) is a SEPARATE process: without this, a fresh session on
+# disk never reaches the running server — a tool says «войди», the person logs in,
+# session.json is rewritten, and the tool keeps failing on the stale in-memory copy
+# (observed live: the fix needed an MCP reconnect, which nothing told the user about).
+# One stat() per call; the network is three orders of magnitude dearer. Ported from
+# the myt server (_require_myt), where this exact symptom was fixed first.
+_session_mtime: float | None = None
 _RECEIPTS_DIR = os.environ.get(
     "TBANK_RECEIPTS",
     os.path.expanduser("~/.local/share/tbank-mcp/receipts"),
@@ -401,6 +409,13 @@ def _write_json_0600(path: str, d: dict, label: str) -> None:
     print(f"[tbank] {label} saved: {path} ({os.path.getsize(path)} bytes, 0600)", file=sys.stderr)
 
 
+def _mtime_or_none(path: str):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
 def _save_session(s) -> bool:
     """Save session to disk with 0600 permissions. Returns whether it landed.
 
@@ -412,9 +427,12 @@ def _save_session(s) -> bool:
     (confirm_*, refresh_session), обязаны знать, что записи не было, иначе они
     рапортуют «Сессия активна» про сессию, которой после перезапуска не будет.
     Отсюда возвращаемое значение вместо голого None."""
+    global _session_mtime
     try:
         d = {k: v for k, v in s.__dict__.items() if not k.startswith("_") or k == "_minted_at"}
         _write_json_0600(_SESSION_FILE, d, "session")
+        # Our own write must not later read as someone else's re-login.
+        _session_mtime = _mtime_or_none(_SESSION_FILE)
         return True
     except OSError as e:
         print(f"[tbank] session save failed: {e}", file=sys.stderr)
@@ -461,9 +479,22 @@ def _load_session():
 
 
 def _require():
-    global _session
-    if _session is None:
-        _session = _with_persist(_load_session())
+    """The in-memory session — but NOT older than the file on disk.
+
+    The server runs for hours; a re-login happens in another process (login_cli.py),
+    which rewrites session.json. Before this check the running server kept its stale
+    copy forever (`if _session is None`), so the fresh login only took effect after an
+    MCP reconnect — with nothing telling the user that. Now one stat() per call: a
+    newer file means someone re-logged in, so re-read it. An unreadable file (mid-write,
+    bad JSON) must NOT destroy a working in-memory session, so it is only replaced when
+    the read succeeds or there was nothing in memory to begin with."""
+    global _session, _session_mtime
+    disk = _mtime_or_none(_SESSION_FILE)
+    if _session is None or (disk is not None and disk != _session_mtime):
+        fresh = _load_session()
+        if fresh is not None or _session is None:
+            _session = _with_persist(fresh)
+            _session_mtime = disk
     if not _session or not _session.mobile_sessionid:
         raise TbankApiError("NO_SESSION",
             "Сначала вызови login(phone).")
@@ -730,8 +761,12 @@ def login(phone: str) -> str:
     Спроси у пользователя код и вызови confirm_otp(otp); если банк попросит —
     confirm_pin(pin). Пароль вводится не через агента: запусти login_cli.py в
     своём терминале."""
-    global _session
+    global _session, _session_mtime
     _session = _blank_session()
+    # Pin the mtime to the file as it stands: this blank session is now current, and
+    # _require must not reload the OLD session over it before confirm_otp saves the
+    # new credentials.
+    _session_mtime = _mtime_or_none(_SESSION_FILE)
     try:
         return _session.login(phone)
     except Exception as e:
