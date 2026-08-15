@@ -172,7 +172,12 @@ def check_fixture_still_matches_capture(fx):
     app sends. Scrubbed values (the payer account, the order id) are exempt; every
     structural and catalogue value is not."""
     items = _items()
-    for key, idx, scrubbed in (("create_movie", CREATE_MOVIE, ()),
+    # create_movie.slotId is exempt because it alone shares the shape of a personal
+    # internal id (9 digits) that the PII guard now flags — see
+    # tests/test_no_personal_data.py, form «внутренний id (9–11 цифр)». So the movie
+    # slot is a synthetic counter in the fixture; every other catalogue id (eventId,
+    # objectId, the 7-digit concert slot) stays real and is still checked here.
+    for key, idx, scrubbed in (("create_movie", CREATE_MOVIE, ("slotId",)),
                                ("create_concert", CREATE_CONCERT, ()),
                                ("pay", PAY, ("agreement", "orderId"))):
         real, mine = request_json(items, idx), fx[key]

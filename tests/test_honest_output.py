@@ -162,14 +162,14 @@ def test_flows_matches_whole_words():
 
 def test_the_ids_the_next_call_needs_are_printed():
     accounts = Stub(list_accounts=[{
-        "id": "5045038535", "accountType": "Current", "name": "Black",
+        "id": "5000000001", "accountType": "Current", "name": "Black",
         "moneyAmount": {"value": 100, "currency": {"name": "RUB"}},
-        "cards": [{"id": "233849891", "ucid": "1236003428", "name": "Дебетовая"}]}])
+        "cards": [{"id": "4000000001", "ucid": "4000000002", "name": "Дебетовая"}]}])
     out = run(accounts, server.list_accounts)
-    check("ucid=1236003428" in out,
+    check("ucid=4000000002" in out,
           f"card_limits/card_requisites take the ucid and it is already in this "
           f"response: {out!r}")
-    check("id=233849891" in out,
+    check("id=4000000001" in out,
           f"card_operations takes the card id: {out!r}")
 
     orders = Stub(orders=[{"orderId": "100000000001", "objectType": "grocery",
@@ -202,15 +202,15 @@ def test_an_id_of_the_wrong_kind_says_so():
             self._memo = {}
 
         def _call_read(self, key, **kw):
-            return [{"id": "1", "account": "5045038535", "amount": {"value": 1}},
-                    {"id": "2", "account": "5057770645", "amount": {"value": 2}}]
+            return [{"id": "1", "account": "5000000001", "amount": {"value": 1}},
+                    {"id": "2", "account": "5000000003", "amount": {"value": 2}}]
 
     try:
-        Ops().list_operations("233849891", 0, 1)
+        Ops().list_operations("4000000001", 0, 1)
         failures.append("a wrong-kind id read as an account with no operations")
     except TbankApiError as e:
         check(e.result_code == "NO_SUCH_ACCOUNT", f"wrong code: {e.result_code}")
-        check("5045038535" in str(e),
+        check("5000000001" in str(e),
               f"the accounts that DO have operations must be listed: {e}")
         check("list_accounts" in str(e),
               f"...and where the right id comes from: {e}")
@@ -220,7 +220,7 @@ def test_an_id_of_the_wrong_kind_says_so():
         def _call_read(self, key, **kw):
             return []
 
-    check(Quiet().list_operations("5045038535", 0, 1) == [],
+    check(Quiet().list_operations("5000000001", 0, 1) == [],
           "an account with no operations in the period must stay an empty list")
     print("  ids: a wrong-KIND id is named as such; a genuinely quiet account is not")
 

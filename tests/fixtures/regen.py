@@ -171,22 +171,28 @@ def build_booking():
     """The three money-moving ticket bodies from captures2.xml, plus the
     cancellation shape from delete-order.xml.
 
-    eventId/slotId/objectId/seat ids are public catalogue identifiers and stay real —
-    they ARE the contract. The payer's account (`agreement`) and the real orderId are
-    the user's, and are replaced."""
+    eventId/objectId/seat ids and the concert slot are public catalogue identifiers
+    and stay real — they ARE the contract. The payer's account (`agreement`) and the
+    real orderId are the user's, and are replaced. The MOVIE slotId is also replaced:
+    it alone is 9 digits, the shape the PII guard flags as a personal internal id
+    (tests/test_no_personal_data.py, «внутренний id (9–11 цифр)»), so it carries a
+    synthetic counter and the capture-drift check exempts it."""
     import test_booking_and_ranking as B
 
     items = B._items()
     movie = B.request_json(items, B.CREATE_MOVIE)
+    movie["slotId"] = "133000001"   # scrubbed — see docstring
     concert = B.request_json(items, B.CREATE_CONCERT)
     pay = B.request_json(items, B.PAY)
     pay["paymentMethod"]["agreement"] = "0000000000"
     pay["flow"]["orderId"] = "10000000000"
     return {
         "_note": ("Scrubbed from a Burp capture. Catalogue ids are real (they are the "
-                  "contract); the payer account and order id are synthetic. "
-                  "`cancel` records a QUERY-string endpoint, so it holds key NAMES "
-                  "and no values at all. Regenerate with tests/fixtures/regen.py."),
+                  "contract) EXCEPT the movie slotId, which shares the shape of a "
+                  "personal internal id and is a synthetic counter; the payer account "
+                  "and order id are synthetic too. `cancel` records a QUERY-string "
+                  "endpoint, so it holds key NAMES and no values at all. Regenerate "
+                  "with tests/fixtures/regen.py."),
         "create_movie": movie,
         "create_concert": concert,
         "cancel": build_cancel(),
