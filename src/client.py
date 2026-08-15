@@ -1766,6 +1766,38 @@ class MobileSession:
                 f"Вызови refresh_session() и повтори.")
         return data
 
+    def _messenger_write(self, *, path_override, body, key="messenger_send"):
+        """One messenger WRITE (POST/PUT with a body), with the SAME verdict and
+        token re-mint the reads get through _messenger_read.
+
+        The writes used to call _call_read directly and skip all of it. The messenger
+        signals a dead token with HTTP 200 and [{"errorCode":"AUTH_REQUIRED"}] in the
+        body (see _tmsg_auth_error) — for a read that surfaced as an empty list; for a
+        SEND it flowed back as a success with no message id and was reported to the
+        user as «Отправлено», while nothing reached the support agent. A send is
+        irreversible and read by a person: it has to fail loudly, not silently no-op.
+        So the auth shape earns one re-mint and retry, every other errorCode raises,
+        and only a clean response returns."""
+        data = self._call_read(key, body=body, path_override=path_override)
+        why = self._tmsg_auth_error(data)
+        if not why:
+            code, msg = self._tmsg_error(data)
+            if code:
+                raise TbankApiError(code, msg)
+            return data
+        self.tmsg_session_id = ""             # force a re-mint, then try once more
+        self._ensure_tmsg()
+        data = self._call_read(key, body=body, path_override=path_override)
+        why = self._tmsg_auth_error(data)
+        if why:
+            raise SessionExpired("TMSG_AUTH_REQUIRED",
+                f"Мессенджер отклонил токен даже после переоформления ({why}). "
+                f"Вызови refresh_session() и повтори.")
+        code, msg = self._tmsg_error(data)
+        if code:
+            raise TbankApiError(code, msg)
+        return data
+
     def messenger_conversations(self, archived: bool = False, offset: int = 0) -> list[dict]:
         ov = {"use_is_archived": str(archived).lower(), "offset": str(offset)}
         return self._as_list(self._messenger_read(
@@ -1808,7 +1840,7 @@ class MobileSession:
     def messenger_send_message(self, conversation_id: str, body: dict | None = None) -> dict:
         """POST a message to a conversation (WRITE). Replays the request body or override."""
         conversation_id = self._safe_id(conversation_id, "conversation_id")
-        return self._call_read("messenger_send", body=body,
+        return self._messenger_write(body=body,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
     def messenger_mark_read(self, conversation_id: str, message_id: str) -> Any:
@@ -1818,7 +1850,7 @@ class MobileSession:
         content-negotiation mistake that made messenger_unread answer 406."""
         conversation_id = self._safe_id(conversation_id, "conversation_id")
         message_id = self._safe_id(message_id, "message_id")
-        return self._call_read("messenger_mark_read",
+        return self._messenger_write(key="messenger_mark_read", body=None,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages/{message_id}/markRead")
 
     # A fileId is base64-ish and may carry '=' padding, which _SAFE_ID_RE rejects.
@@ -3632,7 +3664,7 @@ class MobileSession:
         conversation_id = self._safe_id(conversation_id, "conversation_id")
         body = {"content": text, "clientSideId": str(_uuid.uuid4()),
                 "assistant": {"inputType": "default"}}
-        return self._call_read("messenger_send", body=body,
+        return self._messenger_write(body=body,
             path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
 
     def ruble_source_accounts(self) -> list[dict]:
@@ -3827,7 +3859,7 @@ class MobileSession:
         used to let it die with the local variable. server.transfer then built its
         confirmation line from its OWN masked_fio argument, still empty, so the one
         line a person reads before money moves showed a phone number and no name —
-        while the bank had told us «Алена Д.» and we had paid a request for it.
+        while the bank had told us «Мария П.» and we had paid a request for it.
 
         A tuple rather than an extra key in the payload: that dict is the bank's,
         it is printed verbatim when no paymentId comes back, and inventing a field

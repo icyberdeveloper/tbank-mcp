@@ -66,6 +66,18 @@ def redact_text(s: str) -> str:
                 _RE_QS_SECRET.sub(r"\1=<redacted>", str(s)))))
 
 
+def redact_reflected_secrets(s: str) -> str:
+    """Scrub only the UNAMBIGUOUS secret shapes from text shown to the user AS DATA —
+    a JWT (every T-Bank token is one: 40k+ `eyJ…` in the captures) and a
+    sessionid=/access_token=… query secret (the /v1/pay HMAC key rides in that query
+    string). Deliberately OMITS redact_text's 40+char-blob and card-number patterns:
+    on a real read payload those fire on legitimate long ids, image-URL hashes and
+    13-digit payment ids (`userPaymentId=1785786616973`), and silently corrupting
+    shown data is its own defect. Use redact_text for error/log text where a false
+    positive is harmless; use this for TOOL OUTPUT, where the payload IS the answer."""
+    return _RE_JWT.sub("<jwt>", _RE_QS_SECRET.sub(r"\1=<redacted>", str(s)))
+
+
 def _is_sensitive_key(k: str) -> bool:
     kl = str(k).lower()
     return any(frag in kl for frag in _REDACT_KEY)

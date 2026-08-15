@@ -515,6 +515,31 @@ def test_flows_serves_every_section():
     print(f"  flows(): {len(sections)} sections indexed, {len(probes)} probes returned whole")
 
 
+def test_flows_resolves_every_topic_it_advertises():
+    """The flows() docstring names the topics an agent may pass «своими словами».
+    Every one must actually resolve — «инвест» once did not (the whole-word match
+    missed «инвестиции»), so the tool advertised a topic it then answered «раздел не
+    найден» to. And the bill-pay lexicon (жкх/штраф/налог/…) must reach the P2P/bill
+    pay section, which the keyword list had omitted, sending «оплатить счёт» to the
+    read-only accounts flow."""
+    fn = getattr(server.flows, "fn", server.flows)
+    doc = fn.__doc__ or ""
+    advertised = re.findall(r"«([^»]+)»", doc)
+    check(len(advertised) >= 8,
+          f"the docstring advertises too few topics to be the real list: {advertised}")
+    for topic in advertised:
+        out = server.flows(topic)
+        check("не найден" not in out.lower(),
+              f"flows() advertises «{topic}» but answers «раздел не найден»: {out[:80]!r}")
+
+    # Bill payment is FLOWS section 4; its lexicon must route there.
+    for term in ("жкх", "штраф", "налоги", "коммуналка", "пополнить"):
+        out = server.flows(term)
+        check("bill pay" in out.lower() or "## 4." in out,
+              f"flows({term!r}) must reach the bill-pay flow, got: {out[:80]!r}")
+    print(f"  flows(): all {len(advertised)} advertised topics resolve; bill-pay routes")
+
+
 def test_flows_unknown_topic_is_actionable():
     """A miss must hand the agent the valid topics, not a bare failure."""
     out = server.flows("совершенно посторонний запрос")
@@ -555,6 +580,7 @@ def main():
     test_the_marketplace_entry_matches_the_plugin()
     test_the_plugin_command_exists_and_is_runnable()
     test_flows_serves_every_section()
+    test_flows_resolves_every_topic_it_advertises()
     test_flows_unknown_topic_is_actionable()
     test_money_tools_warn_in_the_description_the_agent_receives()
     if failures:

@@ -69,6 +69,31 @@ def test_json_out_zero_means_no_cap():
     check(json.loads(out) == blob, "limit=0 must return the whole payload, parseable")
 
 
+def test_json_out_scrubs_a_reflected_token_but_keeps_long_data():
+    """A read tool that echoes a token or a sessionid=… URL into its 200 body would
+    hand it to the model verbatim — the read path skipped the redaction _err applies.
+    But the scrub must not corrupt shown data: legitimate long ids, image-URL hashes
+    and 13-digit payment ids are NOT secrets and must survive whole, and the list must
+    not be capped the way _redact_value (the events-log redactor) would cap it."""
+    payload = {
+        "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcDEF123_-sig",
+        "callback": "https://x/pay?sessionid=abc123.def456&amount=100",
+        "paymentId": "1785786616973",              # 13 digits — data, not a card
+        "logo": "https://cdn/" + "a" * 60,         # a legit 40+char run
+        "items": [{"id": f"id-{i}"} for i in range(80)],   # 80 > the 50-elem cap
+    }
+    out = server._json_out(payload, limit=0)       # no length cap: isolate redaction
+    check("eyJ" not in out and "<jwt>" in out, f"the JWT must be scrubbed: {out}")
+    check("sessionid=abc123" not in out and "sessionid=<redacted>" in out,
+          f"the sessionid query secret must be scrubbed: {out}")
+    check("1785786616973" in out, "a 13-digit payment id is data, not a card — keep it")
+    check("a" * 60 in out, "a legitimate 40+char run must survive (not blob-redacted)")
+    parsed = json.loads(out)
+    check(len(parsed["items"]) == 80,
+          f"redaction must not cap the list like _redact_value: {len(parsed['items'])}")
+    print("  _json_out: reflected JWT/sessionid scrubbed; long ids and lists kept whole")
+
+
 def test_cut_marks_what_it_removes():
     """_cut is the one column cutter: silent when nothing is lost, «…» when cut,
     n<=0 = never cut."""
@@ -725,6 +750,7 @@ def main():
     print("truncation honesty:")
     test_json_payload_keeps_whole_records()
     test_json_out_zero_means_no_cap()
+    test_json_out_scrubs_a_reflected_token_but_keeps_long_data()
     test_cut_marks_what_it_removes()
     test_untrimmable_payload_is_flagged_loudly()
     test_trimming_handles_shapes_the_single_pass_gave_up_on()

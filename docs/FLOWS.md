@@ -289,7 +289,7 @@ call returning raw JSON:
 
 1. `get_data("loans")` → active credits.
 2. `get_data("credit_schedule")` → payment schedule.
-3. `get_data("credit_rating")` / `get_data("credit_recommendations")` → rating + advice.
+3. `get_data("credit_rating")` → rating + advice.
 4. `get_data("full_debt_amount", account_id)` / `get_data("account_details", account_id)`
    → debt + account detail. **Both are FILTER endpoints and need the account id** —
    they used to accept the call without one, drop the argument on the floor and

@@ -343,6 +343,98 @@ def test_a_rejected_messenger_token_is_not_no_unread_messages():
     print("  messenger: a rejected token raises and re-mints; any errorCode surfaces")
 
 
+def test_a_messenger_send_the_server_rejected_is_not_reported_as_sent():
+    """The one irreversible messenger WRITE had the read-side bug the test above
+    fixes, and never got the fix. messenger_send POSTed through _call_read directly,
+    so HTTP 200 + [{"errorCode":"AUTH_REQUIRED"}] came back with no message id and the
+    tool printed «Отправлено … (банк не вернул id сообщения)» — the support agent got
+    nothing, the user was told it was sent. A send is read by a person; this is the
+    worst shadow error in the suite."""
+    # 1) client level: a rejected token raises SessionExpired and re-mints once.
+    calls = []
+
+    class Rejecting(MobileSession):
+        def __init__(self):
+            self.tmsg_session_id = "t"
+
+        def _call_read(self, key, **kw):
+            calls.append(key)
+            return [{"errorCode": "AUTH_REQUIRED", "errorMessage": "Token inactive"}]
+
+        def _ensure_tmsg(self):
+            return None
+
+    try:
+        Rejecting().messenger_send("conv1", "привет")
+        failures.append("a rejected messenger send returned instead of raising")
+    except Exception as e:                                       # noqa: BLE001
+        check(isinstance(e, SessionExpired),
+              f"a rejected send must be a session error, got {type(e).__name__}: {e}")
+    check(len(calls) == 2,
+          f"the token must be re-minted and the send retried once: {calls}")
+
+    # 2) a non-auth errorCode surfaces as an error, not as a send.
+    class Refused(MobileSession):
+        def __init__(self):
+            self.tmsg_session_id = "t"
+
+        def _call_read(self, key, **kw):
+            return [{"errorCode": "CONVERSATION_NOT_FOUND", "errorMessage": "gone"}]
+
+        def _ensure_tmsg(self):
+            return None
+
+    try:
+        Refused().messenger_send("conv1", "привет")
+        failures.append("a refused messenger send did not surface its errorCode")
+    except TbankApiError as e:
+        check(e.result_code == "CONVERSATION_NOT_FOUND",
+              f"the errorCode must surface: {e.result_code}")
+
+    # 3–5) server level: rejected / id-less / real, through _do_messenger_send.
+    def run_send(stub):
+        saved = server._require
+        server._require = lambda: stub
+        try:
+            return server._do_messenger_send("conv1", "привет")
+        finally:
+            server._require = saved
+
+    class RejectStub(Rejecting):
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+    out = run_send(RejectStub())
+    check("Отправлено" not in out,
+          f"a rejected send must not read as «Отправлено»: {out!r}")
+
+    class NoId(MobileSession):
+        def __init__(self):
+            self.tmsg_session_id = "t"
+
+        def ensure_fresh(self, *a, **kw):
+            return None
+
+        def _call_read(self, key, **kw):
+            return {"payload": {"status": "ok"}}      # clean 200, but no id
+
+        def _ensure_tmsg(self):
+            return None
+
+    out2 = run_send(NoId())
+    check("Отправлено" not in out2 and "НЕ подтверждено" in out2,
+          f"a send with no returned id must read as unconfirmed: {out2!r}")
+
+    class WithId(NoId):
+        def _call_read(self, key, **kw):
+            return {"payload": {"id": "m-42"}}
+
+    out3 = run_send(WithId())
+    check("Отправлено" in out3 and "m-42" in out3,
+          f"a confirmed send must name its message id: {out3!r}")
+    print("  messenger send: rejected/id-less never «Отправлено»; a real send names its id")
+
+
 # ---- 6: the policy that was not there -------------------------------------
 
 def test_an_empty_policy_list_is_not_one_policy():
@@ -405,6 +497,7 @@ def main():
     test_an_unreadable_answer_leaves_the_outcome_unknown()
     test_an_unreadable_cart_is_not_an_empty_cart()
     test_a_rejected_messenger_token_is_not_no_unread_messages()
+    test_a_messenger_send_the_server_rejected_is_not_reported_as_sent()
     test_an_empty_policy_list_is_not_one_policy()
     if failures:
         print("\nFAILED:")
