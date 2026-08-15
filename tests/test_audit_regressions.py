@@ -826,7 +826,10 @@ def test_the_checkout_tool_runs_playwright_off_the_event_loop():
         async def drive():
             nonlocal loop_thread
             loop_thread = threading.current_thread().ident
-            return await S.grocery_checkout("204", "5980")
+            # expected_sum is required for a real headless checkout (no elicitation to
+            # confirm the sum); without it the tool refuses and returns a quote instead
+            # of reaching the body. Pass it so this test isolates the off-loop property.
+            return await S.grocery_checkout("204", "5980", expected_sum=100.0)
         out = asyncio.run(drive())
     finally:
         S._do_grocery_checkout = saved

@@ -165,10 +165,10 @@ def test_a_filter_section_sends_its_filter():
     """Parameter names are the app's own, from the captures: account_details?id=,
     full_debt_amount?account=, statement_exist?account=."""
     s = Recorder()
-    for name, arg, param in (("account_details", "5045038535", "id"),
-                             ("full_debt_amount", "0389372194", "account"),
-                             ("statement_exist", "5045038535", "account"),
-                             ("statements", "5045038535", "account")):
+    for name, arg, param in (("account_details", "5000000001", "id"),
+                             ("full_debt_amount", "5000000002", "account"),
+                             ("statement_exist", "5000000001", "account"),
+                             ("statements", "5000000001", "account")):
         s.sent.clear()
         s.get_data(name, arg)
         params = s.sent[0][2]

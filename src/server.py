@@ -24,7 +24,7 @@ from . import client, trace
 from .client import (MobileSession, TbankApiError, SessionExpired,
                      PaymentConfirmationRequired, ms_for_period, vertical)
 from .endpoints import VERTICALS, APP_VERSION
-from .observability import redact_text, _redact_value
+from .observability import redact_text, redact_reflected_secrets, _redact_value
 
 mcp = FastMCP("tbank")
 
@@ -529,6 +529,23 @@ def _set_in(obj, path, value):
 
 
 def _json_out(data, limit: int = 5000) -> str:
+    """Serialize a payload for the agent, scrubbing reflected credentials first.
+
+    The read path used to return json.dumps unredacted: the error path _err scrubs
+    (a network blip embeds the request URL, and the sessionid — the HMAC key for
+    /v1/pay — rides in that URL's query string), but a read tool that echoed a JWT or
+    a `sessionid=…` URL into its 200 body handed it to the model verbatim.
+    redact_reflected_secrets closes that. It is narrower than _err's redact_text on
+    purpose: it strips only the JWT and query-secret shapes (unambiguous credentials),
+    NOT the 40+char-blob / card-number patterns, which on a real payload would corrupt
+    legitimate long ids and 13-digit payment ids; it truncates NOTHING and drops NO
+    list elements (honest-length trimming is _json_trim's job below); and it does no
+    key-name redaction, which would strip a user's own account/ИНН that a read tool
+    legitimately returns."""
+    return redact_reflected_secrets(_json_trim(data, limit))
+
+
+def _json_trim(data, limit: int = 5000) -> str:
     """Serialize a payload for the agent WITHOUT losing records silently.
 
     The old code returned json.dumps(...)[:N]. On real data that severs an object
@@ -1021,7 +1038,7 @@ def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000)
                            paymentFields, которые нужны pay_bill().
     Проверяй ОБА, прежде чем сказать «неоплаченных счетов нет».
 
-    ТРЁМ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
+    ШЕСТИ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
       providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
                    Перечислить все провайдеры этим эндпоинтом нельзя, только найти
                    известные по id.
@@ -1030,6 +1047,9 @@ def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000)
       statements — arg = номер счёта из list_accounts(). days задаёт окно выписки
                    (по умолчанию 30 — раньше это окно было зашито и нигде не
                    упоминалось; другие секции days не принимают).
+      account_details  — arg = id счёта из list_accounts().
+      full_debt_amount — arg = номер счёта (полная сумма долга по кредиту).
+      statement_exist  — arg = номер счёта (есть ли выписка за период).
 
     max_chars — кап ответа в символах (по умолчанию 5000; 0 = весь JSON без
     обрезки). Обрезка всегда помечена заголовком «ПОКАЗАНО X из Y».
@@ -1389,9 +1409,10 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
 
     expected_sum — сумма, которую подтвердил пользователь. Передавай её ВСЕГДА и
     РОВНО как есть, до копейки (3700.63, не 3700): сравнение точное, допуск 0.01 ₽.
-    Без неё оплатится молча любая новая сумма — банк дважды пересчитывает корзину
-    уже ПОСЛЕ подтверждения (веб-корзина, затем доставка). Расхождение отменяет
-    чекаут ДО создания заказа.
+    Без неё (и без элиситации) чекаут НЕ списывает деньги: он вернёт предпросмотр и
+    попросит повторить с expected_sum. Банк дважды пересчитывает корзину уже ПОСЛЕ
+    подтверждения (веб-корзина, затем доставка); расхождение отменяет чекаут ДО
+    создания заказа.
 
     При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
     сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
@@ -1417,6 +1438,20 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
             if gate is not None:
                 return gate
             expected_sum = total               # the confirmed sum; the body re-checks it
+        # No confirmed sum and no elicitation gate to establish one (a headless
+        # client that skipped expected_sum): the kopeck-exact guard in checkout.py is
+        # `if expected_sum and …`, so expected_sum=0 DISABLES it and whatever the bank
+        # recomputes gets charged silently. Refuse the charge and hand back the
+        # dry-run quote instead, so the agent comes back with the number the user
+        # actually approved.
+        if not dry_run and expected_sum <= 0:
+            quote = await asyncio.to_thread(_do_grocery_checkout, app_id, point_id,
+                                            force, account_id, 0.0, True)
+            return ("ОПЛАТА НЕ ВЫПОЛНЕНА: не передан expected_sum — сумма, которую "
+                    "подтвердил пользователь. Без неё оплатилась бы молча любая "
+                    "пересчитанная банком сумма. Ниже предпросмотр: покажи сумму "
+                    "пользователю и повтори grocery_checkout(...) с expected_sum РОВНО "
+                    "как в предпросмотре.\n\n" + quote)
         return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force,
                                        account_id, expected_sum, dry_run)
     except Exception as e:
@@ -1967,16 +2002,24 @@ async def messenger_send(conversation_id: str, text: str, ctx: Context = None) -
 def _do_messenger_send(conversation_id: str, text: str) -> str:
     try:
         s = _require(); s.ensure_fresh()
+        # messenger_send routes through _messenger_write, so an AUTH_REQUIRED or any
+        # other errorCode envelope now RAISES here instead of masquerading as a send.
         res = s.messenger_send(conversation_id, text) or {}
-        # Echoing the argument back would say "sent" even if the API answered with
-        # an error envelope. Report what the server acknowledged.
+        # The bank acknowledges a real send with the created message's id. Reaching
+        # this line means no error envelope came back, but without that id we cannot
+        # claim delivery — a send is irreversible and read by a person, so an
+        # unconfirmed one must NOT be reported as «Отправлено».
         mid = ""
         if isinstance(res, dict):
             payload = res.get("payload") if isinstance(res.get("payload"), dict) else res
             mid = str(payload.get("id") or payload.get("messageId") or "")
-        return (f"Отправлено в чат {conversation_id}"
-                + (f", id сообщения {mid}" if mid else " (банк не вернул id сообщения)")
-                + f": «{_cut(text, 80)}»")
+        if not mid:
+            return (f"НЕ подтверждено: банк принял запрос без id сообщения — "
+                    f"доставка в чат {conversation_id} не подтверждена. Проверь "
+                    f"messenger_messages({conversation_id!r}) и при необходимости "
+                    f"повтори. Текст: «{_cut(text, 80)}»")
+        return (f"Отправлено в чат {conversation_id}, id сообщения {mid}: "
+                f"«{_cut(text, 80)}»")
     except Exception as e:
         return _err(e)
 
@@ -5290,11 +5333,13 @@ _FLOW_KEYWORDS = {
     "session": "сессия токен refresh keepalive expired протух",
     "read accounts": "счета счёт баланс операции покупки траты расходы категории",
     "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",
-    "transfer": "перевод перевести деньги сбп телефону получатель комиссия оплата счёта "
-                "реквизиты реквизитам бик инн кпп юрлицо юрлицу ооо ип компании "
-                "поставщику расчётный расчетный ндс назначение платёжка qr кьюар",
+    "transfer": "перевод перевести деньги сбп телефону получатель комиссия оплата оплатить "
+                "оплати счёта реквизиты реквизитам бик инн кпп юрлицо юрлицу ооо ип компании "
+                "поставщику расчётный расчетный ндс назначение платёжка qr кьюар "
+                "жкх штраф штрафы налог налоги квитанция коммуналка коммуналку провайдер "
+                "пополнить пополнение пеня госуслуги связь интернет мобильный",
     "messenger": "чат чаты поддержка сообщение написать непрочитанные",
-    "invest": "инвестиции акции облигации портфель брокер бумаги доходность",
+    "invest": "инвест инвестиции инвестиция акции облигации портфель брокер бумаги доходность",
     "credit": "кредит кредиты долг задолженность график платежей рейтинг выписка",
     "cards": "карта карты реквизиты лимиты cvv пин документы паспорт снилс инн права",
     "orders": "заказы заказ история покупок отель поездка путешествия авиа поезд",

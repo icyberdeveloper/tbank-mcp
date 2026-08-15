@@ -206,8 +206,8 @@ def test_an_ordinary_failure_is_not_dressed_up_as_a_session_problem():
 def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
     """The recipient's name is the only human-readable check on a transfer.
 
-    A phone number does not survive being read: +79040610036 and +79040610063 look
-    alike and belong to different people. «Алена Д.» is what a person recognises.
+    A phone number does not survive being read: +79991234567 and +79991234576 look
+    alike and belong to different people. «Мария П.» is what a person recognises.
 
     The client looks that name up — one request to /v1/get_requisites — whenever the
     caller passes the two routing ids and no name, and puts it in the SIGNED body.

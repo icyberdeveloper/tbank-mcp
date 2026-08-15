@@ -207,7 +207,7 @@ def test_card_requisites_masks_by_default_and_audits_the_reveal():
             return dict(CARD)
 
     open(os.environ["TBANK_EVENTS"], "w").close()
-    masked = run(Cards(), server.card_requisites, "1236003428")
+    masked = run(Cards(), server.card_requisites, "4000000002")
     # Compared with spaces stripped: the reveal branch prints the PAN in groups of
     # four, so searching for the raw digits misses it entirely — the first version
     # of this line did, and the mutation was caught only by the audit assertion.
@@ -221,7 +221,7 @@ def test_card_requisites_masks_by_default_and_audits_the_reveal():
           "a masked call must not record a reveal")
 
     open(os.environ["TBANK_EVENTS"], "w").close()
-    shown = run(Cards(), server.card_requisites, "1236003428", reveal=True)
+    shown = run(Cards(), server.card_requisites, "4000000002", reveal=True)
     check(CARD["cardNumber"] in shown.replace(" ", ""),
           f"reveal=True must actually reveal: {shown!r}")
     check(CARD["cvv2"] in shown, f"reveal=True must include the CVV: {shown!r}")

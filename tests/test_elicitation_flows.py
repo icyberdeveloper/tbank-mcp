@@ -465,6 +465,47 @@ def test_grocery_checkout_quote_then_confirm_locks_the_sum():
     print("  grocery_checkout: quote→confirm locks the sum, decline skips the body")
 
 
+def test_headless_checkout_without_expected_sum_refuses_to_charge():
+    """On a client with no elicitation, expected_sum is the ONLY guard on the sum —
+    and the kopeck-exact check in checkout.py is `if expected_sum and …`, so
+    expected_sum=0 disables it and the bank's recomputed number gets charged silently.
+    A headless checkout with no expected_sum must refuse to charge and hand back the
+    dry-run quote, never pay."""
+    seen = []
+
+    def fake_body(app_id, point_id, force, account_id, expected_sum, dry_run):
+        seen.append({"expected_sum": expected_sum, "dry_run": dry_run})
+        return "[preview] К ОПЛАТЕ: 3700.63 ₽" if dry_run else "✓ ORDER PAID"
+
+    saved_b = server._do_grocery_checkout
+    server._do_grocery_checkout = fake_body
+    try:
+        # No ctx → no elicitation; no expected_sum → must refuse and quote, not charge.
+        out = asyncio.run(server.grocery_checkout("204", "5980", ctx=None))
+        check(seen and all(c["dry_run"] for c in seen),
+              f"a headless checkout with no expected_sum must never charge: {seen}")
+        check("ОПЛАТА НЕ ВЫПОЛНЕНА" in out and "expected_sum" in out,
+              f"the refusal must name expected_sum and show the quote: {out!r}")
+
+        # Same client, but the agent DID pass expected_sum → the real charge runs once.
+        seen.clear()
+        out2 = asyncio.run(server.grocery_checkout("204", "5980",
+                                                   expected_sum=3700.63, ctx=None))
+        check(len(seen) == 1 and seen[0]["dry_run"] is False
+              and seen[0]["expected_sum"] == 3700.63,
+              f"with expected_sum the real checkout must run once: {seen}")
+        check("PAID" in out2, f"a confirmed headless checkout pays: {out2!r}")
+
+        # dry_run stays a pure preview and must not be diverted into the refusal path.
+        seen.clear()
+        asyncio.run(server.grocery_checkout("204", "5980", dry_run=True, ctx=None))
+        check(len(seen) == 1 and seen[0]["dry_run"] is True,
+              f"dry_run must preview once: {seen}")
+    finally:
+        server._do_grocery_checkout = saved_b
+    print("  grocery_checkout headless: no expected_sum refuses+quotes, never charges")
+
+
 # ---- login code chain ------------------------------------------------------
 
 class LoginSession:
@@ -577,6 +618,7 @@ def main():
               test_ticket_cancel_gate_mentions_the_service_fee,
               test_grocery_order_cancel_gate,
               test_grocery_checkout_quote_then_confirm_locks_the_sum,
+              test_headless_checkout_without_expected_sum_refuses_to_charge,
               test_login_drives_otp_then_pin_via_forms,
               test_login_password_step_stops_and_points_at_cli,
               test_login_form_code_never_reaches_a_log,

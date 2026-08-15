@@ -1,7 +1,7 @@
 {
- "_note": "Scrubbed from a Burp capture. Catalogue ids are real (they are the contract); the payer account and order id are synthetic. `cancel` records a QUERY-string endpoint, so it holds key NAMES and no values at all. Regenerate with tests/fixtures/regen.py.",
+ "_note": "Scrubbed from a Burp capture. Catalogue ids are real (they are the contract) EXCEPT the movie slotId, which shares the shape of a personal internal id and is a synthetic counter; the payer account and order id are synthetic too. `cancel` records a QUERY-string endpoint, so it holds key NAMES and no values at all. Regenerate with tests/fixtures/regen.py.",
  "create_movie": {
-  "slotId": "133073041",
+  "slotId": "133000001",
   "objectId": "10255",
   "seats": [
    {

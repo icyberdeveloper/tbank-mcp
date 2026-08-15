@@ -389,7 +389,7 @@ def test_bad_requisites_are_refused_against_the_banks_own_regexps():
     length, a КПП that is not nine digits."""
     fx = fixture()
     args = dict(fx["tool_args"], comment="Счет 1")
-    cases = [("account_number", "4070281062851000229", "bankAcnt"),   # 19 digits
+    cases = [("account_number", "4070281000000000001", "bankAcnt"),   # 19 digits
              ("account_number", "не-счёт", "bankAcnt"),
              ("bik", "44525411", "bankBik"),                          # 8 digits
              ("inn", "35252163", "inn"),                              # 8 digits
