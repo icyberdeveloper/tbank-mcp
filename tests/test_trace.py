@@ -2,9 +2,11 @@
 
 A tracer is an unusual thing to test, because the ways it fails are quiet. It can
 alter the tool schemas every agent reads and nobody notices until an agent starts
-calling things wrong. It can copy a chat message or an account number into a file
-advertised as safe to share. It can raise inside a payment and take the payment with
-it. None of that shows up as a failing feature — so each of them is executed here.
+calling things wrong. It can copy a chat message, a payee's name or an account number
+into a file advertised as safe to share. It can record a payment that was REFUSED
+as one that completed, so the report counts money that never moved. It can raise
+inside a payment and take the payment with it. None of that shows up as a failing
+feature — so each of them is executed here.
 
     python3 tests/test_trace.py
 """
@@ -17,7 +19,9 @@ import time
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 _TMP = tempfile.mkdtemp(prefix="tbank-trace-")
 os.environ["TBANK_TRACE_FILE"] = os.path.join(_TMP, "calls.jsonl")
@@ -26,10 +30,25 @@ os.environ["TBANK_EVENTS"] = os.path.join(_TMP, "events.jsonl")
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+from elicit_fake import accept_ctx, decline_ctx  # noqa: E402
 from src import server, trace  # noqa: E402
 from src.client import MobileSession, TbankApiError  # noqa: E402
 
 failures = []
+
+# The two heads that replace an answer naming the payee. They are DIFFERENT on
+# purpose: «Отправлено» is money gone, «ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ» is a payment the
+# bank is still holding — opposite situations for whoever reads the report.
+SUCCESS_HEAD = "<успех, получатель не записывается>"
+PENDING_HEAD = "<ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ, получатель не записывается>"
+
+# A single default SBP candidate: with the button live, transfer() resolves the
+# recipient BEFORE the payment body (to name them on the button), so the stubs
+# that pay need this canned answer or the lookup would run the real client code.
+RECIPIENT = [{"bank_member_id": "100000000000", "masked_fio": "И. И.",
+              "pointer_link_id": "10000000000", "bank_name": "Банк",
+              "is_default_bank": True, "workflow_type": "SBPTransfer",
+              "is_tbank": False}]
 
 
 def check(cond, msg):
@@ -131,6 +150,12 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
     path = fresh_trace()
     sid = "AbCdEfGhIjKlMnOpQrStUvWxYz012345.authenticon-0123456789-abcde"
     secret_msg = "Привет, это личное сообщение про здоровье"
+    # The payee's own name, handed in as an argument: `masked_fio` on a P2P
+    # transfer, `name` on one by requisites. Neither key matches the blocklist —
+    # "name" is a word, not a secret shape — so both used to be stored in full,
+    # in the same row whose ANSWER is blanked precisely to keep the payee out.
+    payee_fio = "И. СИНТЕТИКОВ"
+    payee_org = 'ООО "ВЫМЫСЕЛ"'
 
     run(Stub(messenger_send={"ok": True}), server.messenger_send, "c-1", secret_msg)
     run(Stub(messenger_conversations=[
@@ -142,10 +167,15 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
     run(Stub(cards=TbankApiError("X", f"boom at https://x/v1/a?sessionid={sid}")),
         server.list_cards)
     run(Stub(transfer=({"payload": {"paymentId": "1"}}, "И. И."),
+             resolve_recipient=RECIPIENT,
              list_accounts=[{"id": "1111111111", "accountType": "Current",
                              "moneyAmount": {"value": 5000,
                                              "currency": {"name": "RUB"}}}]),
-        server.transfer, 1000, "+79991234567", "секретная записка к переводу")
+        server.transfer, 1000, "+79991234567", "секретная записка к переводу",
+        masked_fio=payee_fio, ctx=accept_ctx())
+    # No ctx → refused at the gate, nothing sent. The arguments are recorded all
+    # the same, so a payee who was never paid must not be stored either.
+    run(Stub(), server.transfer_requisites, 1000, name=payee_org)
 
     raw = open(path, encoding="utf-8").read()
     check(secret_msg not in raw, "a chat message was written into the trace")
@@ -158,6 +188,11 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
     # 11 digits, too short for _RE_CARD and _RE_BLOB — matched no value pattern.
     check("+79991234567" not in raw,
           "the recipient phone reached the trace as a tool argument")
+    check(payee_fio not in raw,
+          "the payee's name reached the trace as transfer(masked_fio=…)")
+    check(payee_org not in raw,
+          "the payee's name reached the trace as transfer_requisites(name=…) — on a "
+          "call that was REFUSED, so nobody was paid and there is nothing to record")
 
     rows = trace.load(path)
     sent = next(r for r in rows if r["tool"] == "messenger_send")
@@ -172,12 +207,18 @@ def test_a_secret_or_a_private_message_never_reaches_the_file():
     check(moved["args"]["amount"] == 1000,
           f"redacting by key must not swallow the ordinary arguments that make the "
           f"trace useful: {moved['args']}")
+    check(moved["args"]["masked_fio"] == f"<{len(payee_fio)} chars>",
+          f"the payee must be measured, not stored — blanking the answer's first "
+          f"line is undone by keeping the same person in the args: {moved['args']}")
+    refused = next(r for r in rows if r["tool"] == "transfer_requisites")
+    check(refused["args"]["name"] == f"<{len(payee_org)} chars>",
+          f"the payee must be measured on a refused payment too: {refused['args']}")
     # An error head is still worth keeping — it is already redacted.
     failed = next(r for r in rows if r["tool"] == "list_cards")
     check("sessionid=<redacted>" in failed["head"],
           f"an error must stay readable after redaction: {failed['head']!r}")
-    print("  privacy: chat text, transfer notes, sessionid, account numbers and "
-          "phone arguments stay out")
+    print("  privacy: chat text, transfer notes, sessionid, account numbers, phone "
+          "arguments and payee names stay out")
 
 
 def test_a_redacted_secret_cannot_be_read_back_out_of_its_own_hash():
@@ -230,7 +271,9 @@ def test_a_scanned_qr_does_not_smuggle_the_payee_account_into_the_file():
     purpose = "Оплата по счету № 5982 от 03.08.2026 за профиль алюминиевый"
 
     run(Stub(), server.payment_qr, qr)
-    run(Stub(), server.transfer_requisites, 100.0, qr, purpose)
+    # The button is pressed, so the call gets past the gate and into the payment
+    # body — the arguments must be measured on the way in, not only on a refusal.
+    run(Stub(), server.transfer_requisites, 100.0, qr, purpose, ctx=accept_ctx())
 
     raw = open(path, encoding="utf-8").read()
     check(acct not in raw, "the payee account reached the trace inside the QR argument")
@@ -250,23 +293,141 @@ def test_a_successful_payment_does_not_record_who_was_paid():
     """«Отправлено 23 600 RUB → ООО «Ромашка» со счёта #» — _RE_LONG_ID scrubs the
     digits and leaves the counterparty, so the trace recorded who was paid and when.
     A FAILED call must keep its head: there the first line is the error, already
-    redacted, and it is the whole reason to look."""
+    redacted, and it is the whole reason to look.
+
+    Two answers from these tools name a payee, and each gets its OWN marker. Both
+    would be safe under one shared marker — and useless: «Отправлено» means the
+    money left, «ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ» means the bank is holding the payment
+    until a second factor, and a report that groups them cannot tell an operator
+    which of the two just happened."""
     path = fresh_trace()
     trace.record("transfer_requisites", {"amount": 23600}, time.time(),
                  'Отправлено 23 600.00 RUB → ООО "РОМАШКА" со счёта 1111111111.', None)
+    trace.record("transfer", {"amount": 23600}, time.time(),
+                 'ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ. Банк принял платёж 23 600.00 RUB → '
+                 'ООО "РОМАШКА" со счёта 1111111111, но держит его до второго '
+                 'фактора (код из SMS).\nstatus=WAITING_CONFIRMATION '
+                 'attemptId=a-1 nextTool=confirm_payment safeToRetry=false', None)
     trace.record("transfer_requisites", {"amount": 23600}, time.time(),
                  "Платёж НЕ выполнен: API error (INVALID_REQUEST_DATA)", "TbankApiError")
     rows = trace.load(path)
 
-    ok, failed = rows[0], rows[1]
+    ok, pending, failed = rows[0], rows[1], rows[2]
     check("РОМАШКА" not in ok["head"],
           f"the payee is recorded on a successful payment: {ok['head']!r}")
+    check(ok["head"] == SUCCESS_HEAD, f"the success marker changed: {ok['head']!r}")
     check(ok["err"] is None, "success must still be distinguishable from failure")
+    check("РОМАШКА" not in pending["head"],
+          f"the payee is recorded on a payment held for a second factor: "
+          f"{pending['head']!r}")
+    check(pending["head"] == PENDING_HEAD,
+          f"a held payment must say so, not borrow the success marker: "
+          f"{pending['head']!r}")
     check("НЕ выполнен" in failed["head"],
           f"a failed payment must keep its error line: {failed['head']!r}")
     check("РОМАШКА" not in open(path, encoding="utf-8").read(),
           "the payee reached the file by some other route")
-    print("  head: a paid counterparty is not recorded; a failure keeps its message")
+    print("  head: neither a paid nor a held counterparty is recorded, and the two "
+          "are told apart; a failure keeps its message")
+
+
+def test_a_refused_payment_is_not_filed_as_a_completed_one():
+    """The blanking above used to key on the TOOL NAME alone, so every answer
+    transfer/transfer_requisites ever returned was stored as «успех, получатель не
+    записывается». Most of their answers are refusals — this client has no button,
+    the user pressed «Отмена», the duplicate guard fired, the amount was junk — and
+    each of them was filed as a completed payment. debug_report() then counted
+    payments that never happened, grouped under a head that says the opposite of
+    what occurred, and threw away the one line worth reading: WHY it did not happen.
+
+    Refusals are ordinary return values (`err` stays None), so nothing else in the
+    row distinguishes them — the head is the only place the outcome exists.
+
+    Driven through the tools themselves wherever the refusal comes from the gate or
+    from validation, so the strings are the server's own and not a copy that can
+    drift. The duplicate guard needs journal state to fire, so its answer goes in
+    through record() directly."""
+    path = fresh_trace()
+    account = [{"id": "1111111111", "accountType": "Current",
+                "moneyAmount": {"value": 5000, "currency": {"name": "RUB"}}}]
+
+    # No ctx at all → NO_ELICITATION_REFUSAL, before any HTTP, from both tools.
+    run(Stub(), server.transfer, 1000, "+79991234567")
+    run(Stub(), server.transfer_requisites, 1000, name="ООО ТЕСТ")
+    # The button was shown and the human pressed «Отмена». Each tool words this
+    # its own way, and both wordings must reach the file.
+    run(Stub(resolve_recipient=RECIPIENT, list_accounts=account),
+        server.transfer, 1000, "+79991234567", ctx=decline_ctx())
+    run(Stub(list_accounts=account), server.transfer_requisites, 1000,
+        name="ООО ТЕСТ", ctx=decline_ctx())
+    # A refusal that never even reaches the gate.
+    run(Stub(), server.transfer, 0, "+79991234567")
+    # A payee that is a NAME, not digits: _RE_LONG_ID cannot help here, and the
+    # addressee can arrive from a QR without ever being an argument, so the args
+    # blocklist cannot either. Keeping the refusal's own first line (the point of
+    # this test) must not smuggle the company back into a file the module's own
+    # header calls shareable.
+    trace.record("transfer_requisites", {"amount": 1000}, time.time(),
+                 'ПОВТОР ЗАБЛОКИРОВАН: такой же платёж (1000₽ → ООО "ВЫМЫСЕЛ") '
+                 "уже отправлялся и его исход НЕ подтверждён.\n"
+                 "Проверь list_operations('1111111111', days=1).", None)
+
+    expect = [
+        ("transfer",            "ПЛАТЁЖ НЕ ВЫПОЛНЕН"),
+        ("transfer_requisites", "ПЛАТЁЖ НЕ ВЫПОЛНЕН"),
+        ("transfer",            "Отменено пользователем"),
+        ("transfer_requisites", "Перевод отменён пользователем"),
+        ("transfer",            "Сумма должна быть положительным числом"),
+        ("transfer_requisites", "ПОВТОР ЗАБЛОКИРОВАН"),
+    ]
+    rows = sorted(trace.load(path), key=lambda r: r["seq"])
+    check(len(rows) == len(expect),
+          f"expected one row per refusal, got {[(r['tool'], r['head']) for r in rows]}")
+    for row, (tool, opening) in zip(rows, expect):
+        check(row["tool"] == tool, f"row order: expected {tool}, got {row['tool']}")
+        check(row["head"] not in (SUCCESS_HEAD, PENDING_HEAD),
+              f"{tool} «{opening}…» was filed as a payment that happened: "
+              f"{row['head']!r}")
+        check(row["head"].startswith(opening),
+              f"{tool}: the refusal the agent read must survive as the head — "
+              f"expected it to start with {opening!r}, got {row['head']!r}")
+        check(row["err"] is None,
+              f"{tool}: a refusal is a return value, not an exception: {row['err']!r}")
+
+    # …and surviving must not mean smuggling: the head is still scrubbed.
+    raw = open(path, encoding="utf-8").read()
+    check("79991234567" not in raw,
+          "a recipient phone rode into the file inside a refusal")
+    check("ВЫМЫСЕЛ" not in raw,
+          "the duplicate guard names the payee in cleartext, and that head is kept "
+          "now that refusals are no longer blanked — the name must be cut, the "
+          "reason kept")
+    # The one answer of these two tools that echoes the bank verbatim: json.dumps
+    # writes no newlines, so the payload IS the first line, and keeping first
+    # lines (the point of this test) would put the bank's own response — payee
+    # and all — into the file. The cut is marked: a head that just stops reads
+    # as the whole answer.
+    trace.record("transfer_requisites", {"amount": 1000}, time.time(),
+                 "Ответ банка без paymentId — исход неясен. "
+                 "Проверь list_operations('1111111111', days=1). "
+                 'Ответ: {"payload": {"addressee": "ООО \\"ВЫМЫСЕЛ\\""}}', None)
+    echoed = [r for r in trace.load(path) if r["head"].startswith("Ответ банка")]
+    check(len(echoed) == 1, f"expected the echoed-payload row: {echoed}")
+    if echoed:
+        h = echoed[0]["head"]
+        check("ВЫМЫСЕЛ" not in h and "payload" not in h,
+              f"the bank's own response must not reach the file: {h!r}")
+        check(h.endswith("<ответ банка не записывается>"),
+              f"and the cut must be marked, not silent: {h!r}")
+        check("исход неясен" in h, f"the reason must survive it: {h!r}")
+
+    guard = next(r for r in rows if r["head"].startswith("ПОВТОР ЗАБЛОКИРОВАН"))
+    check("→ #" in guard["head"],
+          f"the payee must be replaced, not the whole line dropped: {guard['head']!r}")
+    check("уже отправлялся" in guard["head"],
+          f"and the REASON must survive the cut: {guard['head']!r}")
+    print("  head: every refusal keeps its own first line — a payment that did not "
+          "happen is no longer counted as one")
 
 
 def test_pay_bills_fields_argument_is_measured_not_stored():
@@ -392,10 +553,11 @@ def test_a_broken_tracer_cannot_break_a_payment():
         # Caught rather than allowed to propagate: this must be REPORTED as a
         # failure, not kill the run before the remaining checks say why.
         out = run(Stub(transfer=({"payload": {"paymentId": "100000000001"}}, "И. И."),
+                       resolve_recipient=RECIPIENT,
                        list_accounts=[{"id": "1111111111", "accountType": "Current",
                                        "moneyAmount": {"value": 5000,
                                                        "currency": {"name": "RUB"}}}]),
-                  server.transfer, 1000, "+79991234567")
+                  server.transfer, 1000, "+79991234567", ctx=accept_ctx())
     except BaseException as e:                               # noqa: BLE001
         out = ""
         failures.append(f"the tracer's write error escaped into the payment: "
@@ -513,6 +675,7 @@ def main():
     test_a_redacted_secret_cannot_be_read_back_out_of_its_own_hash()
     test_a_scanned_qr_does_not_smuggle_the_payee_account_into_the_file()
     test_a_successful_payment_does_not_record_who_was_paid()
+    test_a_refused_payment_is_not_filed_as_a_completed_one()
     test_pay_bills_fields_argument_is_measured_not_stored()
     test_the_journal_and_the_event_log_redact_too()
     test_the_log_files_are_owner_only_even_if_they_already_existed()

@@ -442,11 +442,13 @@ def checkout(session, app_id: str = "", point_id: str = "",
             if expected_sum and abs(float(actual_sum) - float(expected_sum)) > 0.01:
                 raise CheckoutError(
                     f"сумма изменилась после подтверждения: подтверждено "
-                    f"{expected_sum} ₽, к оплате {actual_sum} ₽. Заказ НЕ создан. "
-                    f"Если пользователь подтвердит новую сумму — повтори с "
-                    f"expected_sum={actual_sum} (ровно это число, до копейки). "
-                    f"Если сумму никто не подтверждал — покажи корзину заново "
-                    f"(grocery_cart) и спроси.")
+                    f"{expected_sum} ₽, к оплате {actual_sum} ₽. Заказ НЕ создан, "
+                    f"деньги на месте. Назови пользователю обе суммы и повтори "
+                    f"тот же вызов grocery_checkout(...): он заново снимет "
+                    f"предпросмотр и переспросит сумму кнопкой. Хочешь сверку — "
+                    f"передай expected_sum={actual_sum} (ровно это число, до "
+                    f"копейки, не набирай с экрана). Текстом «да» не спрашивай: "
+                    f"согласие даёт кнопка.")
             _safe_record(attempt_id, "delivery", "delivery_ready", amount=actual_sum)
 
             # 5. resolve the payment agreement + customer email from the capture-

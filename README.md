@@ -128,6 +128,14 @@ and a section here used to claim otherwise.
 }
 ```
 
+Reading works in any MCP client. **Paying needs a client that renders MCP
+elicitation** — the money tools confirm the sum with a button the user presses
+(«Перевести/Отмена», «Оплатить …?»), and a client without that capability is refused
+before anything is sent (`grocery_checkout` refuses there at any threshold; its
+`dry_run=True` preview, which creates nothing, still works). Hermes/Telegram and
+Claude Code (≥ 2.1.76) render it; Claude Desktop does not. See
+`TBANK_CONFIRM_ABOVE` under Security.
+
 ## Tools
 
 Each tool's docstring is the reference — this table is only a map of the surface.
@@ -163,7 +171,7 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | Skill | What it does |
 |---|---|
 | `tbank` | **Entry point** — what the bank can do and which skill handles it |
-| `tbank-grocery-order` | Recipe → search → cart → confirm → checkout |
+| `tbank-grocery-order` | Recipe → search → cart → show it → checkout (the tool's own button confirms the sum) |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
 | `tbank-travel-search` | Trains, flights, marketplace — search only, no booking |
 | `tbank-bill-pay` | Service bills — utilities, taxes, fines: catalogue → provider fields → commission preview → pay |
@@ -256,10 +264,22 @@ present the tests additionally check the fixtures have not drifted from it.
   payment ids — are replaced in the recorded line, both to keep them out and because
   the report groups by that line. The `debug_report` tool reads it. On by default;
   `TBANK_TRACE=0` disables it, `TBANK_TRACE_FILE` moves it, and it rotates at 5 MB.
-- **`TBANK_CONFIRM_ABOVE`** — the ruble threshold from which `transfer_requisites`
-  shows the «Перевести/Отмена» elicitation dialog in clients that support it
-  (default `0`: every transfer asks). Clients without elicitation are unaffected —
-  they keep the text confirmation flow.
+- **`TBANK_CONFIRM_ABOVE`** — the ruble threshold from which the five paying tools
+  (`transfer`, `transfer_requisites`, `pay_bill`, `ticket_pay`, `grocery_checkout`)
+  show the confirmation button — an MCP elicitation dialog («Перевести/Отмена»,
+  «Оплатить …?», «Оформить заказ на N ₽?») rendered by the client (default `0`:
+  every payment asks). It is a server-side setting, not a tool argument. Clients
+  without elicitation are NOT waved through: at or above the threshold the tool
+  refuses («ПЛАТЁЖ НЕ ВЫПОЛНЕН…») before anything is journalled or sent — no
+  button, no payment. Hermes/Telegram and Claude Code (≥ 2.1.76) render
+  elicitation; Claude Desktop does not (reads work there, paying does not).
+  Below a positive threshold nothing is asked and the payment proceeds in any
+  client — **except `grocery_checkout`, which refuses a client without elicitation
+  at any threshold**: it is the one paying tool whose sum is not an argument, and
+  learning it means loading the checkout page and asking the store to hold a
+  delivery slot, so it says no before doing that work rather than after.
+  `grocery_checkout(dry_run=True)` — a preview that creates nothing — still works
+  in any client.
 - **Device profile.** Payments carry a 3DS/anti-fraud block whose device facts —
   screen size, locale, timezone, hardware model — default to the device the traffic
   was captured from. Override them with `TBANK_DEVICE_SCREEN_HEIGHT` / `_WIDTH` /
@@ -287,7 +307,13 @@ present the tests additionally check the fixtures have not drifted from it.
     Compare `debug_report()` before and after each step.
 - Money tools (`transfer`, `transfer_requisites`, `grocery_checkout`, `ticket_pay`,
   `pay_bill`, `confirm_payment`) require confirmation of a specific amount — "buy it"
-  is not a confirmation. A `/v1/pay` the bank holds at `WAITING_CONFIRMATION` is
+  is not a confirmation. That confirmation is the button the tool shows itself
+  (elicitation, see `TBANK_CONFIRM_ABOVE` above) with the real total — the agent
+  shows the details beforehand (recipient, requisites, cart, seats + fee) and does
+  not ask «да/нет» in text; `grocery_checkout` quotes the final sum itself and
+  charges exactly what the button named — and if that quote comes back unpriced
+  (empty cart, a preview the store refused, no finite positive total), it returns
+  the preview and charges nothing. A `/v1/pay` the bank holds at `WAITING_CONFIRMATION` is
   resumed with `confirm_payment(attempt_id, otp)` and reconciled with
   `payment_status(attempt_id)` — never by repeating the transfer, which would create a
   second pending payment.
@@ -299,7 +325,8 @@ present the tests additionally check the fixtures have not drifted from it.
   `destructiveHint: false`; 6 debit an account — `transfer`, `transfer_requisites`,
   `grocery_checkout`, `ticket_pay`, `pay_bill`, `confirm_payment` — and are the only
   ones carrying `destructiveHint`, which
-  is what forces a confirmation dialog. The line is drawn at money on purpose: a
+  is what makes the host prompt before running them (the sum itself is then
+  confirmed by the tool's own elicitation button, see above). The line is drawn at money on purpose: a
   booking expires by itself and a cart line is a rewrite away, so confirming those is
   friction that teaches people to click through the one dialog that matters.
   The 12 writers are not marked read-only, because they do modify things and that

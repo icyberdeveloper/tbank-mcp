@@ -17,17 +17,37 @@
    The docs told the agent to take it from there; the tool never emitted one, so the
    whole cinema booking flow dead-ended. concert_schedule had always printed it.
 
+Later regressions were added below (checkout sums, retries, the off-loop tool).
+The grocery_checkout TOOL now charges only after the human pressed «Оформить
+заказ на N ₽» (MCP elicitation) and refuses a client without that capability
+before quoting; so the tool-level test hands it `ctx=accept_ctx()` and stubs the
+quote helper — what it pins is that both the quote and the body stay off the
+event loop, and that the confirmed quote is the sum the body is told to charge.
+
+The journal, event and trace files are pointed at a temp dir at import, so
+running this file by hand never seeds the user's real attempts.jsonl with the
+synthetic blocked cart one test writes.
+
     python3 tests/test_audit_regressions.py
 """
 import json
 import os
 import sys
+import tempfile
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_TMP = tempfile.mkdtemp(prefix="tbank-audit-")
+os.environ["TBANK_ATTEMPTS"] = os.path.join(_TMP, "attempts.jsonl")
+os.environ["TBANK_EVENTS"] = os.path.join(_TMP, "events.jsonl")
+os.environ["TBANK_TRACE_FILE"] = os.path.join(_TMP, "calls.jsonl")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 import requests  # noqa: E402
 
+from elicit_fake import accept_ctx  # noqa: E402
 from src import server  # noqa: E402
 from src.client import MobileSession  # noqa: E402
 from src.observability import redact_text  # noqa: E402
@@ -798,17 +818,26 @@ def test_the_checkout_tool_runs_playwright_off_the_event_loop():
     again would break every real checkout with a green suite.
 
     Asserted by running the tool inside a real event loop and recording the thread
-    its body executed on."""
+    its body executed on. The tool now quotes the final sum itself (a second
+    Playwright run) and shows the «Оформить заказ на N ₽» button before the body —
+    so the quote helper is stubbed too, and must ALSO run off the loop; the ctx is
+    a client whose human presses Accept, or the tool refuses before either runs."""
     import asyncio
     import threading
 
     from src import server as S
 
     loop_thread = None
-    body_thread = []
+    quote_thread, body_thread, body_sums = [], [], []
+    QUOTED = 100.0
 
-    def fake_body(*a, **kw):
+    def fake_quote(app_id, point_id, account_id):
+        quote_thread.append(threading.current_thread().ident)
+        return QUOTED, f"[preview] К ОПЛАТЕ: {QUOTED} ₽"
+
+    def fake_body(app_id, point_id, force, account_id, expected_sum, dry_run):
         body_thread.append(threading.current_thread().ident)
+        body_sums.append(expected_sum)
         return "OK: ran"
 
     fn = getattr(S.grocery_checkout, "fn", S.grocery_checkout)
@@ -820,25 +849,34 @@ def test_the_checkout_tool_runs_playwright_off_the_event_loop():
                         "raises and every real checkout fails")
         return
 
-    saved = S._do_grocery_checkout
-    S._do_grocery_checkout = fake_body
+    saved = S._grocery_quote_sum, S._do_grocery_checkout
+    S._grocery_quote_sum, S._do_grocery_checkout = fake_quote, fake_body
+    saved_threshold = os.environ.pop("TBANK_CONFIRM_ABOVE", None)
     try:
         async def drive():
             nonlocal loop_thread
             loop_thread = threading.current_thread().ident
-            # expected_sum is required for a real headless checkout (no elicitation to
-            # confirm the sum); without it the tool refuses and returns a quote instead
-            # of reaching the body. Pass it so this test isolates the off-loop property.
-            return await S.grocery_checkout("204", "5980", expected_sum=100.0)
+            # No expected_sum on purpose: the tool quotes, the button names the
+            # quote, and the body is told to charge exactly that number.
+            return await S.grocery_checkout("204", "5980", ctx=accept_ctx())
         out = asyncio.run(drive())
     finally:
-        S._do_grocery_checkout = saved
+        S._grocery_quote_sum, S._do_grocery_checkout = saved
+        if saved_threshold is not None:
+            os.environ["TBANK_CONFIRM_ABOVE"] = saved_threshold
 
     check(out == "OK: ran", f"the tool must return the body's answer: {out!r}")
+    check(quote_thread and quote_thread[0] != loop_thread,
+          f"the checkout QUOTE ran ON the event loop thread ({loop_thread}) — "
+          f"sync_playwright() would raise there")
     check(body_thread and body_thread[0] != loop_thread,
           f"the checkout body ran ON the event loop thread ({loop_thread}) — "
           f"sync_playwright() would raise there")
-    print("  checkout tool: coroutine, and its body runs off the event loop")
+    check(body_sums == [QUOTED],
+          f"the body must be told to charge the sum the button showed ({QUOTED}), "
+          f"got {body_sums}")
+    print("  checkout tool: coroutine; quote and body both run off the event loop, "
+          "the button's sum is the charge")
 
 
 def test_payment_gate_problem_json_reaches_the_user():

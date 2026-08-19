@@ -37,7 +37,9 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 _TMP = tempfile.mkdtemp(prefix="tbank-level-")
 os.environ["TBANK_TRACE_FILE"] = os.path.join(_TMP, "calls.jsonl")
@@ -46,6 +48,7 @@ os.environ["TBANK_EVENTS"] = os.path.join(_TMP, "events.jsonl")
 
 import json                                                        # noqa: E402
 
+from elicit_fake import accept_ctx                                 # noqa: E402
 from src import server, trace                                      # noqa: E402
 from src.client import MobileSession, TbankApiError                # noqa: E402
 
@@ -218,7 +221,10 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
 
     An earlier version of this test PINNED that gap, asserting the name was absent
     and saying in its own message that a failure would mean the gap had been closed.
-    It failed on the fix, which is what the marker was for."""
+    It failed on the fix, which is what the marker was for.
+
+    Every transfer here carries ctx=accept_ctx(): money moves only after the
+    elicitation button, so without it the tool refuses before the body runs."""
     seen = {}
 
     class Named(MobileSession):
@@ -250,8 +256,12 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
 
     s = Named()
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
+    # accept_ctx(): the human pressed «Перевести». pointer_link_id is passed, so
+    # the tool's own pre-dialog resolve stays out of the way — the ONE lookup
+    # counted below is the client's, made for the name in the signed body.
     out = run(s, server.transfer, 10, "+79991234567",
-              bank_member_id="1", pointer_link_id="2", from_account="1")
+              bank_member_id="1", pointer_link_id="2", from_account="1",
+              ctx=accept_ctx())
 
     check(seen.get("resolved") == 1,
           f"the name lookup must happen — it fills the signed body: "
@@ -269,7 +279,7 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     out2 = run(chosen, server.transfer, 12, "+79991234567",
                bank_member_id="1", pointer_link_id="2", masked_fio="Пётр П.",
-               from_account="1")
+               from_account="1", ctx=accept_ctx())
     check("(Пётр П.)" in out2, f"an explicit name must win: {out2!r}")
     check(seen.get("resolved") is None,
           f"...and must not cost a lookup at all: {seen.get('resolved')}")
@@ -285,7 +295,8 @@ def test_the_resolved_name_reaches_both_the_signed_body_and_the_user():
 
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     out3 = run(NoName(), server.transfer, 13, "+79991234567",
-               bank_member_id="1", pointer_link_id="2", from_account="1")
+               bank_member_id="1", pointer_link_id="2", from_account="1",
+               ctx=accept_ctx())
     check("paymentId=1" in out3,
           f"a failed NAME lookup must not stop a transfer whose routing is already "
           f"decided by the two ids: {out3!r}")

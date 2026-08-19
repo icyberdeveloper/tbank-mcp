@@ -76,7 +76,15 @@ MAX_BYTES = int(os.environ.get("TBANK_TRACE_MAX_BYTES", 5 * 1024 * 1024))
 # argument the agent happened to use. `comment` is назначение платежа: an invoice
 # number, a contract, what was bought — the exact class `description` is opaque for.
 _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
-                "save_to", "fields", "qr", "comment", "purpose"}
+                "save_to", "fields", "qr", "comment", "purpose",
+                # The payee's own name, passed straight in: `masked_fio` («И. И.»)
+                # for a P2P transfer, `name` («ООО …») for one by requisites. The
+                # answer's first line is scrubbed for exactly these two tools (see
+                # _NAMES_A_COUNTERPARTY) — storing the same person in the args of
+                # the same row undoes that, and did it for REFUSED payments too,
+                # where nobody was paid at all. `name` appears on no other tool's
+                # signature, so nothing legitimate is lost.
+                "masked_fio", "name"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the
@@ -97,6 +105,28 @@ _ECHOES_USER_TEXT = {"messenger_send", "messenger_messages", "messenger_conversa
 # first line is the error from _err(), which is already redacted and is the whole
 # reason to look.
 _NAMES_A_COUNTERPARTY = {"transfer", "transfer_requisites"}
+
+# …but ONLY those answers actually name one. Two do: «Отправлено 23 600 RUB → ООО
+# «Ромашка» …» and «ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ. Банк принял платёж … → ООО «Ромашка»».
+# Every other answer these tools give is a REFUSAL — no button in this client, the
+# user pressed «Отмена», the duplicate guard, a bad БИК — and names nobody. Blanking
+# those too used to file them under «успех», so the one outcome an operator most
+# needs to see (a payment that did not happen, and why) was recorded in
+# debug_report() as a completed payment. Match the two, keep the rest.
+_PAID_RE = re.compile(r"(Отправлено|ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ)")
+
+# «… → ООО «Ромашка») …» in a refusal from those two tools: everything after the
+# arrow up to the clause that closes it. Digits are already gone by then, so what
+# this removes is the human or the company — the one thing the head must not keep.
+_RE_PAYEE_TAIL = re.compile(r"→\s*[^,;)\n]+")
+
+# The bank's own answer, echoed into a tool's reply: «… Ответ: {"payload": {…}}».
+# json.dumps writes no newlines, so that JSON IS the first line — keeping it would
+# put the raw payload, payee included, into the file this module calls shareable.
+# Only these two tools keep their first line at all (see _PAID_RE), and only one
+# answer of theirs carries a payload («Ответ банка без paymentId»), but the cut is
+# by shape, not by wording: a future answer that echoes the bank is cut too.
+_RE_ECHOED_PAYLOAD = re.compile(r"(?:Ответ:\s*)?[{\[]")
 
 _MAX_ARG = 64
 _HEAD = 160
@@ -220,11 +250,30 @@ def record(tool: str, args: dict, started: float, result, error: str | None) -> 
         if text.strip():
             if tool in _ECHOES_USER_TEXT and not error:
                 head = f"<{len(text)} chars, содержимое не записывается>"
-            elif tool in _NAMES_A_COUNTERPARTY and not error:
-                head = "<успех, получатель не записывается>"
+            elif tool in _NAMES_A_COUNTERPARTY and not error and _PAID_RE.match(
+                    text.strip()):
+                head = ("<успех, получатель не записывается>"
+                        if text.strip().startswith("Отправлено")
+                        else "<ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ, получатель не записывается>")
             else:
                 first = redact_text(text.strip().splitlines()[0])
-                head = _RE_LONG_ID.sub("#", first)[:_HEAD]
+                head = _RE_LONG_ID.sub("#", first)
+                if tool in _NAMES_A_COUNTERPARTY:
+                    # Keeping the refusal's own first line is the point (see
+                    # _PAID_RE) — but some of those lines name the payee in
+                    # cleartext: «ПОВТОР ЗАБЛОКИРОВАН: такой же платёж (4200₽ →
+                    # ООО «Ромашка») …». _RE_LONG_ID only eats digits, and the
+                    # addressee can arrive from the QR without ever being an
+                    # argument, so the args blocklist cannot catch it either.
+                    # Cut what follows the arrow; the reason stays readable.
+                    head = _RE_PAYEE_TAIL.sub("→ #", head)
+                    # …and cut an echoed bank payload the same way, marking the
+                    # cut — a head that just stops looks like the whole answer.
+                    payload = _RE_ECHOED_PAYLOAD.search(head)
+                    if payload:
+                        head = (head[:payload.start()].rstrip()
+                                + " <ответ банка не записывается>")
+                head = head[:_HEAD]
         safe, digest = _short_args(args)
         _append({
             "ts": round(started, 3), "run": RUN_ID, "seq": _seq, "tool": tool,

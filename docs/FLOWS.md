@@ -92,6 +92,25 @@ You normally just call a read tool; the above runs under the hood. Call
 7. POST payment_gate_pay **immediately** (before auto-cancel) with
    `amount.currencyCode=643` (RUB). Returns `{paymentId, stage:{status:"SUCCESS"}}`.
 
+> **Confirmation is the button, not text.** Steps 3–7 run INSIDE
+> `grocery_checkout(app_id, point_id)`. When not `dry_run`, the tool quotes the final
+> sum itself (only the backend knows what weight goods reprice to), shows the user
+> an elicitation button «Оформить заказ на N ₽?» with that sum, and locks the charge
+> to it. Your job BEFORE the call is to show the cart contents (the button names only
+> the total); do NOT ask «да/нет» in text — the button is the confirmation.
+> `dry_run=True` is an optional read-only preview (works in any client) if you want to
+> name the total and the delivery slot up front; `expected_sum` is an optional
+> cross-check — if it differs from the tool's own quote by more than 0.01 ₽ the button
+> shows both («… было M ₽ — банк пересчитал корзину») and the quoted sum is what gets
+> charged. A client WITHOUT elicitation (no button to press) is refused at ANY
+> threshold, and refused BEFORE the quote — «ПЛАТЁЖ НЕ ВЫПОЛНЕН…», no page loaded, no
+> delivery slot asked for, no order, nothing sent; `dry_run=True` is then the only
+> checkout call that still does anything. Hermes/Telegram and Claude Code (≥ 2.1.76)
+> have elicitation, Claude Desktop does not. And a quote that comes back WITHOUT a
+> finite positive sum is a refusal too — «ОПЛАТА НЕ ВЫПОЛНЕНА: предпросмотр вернул
+> сумму …», with the preview text attached — never a charge: an unpriced total would
+> put «0.00 ₽» on the button and switch the kopeck-exact guard off.
+
 > **Out-of-stock items** block the order — remove unavailable goods before ordering.
 > `code=211` has been seen on the deliveries step (HTTP 200 + the store's own code),
 > but its meaning is NOT capture-verified: there is no error response for grocery in
@@ -121,8 +140,9 @@ You normally just call a read tool; the above runs under the hood. Call
    phone: external = Sber + VTB, internal = the T-Bank account. Asking only the
    external one is why a recipient plainly visible in the app resolved to «no
    T-Bank». **Required for a NEW (unsaved) recipient** before commission/transfer;
-   if several candidates and no default, ask the user which one (never silently
-   pick — wrong account = money gone).
+   if several candidates and no default, the user picks which one — `transfer`
+   shows a bank picker itself in a client with elicitation; otherwise ask in text
+   (never silently pick — wrong account = money gone).
 2. `payment_commission(body)` → preview the fee. `payParameters` with the resolved
    `providerFields`, `pointerType:"8276"`, `pointer:"+7…"` — plus
    **`paymentType:"Transfer"`, which commission REQUIRES and the transfer itself must
@@ -134,7 +154,12 @@ You normally just call a read tool; the above runs under the hood. Call
    взимается» and a 3 000 000 ₽ ceiling for any phone at all. Only
    `unfinishedFlag:false` is a fee.
 3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
-   pointer_link_id, from_account, force)` → moves REAL money. Two capture-verified
+   pointer_link_id, from_account, force)` → moves REAL money. **The confirmation is
+   the tool's own button:** it shows the user «Перевести/Отмена» (elicitation, for
+   sums ≥ `TBANK_CONFIRM_ABOVE`, default 0 = every transfer) BEFORE anything is
+   journalled or sent. Show the recipient, sum and fee in text first, then call —
+   do NOT ask «да/нет» in text; a client without elicitation is refused («ПЛАТЁЖ НЕ
+   ВЫПОЛНЕН…», nothing sent). Two capture-verified
    flavours of the same `p2p-anybank` envelope, differing by ONE providerFields key:
    SBP carries `bankMemberId` (captures.xml #1477), a transfer to the recipient's own
    T-Bank account does NOT (captures-pay.xml — same `pointerType:"8276"` and phone
@@ -168,7 +193,8 @@ resolve → commission → signed `/v1/pay`, 200 with a `paymentId`).
 1. `payment_qr(qr)` → read-only. Takes the ГОСТ Р 56042-2014 string the QR encodes
    (`ST0001<enc>|Name=…|PersonalAcc=…|BankName=…|BIC=…|CorrespAcc=…|PayeeINN=…|
    KPP=…|Sum=…`) and prints the payee, the requisites, the sum and the fee — i.e.
-   everything the user has to confirm. It also asks the bank what the QR means
+   everything to show the user BEFORE the transfer call (the button that follows
+   names only the sum and the payee). It also asks the bank what the QR means
    (`POST /providers/providers/qr/resolve`, with `barcodeHash` = **sha1 of the QR's
    utf-8 bytes** and the same three values in the query AND the JSON body). A QR
    that resolves to any provider OTHER than `transfer-legal` is a bill, not a
@@ -176,7 +202,11 @@ resolve → commission → signed `/v1/pay`, 200 with a `paymentId`).
    **`Sum` is in KOPECKS.** `Sum=2360000` is 23 600 ₽.
 2. `transfer_requisites(amount, qr, comment, account_number, bik, inn, name, kpp,
    corr_account, bank_name, nds, personal_account, from_account, force)` → REAL
-   money. `qr=` fills everything at once including the amount; explicit arguments
+   money. The tool itself shows the user the «Перевести N ₽ → <получатель>?»
+   button (elicitation, sums ≥ `TBANK_CONFIRM_ABOVE`) before the signed POST — do
+   NOT ask «да/нет» in text, show requisites + purpose and call; a client without
+   elicitation is refused, nothing sent. `qr=` fills everything at once including
+   the amount; explicit arguments
    always win over the QR, which is how a bad scan is corrected. `corr_account` and
    `bank_name` are looked up from the БИК (`GET /v1/bank_info?bik=`) when absent —
    the same call the app makes the moment a QR resolves.
@@ -216,7 +246,11 @@ resolve → commission → signed `/v1/pay`, 200 with a `paymentId`).
 5. `pay_bill(provider_id, fields, amount, group, from_account)` → REAL MONEY. It
    validates every field against the provider's `regexp` and refuses before sending,
    then prices the payment through `payment_commission` (which is also the bank
-   validating the body) and enforces the provider's min/max. Unknown outcome blocks a
+   validating the body) and enforces the provider's min/max — and only then shows
+   the user the «Оплатить …?» button naming the real total WITH the commission
+   (elicitation, sums ≥ `TBANK_CONFIRM_ABOVE`). Do NOT ask «да/нет» in text; a
+   client without elicitation is refused before the commission round-trip («ПЛАТЁЖ
+   НЕ ВЫПОЛНЕН…», nothing sent). Unknown outcome blocks a
    repeat and reuses `userPaymentId`, exactly as `transfer` does.
 
 > ⚠️ The pay ENVELOPE for bill providers is not capture-verified: the one captured
@@ -363,8 +397,8 @@ Travel is split by vertical, because each one authorizes differently:
 
 ## 11. Tickets — cinema, concerts, theatre and exhibitions  (REAL money at step 5)
 
-Full detail, including the confirmation wording, lives in the `tbank-tickets`
-skill. The order here is the part you must not improvise:
+Full detail, including what to show the user before paying, lives in the
+`tbank-tickets` skill. The order here is the part you must not improvise:
 
 1. `cinema_search(query, city)` → `eventId` (city-independent). For concerts,
    theatre and exhibitions use `search_app(query, screen="afisha")` instead.
@@ -385,7 +419,11 @@ skill. The order here is the part you must not improvise:
    nowhere else** — `order_details()` does not carry it. Lose it and the booking
    can never be paid, only re-made.
 5. `ticket_pay(order_id, amount, nfs_payment_token, account_id)` → **REAL money.**
-   Only after the user confirms a concrete sum and concrete seats. The tool
+   Show the seats and the total with the service fee (from `cinema_book`) in text
+   first, then call — the tool itself shows the user the «Оплатить заказ …: N ₽?»
+   button (elicitation, sums ≥ `TBANK_CONFIRM_ABOVE`); do NOT ask «да/нет» in text.
+   A client without elicitation is refused («ПЛАТЁЖ НЕ ВЫПОЛНЕН…», nothing sent —
+   the booking stays unpaid and expires by itself). The tool
    re-reads the order from the backend and refuses to pay a mismatched amount.
 6. `order_details(order_id)` → booking code, hall, seats. The ticket itself —
    QR payload, PDF link — is in the orders feed instead, via `ticket_qr(order_id)`;
@@ -524,13 +562,18 @@ comes back empty.
   no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
   (login + OTP + password).
 - `grocery_checkout(dry_run=True)` quotes the order — it runs the cart + delivery
-  steps and returns the sum that would actually be charged, creating nothing. Use it
-  before every payment: the cart total is NOT the charge (weight goods are repriced
-  by the backend during delivery), and a store that refuses delivery surfaces here
-  rather than after the user has confirmed. `expected_sum` is then a number the agent
-  copies rather than one it computes. A quote writes no journal attempt (attempts are
-  keyed by cart hash and the newest decides whether a retry is blocked), and a cart
-  already held for reconciliation is not quoted either.
+  steps and returns the sum that would actually be charged, creating nothing. It is
+  OPTIONAL: the cart total is NOT the charge (weight goods are repriced by the
+  backend during delivery), so a real `grocery_checkout` quotes the final sum ITSELF
+  and puts it on the confirmation button — the agent never relays the number. Use
+  `dry_run` when you want to name the total and the slot up front, or to surface a
+  store that refuses delivery before the user is asked. It is also the ONLY checkout
+  call that works in a client without elicitation: charging is refused there whatever
+  the threshold (see «Elicitation» below). `expected_sum` is an optional
+  cross-check (the number you already told the user): when it differs from the tool's
+  quote by more than 0.01 ₽ the button says both and the quote wins. A quote writes no
+  journal attempt (attempts are keyed by cart hash and the newest decides whether a
+  retry is blocked), and a cart already held for reconciliation is not quoted either.
 - A deliveries step the store refuses (HTTP 200 + its own code, a 5xx, or a dropped
   fetch) is retried inside `grocery_checkout` — nothing is posted at that point and
   the same call seconds later routinely works. A 4xx is not retried. The error names
@@ -552,10 +595,14 @@ comes back empty.
   confirmed step.
 - Money tools — all six — are REAL: `transfer`, `transfer_requisites`,
   `pay_bill`, `grocery_checkout`, `ticket_pay`, and `confirm_payment` (which
-  completes a payment the bank is holding for a second factor). Confirm the
-  amount/recipient (transfer), store+sum (grocery_checkout) or sum+seats
-  (ticket_pay) with the user before running. A request to buy something is not a
-  confirmation to pay for it; the confirmation is an answer to a concrete sum.
+  completes a payment the bank is holding for a second factor). The confirmation is
+  the BUTTON the five paying tools show themselves (see «Elicitation» below) — a
+  concrete sum the user presses «Перевести/Оплатить/Оформить» on. Your part is
+  BEFORE the call: show the recipient + sum + fee (transfer), the requisites +
+  purpose (transfer_requisites), the cart contents (grocery_checkout) or the seats +
+  fee (ticket_pay) in text, then call. Do NOT ask «да/нет» in text on top — that is
+  a double question in a client with buttons. A request to buy something is not a
+  confirmation to pay for it; the button is.
 - **WAITING_CONFIRMATION.** A large or risk-flagged `/v1/pay` comes back
   «ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ»: the bank accepted the payment but is holding it for a
   second factor. The money has NOT moved, but a pending payment now EXISTS on the
@@ -567,27 +614,71 @@ comes back empty.
   code and cannot confirm a payment. Under the hood `confirm_payment` POSTs the code
   to `/v1/confirm` (cookie-authorised, the OTP rides as `secretValue`, the ticket as
   `initialOperationTicket`) — capture-verified, not a guessed endpoint.
-- **Elicitation (payment confirmation only).** The live client (Telegram/Hermes)
-  renders ONLY yes/no buttons — it has NO text-input field. So every dialog that
-  asked the user to TYPE something (payment OTP, login SMS/PIN, a missing
-  amount/purpose) is back to the text-through-agent flow, and the non-payment
-  confirm buttons (messenger_send, ticket/grocery cancel, card reveal) were dropped.
-  What survives is elicitation WITHOUT input, and only for money:
+- **Elicitation (payment confirmation only).** Money moves ONLY after the user
+  presses a button the tool itself shows (MCP elicitation, zero-field: Accept is
+  the action, Decline is «Отмена»). The live client (Telegram/Hermes) renders ONLY
+  yes/no buttons — it has NO text-input field — so every dialog that asked the user
+  to TYPE something (payment OTP, login SMS/PIN, a missing amount/purpose) is the
+  text-through-agent flow, and the non-payment confirm buttons (messenger_send,
+  ticket/grocery cancel, card reveal) were dropped. What the button covers:
   - `transfer` — picks the SBP bank when a phone maps to several (before any
     journal write), offers the debit account when more than one ruble account
-    exists, then a «Перевести/Отмена» button. `transfer_requisites` — offers the
-    account, then the button (a missing amount/purpose is NOT elicited — the tool
-    refuses on a missing amount and the bank on a missing purpose, as before).
-    `pay_bill` / `ticket_pay` — a button naming the real total (bill: commission
-    too). Threshold: `TBANK_CONFIRM_ABOVE` (default 0 = every payment).
-  - `grocery_checkout` without `expected_sum` — quotes the final sum itself, shows
-    it on the button, and locks it (no more relaying the number through the agent).
-  A decline, cancel or timeout does NOTHING (no money moves) and leaves no journal
-  trace; clients WITHOUT elicitation get the text flow above, byte-for-byte. The
-  SBP-bank and debit-account pickers are multi-option, not yes/no — they're kept but
-  degrade to the text flow when the client can't render them.
-  - `confirm_payment(attempt_id, otp)` — the payment code is passed as text: take it
-    from the user and call with `otp='<код>'`. It is never logged.
+    exists, then «Перевести/Отмена». `transfer_requisites` — offers the account,
+    then «Перевести N ₽ → <получатель>?» (a missing amount/purpose is NOT elicited —
+    the tool refuses on a missing amount and the bank on a missing purpose).
+    `pay_bill` — «Оплатить …?» naming the real total WITH the commission.
+    `ticket_pay` — «Оплатить заказ …: N ₽?» with the sum the backend holds for the
+    order. `grocery_checkout` — quotes the final sum itself, shows «Оформить заказ на
+    N ₽?» and locks the charge to that number (with `expected_sum` that differs the
+    button says «… было M ₽ — банк пересчитал корзину»); `dry_run=True` is a
+    read-only preview and works in any client.
+  - Threshold: `TBANK_CONFIRM_ABOVE` (env on the server, default 0 = every
+    payment). Below a positive threshold nothing is asked and the payment proceeds
+    in any client — **except `grocery_checkout`, which refuses a client without
+    elicitation at ANY threshold.** The other four have their amount before they do
+    anything (an argument, or a QR string parsed locally), so below the threshold
+    they can charge without a button; grocery cannot — the only way to learn its
+    sum is a Playwright page load plus a `/grocery/deliveries` POST that asks the
+    store to hold a delivery slot, and doing that work for a client that could never
+    confirm the result is worse than saying no at once. Below the threshold in a
+    client that DOES have elicitation, grocery asks nothing and still pins the
+    charge to its own quote (`expected_sum` is set from it either way — a zero there
+    would switch the kopeck-exact guard off).
+  - The agent does NOT ask «да/нет» in text: its job is to show the details the
+    button does not name (cart contents, seats + fee, requisites + purpose, fee)
+    BEFORE the call. The button is the single confirmation.
+  - **A client WITHOUT elicitation is REFUSED, not waved through:** the tool
+    returns «ПЛАТЁЖ НЕ ВЫПОЛНЕН: этот клиент не поддерживает подтверждение
+    кнопкой…» before any journal write and before any HTTP — nothing sent, money in
+    place. That holds for all five, `grocery_checkout` included: its refusal comes
+    BEFORE the quote, so no checkout page is loaded and no delivery slot is asked
+    for. Hermes/Telegram and Claude Code (≥ 2.1.76) have elicitation; Claude
+    Desktop does not — read-only tools work there, paying does not
+    (`grocery_checkout(dry_run=True)` still does: it creates nothing).
+  - **An unpriced quote is a refusal, not a charge** (`grocery_checkout` only):
+    when the tool's own preview comes back without a finite positive sum, it returns
+    «ОПЛАТА НЕ ВЫПОЛНЕНА: предпросмотр вернул сумму …» with that preview text
+    attached, and no order is created. There is nothing to ask the user about and
+    nothing to check the debit against — and a zero on the button would ALSO switch
+    the kopeck-exact guard off, so whatever the bank recomputed would be charged.
+    An empty cart or a failed preview is the same shape of answer: the preview text
+    comes back as-is, and nothing is charged.
+  - A decline («Отменено пользователем (кнопка «Отмена»)…»), a closed window or a
+    timeout («Подтверждение не получено…») does NOTHING (no money moves) and leaves
+    no journal trace. `transfer`, `pay_bill` and `ticket_pay` say «Ничего не
+    сделано» in that refusal, because nothing ran before their button, and
+    `transfer_requisites` words its own the same way («Платёж НЕ отправлен, деньги
+    на месте»). `grocery_checkout` says «Заказ не создан» instead — its quote has
+    already loaded the checkout page and asked the store for a delivery slot, so
+    «ничего не сделано» would claim more than the code can keep. What every wording
+    promises is the same: no order, no money moved.
+    The SBP-bank and debit-account pickers are multi-option, not
+    yes/no — they appear only when the client has elicitation; a payment below a
+    positive threshold in a client without it falls back to the body's guess
+    (default bank / first ruble account), as before. Above the threshold such a
+    client never gets that far: the money refusal comes first.
+  - `confirm_payment(attempt_id, otp)` — the WAITING_CONFIRMATION code is passed as
+    text: take it from the user and call with `otp='<код>'`. It is never logged.
   - `login(phone)` — text flow: returns the next step, the agent collects the code
     and calls `confirm_otp(otp)` (and `confirm_pin`, if asked). The password is
     entered in the terminal via `login_cli.py`, never through the agent.

@@ -15,6 +15,11 @@ Every test EXECUTES the real code path (the LegalSession harness signs a body bu
 keeps it; a fake _http captures the /v1/confirm POST). Nothing greps source. All
 values below are synthetic.
 
+transfer_requisites confirms only through the «Перевести/Отмена» button and refuses
+a client without elicitation before any journal write or HTTP — so every call that
+must reach /v1/pay (pending, repeat, force, refusal) passes `ctx=accept_ctx()`: the
+human pressed Accept, and what this file pins is what happens AFTER that.
+
     python3 tests/test_payment_confirmation.py
 """
 import os
@@ -36,6 +41,7 @@ from src import journal, server                              # noqa: E402
 from src import observability, trace                          # noqa: E402
 from src.client import (MobileSession, TbankApiError,         # noqa: E402
                         PaymentConfirmationRequired)
+from elicit_fake import accept_ctx                            # noqa: E402
 from test_requisites import LegalSession, fixture, run_tool   # noqa: E402
 
 failures = []
@@ -189,7 +195,8 @@ def test_waiting_confirmation_unwraps_with_the_real_envelope():
 def test_transfer_requisites_reports_a_pending_confirmation():
     _reset_logs()
     fx = fixture()
-    out = run_tool(PendingSession(fx), server.transfer_requisites, amount=AMT, **_args(fx))
+    out = run_tool(PendingSession(fx), server.transfer_requisites, amount=AMT,
+                   ctx=accept_ctx(), **_args(fx))
     check("ПОДТВЕРЖДЕНИ" in out.upper(), f"must announce confirmation: {out}")
     check("confirm_payment" in out, f"must name the next tool: {out}")
     check("4-значный" in out, f"must state the code length from the envelope: {out}")
@@ -211,12 +218,15 @@ def test_pending_blocks_repeat_and_reuses_user_payment_id():
     _reset_logs()
     fx = fixture()
     s1 = PendingSession(fx)
-    run_tool(s1, server.transfer_requisites, amount=AMT, **_args(fx))
+    run_tool(s1, server.transfer_requisites, amount=AMT, ctx=accept_ctx(), **_args(fx))
     upid1 = s1.sent_pay_parameters()["userPaymentId"]
-    out2 = run_tool(PendingSession(fx), server.transfer_requisites, amount=AMT, **_args(fx))
+    # The human presses Accept again — the journal, not the button, blocks the repeat.
+    out2 = run_tool(PendingSession(fx), server.transfer_requisites, amount=AMT,
+                    ctx=accept_ctx(), **_args(fx))
     check("ЗАБЛОКИРОВАН" in out2, f"identical repeat must be blocked: {out2}")
     s3 = PendingSession(fx)
-    out3 = run_tool(s3, server.transfer_requisites, amount=AMT, force=True, **_args(fx))
+    out3 = run_tool(s3, server.transfer_requisites, amount=AMT, force=True,
+                    ctx=accept_ctx(), **_args(fx))
     check("ПОДТВЕРЖДЕНИ" in out3.upper(), f"forced retry still needs confirmation: {out3}")
     check(s3.sent_pay_parameters()["userPaymentId"] == upid1,
           "the retry must reuse the original userPaymentId, not mint a second payment")
@@ -308,7 +318,8 @@ def test_payment_status_shows_pending():
 def test_a_genuine_refusal_is_still_a_refusal():
     _reset_logs()
     fx = fixture()
-    out = run_tool(RefuseSession(fx), server.transfer_requisites, amount=99, **_args(fx))
+    out = run_tool(RefuseSession(fx), server.transfer_requisites, amount=99,
+                   ctx=accept_ctx(), **_args(fx))
     check("НЕ выполнен" in out, f"a refusal must be reported as one: {out}")
     check("ПОДТВЕРЖДЕНИ" not in out.upper(), f"a refusal is not a confirmation: {out}")
     check("деньги на месте" in out, f"a refusal moved nothing — say so: {out}")

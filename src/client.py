@@ -514,7 +514,8 @@ def money_amount(amount) -> float | int:
       `"moneyAmount":23600`, never `23600.0`. float(amount) produced the second form.
 
     Non-positive is left to the callers: each has a better message for it, and
-    refusing here would replace «Сумма должна быть больше нуля» with a type error."""
+    refusing here would replace «Сумма должна быть положительным числом» with a
+    type error."""
     try:
         value = float(amount)
     except (TypeError, ValueError):

@@ -33,7 +33,9 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 _TMP = tempfile.mkdtemp(prefix="tbank-shadow-")
 os.environ["TBANK_TRACE_FILE"] = os.path.join(_TMP, "calls.jsonl")
@@ -42,6 +44,7 @@ os.environ["TBANK_EVENTS"] = os.path.join(_TMP, "events.jsonl")
 
 import requests                                                    # noqa: E402
 
+from elicit_fake import accept_ctx                                 # noqa: E402
 from src import server                                             # noqa: E402
 from src.client import (MobileSession, SessionExpired,              # noqa: E402
                         TbankApiError, UnreadableResponse)
@@ -238,6 +241,14 @@ def test_an_unreadable_answer_leaves_the_outcome_unknown():
             return [{"id": "1111111111", "accountType": "Current",
                      "moneyAmount": {"value": 5000, "currency": {"name": "RUB"}}}]
 
+        def resolve_recipient(self, phone):
+            # With the button live the tool resolves the recipient BEFORE the
+            # body; canned so the pre-dialog lookup never reaches the network.
+            return [{"bank_member_id": "100000000000", "masked_fio": "И. И.",
+                     "pointer_link_id": "10000000000", "bank_name": "Банк",
+                     "is_default_bank": True, "workflow_type": "SBPTransfer",
+                     "is_tbank": False}]
+
         def transfer(self, *a, **kw):
             raise UnreadableResponse("HTTP_200", "<html>…</html>")
 
@@ -246,7 +257,10 @@ def test_an_unreadable_answer_leaves_the_outcome_unknown():
     saved = server._require
     server._require = lambda: Wedged()
     try:
-        out = asyncio.run(server.transfer(100, "+79991234567", from_account="1111111111"))
+        # accept_ctx(): the human pressed «Перевести», so the body runs and the
+        # unreadable answer is what the user is told about.
+        out = asyncio.run(server.transfer(100, "+79991234567", from_account="1111111111",
+                                          ctx=accept_ctx()))
     finally:
         server._require = saved
     check("НЕИЗВЕСТЕН" in out,

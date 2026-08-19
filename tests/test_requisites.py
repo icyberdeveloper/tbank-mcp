@@ -20,6 +20,16 @@ What this pins:
    10 nor 12 — each checked against the provider's own published regexp.
 4. That an explicit argument beats the QR, which is how a bad scan is corrected.
 
+Money moves only after the human pressed the «Перевести/Отмена» button
+(MCP elicitation), and a client without that capability is refused before the
+payment body even starts. So every call here that expects the body to run — the
+commission preview, the requisite regexps, the duplicate guard, the /v1/pay
+envelope — hands the tool `ctx=accept_ctx()` from tests/elicit_fake.py: a client
+whose human presses Accept. The headless refusal itself is pinned in
+tests/test_elicitation.py, not here. Only the amount<=0 refusals stay headless:
+the gate lets a non-positive sum through to the body, whose message names what
+to pass.
+
 The capture is the user's real traffic and is gitignored, so the contract lives in
 fixtures/transfer_legal.json: real key sets, real regexps, real protocol constants,
 synthetic company and account. When the capture IS present the fixture is
@@ -38,7 +48,9 @@ import sys
 import tempfile
 import urllib.parse
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "fixtures", "transfer_legal.json")
@@ -55,7 +67,11 @@ BANK_INFO = 541       # GET /v1/bank_info?bik= → name + correspondent account
 _TMP = tempfile.mkdtemp()
 os.environ["TBANK_ATTEMPTS"] = os.path.join(_TMP, "attempts.jsonl")
 os.environ["TBANK_EVENTS"] = os.path.join(_TMP, "events.jsonl")
+# The trace file too: a standalone run of this file drives real paying tools, and
+# without this their rows (payee, amounts) land in the user's live calls.jsonl.
+os.environ["TBANK_TRACE_FILE"] = os.path.join(_TMP, "calls.jsonl")
 
+from elicit_fake import accept_ctx                          # noqa: E402
 from src import client, server                              # noqa: E402
 from src.client import MobileSession, TbankApiError          # noqa: E402
 
@@ -354,7 +370,7 @@ def test_the_commission_asks_as_a_transfer_not_as_a_payment():
     fx = fixture()
     s = LegalSession(fx)
     out = run_tool(s, server.transfer_requisites, amount=100,
-                   comment="Счет 1", **fx["tool_args"])
+                   comment="Счет 1", ctx=accept_ctx(), **fx["tool_args"])
     check(s.commission_body is not None, f"no commission preview was run: {out}")
     body = s.commission_body or {}
     check(body.get("paymentType") == fx["commission_request"]["paymentType"],
@@ -373,10 +389,12 @@ def test_the_commission_asks_as_a_transfer_not_as_a_payment():
 def test_a_payment_without_a_purpose_is_refused_before_it_is_sent():
     """`comment` (назначение платежа) is required for a Pay by the provider's own
     schema, and a QR does not always carry one. The refusal has to happen here —
-    the commission preview accepts a body with no comment at all."""
+    the commission preview accepts a body with no comment at all. The human has
+    pressed the button — the refusal is the body's own, after the confirmation."""
     fx = fixture()
     s = LegalSession(fx)
-    out = run_tool(s, server.transfer_requisites, amount=100, **fx["tool_args"])
+    out = run_tool(s, server.transfer_requisites, amount=100, ctx=accept_ctx(),
+                   **fx["tool_args"])
     check(s.body is None, "a payment with no purpose reached the bank")
     check("comment" in out and "НЕ отправлен" in out,
           f"the refusal must name the missing field: {out!r}")
@@ -396,13 +414,18 @@ def test_bad_requisites_are_refused_against_the_banks_own_regexps():
              ("kpp", "35250100", "kpp")]                              # 8 digits
     for arg, bad, field_id in cases:
         s = LegalSession(fx)
-        out = run_tool(s, server.transfer_requisites, amount=100, **dict(args, **{arg: bad}))
+        # Accept on the button, so what stops the payment is the regexp, not the gate.
+        out = run_tool(s, server.transfer_requisites, amount=100, ctx=accept_ctx(),
+                       **dict(args, **{arg: bad}))
         check(s.body is None, f"{arg}={bad!r} was PAID instead of refused")
         check(field_id in out, f"{arg}={bad!r}: the refusal must name {field_id}: {out!r}")
     print(f"  refusal: {len(cases)} malformed requisites stopped before the bank")
 
 
 def test_the_sum_must_come_from_somewhere():
+    """Deliberately headless: a non-positive sum needs no button (there is nothing
+    to confirm), so the gate lets it through and the body's own message names what
+    to pass — in any client."""
     fx = fixture()
     s = LegalSession(fx)
     out = run_tool(s, server.transfer_requisites, amount=0,
@@ -415,7 +438,8 @@ def test_the_sum_must_come_from_somewhere():
     out2 = run_tool(plain, server.transfer_requisites, amount=-5,
                     comment="c", **fx["tool_args"])
     check(plain.body is None, "a negative amount was sent")
-    check("больше нуля" in out2, f"a negative amount needs its own message: {out2!r}")
+    check("положительным числом" in out2,
+          f"a negative amount needs its own message: {out2!r}")
     print("  refusal: no sum in the QR and none passed → nothing is sent")
 
 
@@ -528,18 +552,22 @@ def test_a_lost_payment_blocks_the_next_identical_one():
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
 
     lost = LegalSession(fx, fail=True)
-    out = run_tool(lost, server.transfer_requisites, amount=4200, **args)
+    out = run_tool(lost, server.transfer_requisites, amount=4200, ctx=accept_ctx(), **args)
     check("НЕИЗВЕСТЕН" in out, f"a dropped connection must not read as success: {out}")
     check("list_operations" in out, f"the user must be told how to check: {out}")
     first = lost.sent_pay_parameters()["userPaymentId"]
 
+    # The human confirms again — the duplicate guard, not the button, is what
+    # must stop the repeat.
     again = LegalSession(fx)
-    out2 = run_tool(again, server.transfer_requisites, amount=4200, **args)
+    out2 = run_tool(again, server.transfer_requisites, amount=4200, ctx=accept_ctx(), **args)
     check("ЗАБЛОКИРОВАН" in out2, f"the identical repeat must be blocked: {out2}")
     check(again.body is None, "the blocked repeat was sent anyway")
 
+    # force=True overrides the guard, not the button: it is still confirmed.
     forced = LegalSession(fx)
-    out3 = run_tool(forced, server.transfer_requisites, amount=4200, force=True, **args)
+    out3 = run_tool(forced, server.transfer_requisites, amount=4200, force=True,
+                    ctx=accept_ctx(), **args)
     check(fx["pay_response"]["paymentId"] in out3, f"force must go through: {out3}")
     check(forced.sent_pay_parameters()["userPaymentId"] == first,
           f"the retry must reuse the original userPaymentId ({first} → "
@@ -561,7 +589,7 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
 
     s = Refusing(fx)
     out = run_tool(s, server.transfer_requisites, amount=99,
-                   comment="Счет 1", **fx["tool_args"])
+                   comment="Счет 1", ctx=accept_ctx(), **fx["tool_args"])
     check("НЕ выполнен" in out, f"a refusal must be reported as one: {out}")
     check("НЕИЗВЕСТЕН" not in out, f"a refusal is not an unknown outcome: {out}")
     check("деньги на месте" in out, f"say plainly that nothing moved: {out}")
@@ -573,7 +601,7 @@ def test_the_result_carries_what_the_agent_needs_next():
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     s = LegalSession(fx)
     out = run_tool(s, server.transfer_requisites, amount=4321,
-                   comment="Счет 1 от 01.01.2026", **fx["tool_args"])
+                   comment="Счет 1 от 01.01.2026", ctx=accept_ctx(), **fx["tool_args"])
     check(fx["pay_response"]["paymentId"] in out, f"paymentId must be returned: {out}")
     check("payment_receipt" in out, f"the tool that uses it must be named: {out}")
     check("4\u00a0321.00 RUB" in out or "4 321.00 RUB" in out,
@@ -584,7 +612,7 @@ def test_the_result_carries_what_the_agent_needs_next():
     blank = LegalSession(fx, payload={"payload": {}})
     open(os.environ["TBANK_ATTEMPTS"], "w").close()
     out2 = run_tool(blank, server.transfer_requisites, amount=10,
-                    comment="Счет 1", **fx["tool_args"])
+                    comment="Счет 1", ctx=accept_ctx(), **fx["tool_args"])
     check("без paymentId" in out2, f"a missing paymentId must be flagged: {out2}")
     print("  result: paymentId, payee, amount and VAT mark all reported")
 

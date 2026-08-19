@@ -28,6 +28,8 @@ os.environ.setdefault("TBANK_EVENTS",
                       os.path.join(tempfile.mkdtemp(), "events.jsonl"))
 os.environ.setdefault("TBANK_ATTEMPTS",
                       os.path.join(tempfile.gettempdir(), "tbank-test-attempts.jsonl"))
+os.environ.setdefault("TBANK_TRACE_FILE",
+                      os.path.join(tempfile.gettempdir(), "tbank-test-calls.jsonl"))
 
 from src.client import MobileSession  # noqa: E402
 

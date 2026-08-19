@@ -192,7 +192,7 @@ def _traced_tool(*a, **kw):
 
 mcp.tool = _traced_tool
 
-# ── Elicitation: confirmation dialogs when the client supports them ─────────
+# ── Elicitation: the ONLY confirmation of money ────────────────────────────
 #
 # LIVE FINDING (Hermes/Telegram): the client renders ONLY yes/no buttons — it has
 # NO text-input field. So every elicitation that asked the user to TYPE something
@@ -204,12 +204,86 @@ mcp.tool = _traced_tool
 # Non-payment gates (messenger_send, ticket/grocery cancel, card reveal) were also
 # dropped: elicitation is kept strictly for confirming money movements now.
 #
-# Outcomes of _elicit_or. "unavailable" is the ONLY one that means "behave as if
-# elicitation does not exist" (text fallback, today's flow byte-for-byte).
-# Everything else means the user WAS asked — for money, decline/cancel/error
-# must all leave the money untouched.
+# The money gate is not optional: it used to wave a capability-less client through
+# (leaving confirmation to the agent's prose, which meant a double question in
+# clients WITH buttons and none in clients without). Now every paying tool
+# (transfer, transfer_requisites, pay_bill, ticket_pay, grocery_checkout) shows
+# the button, and a client that cannot show one is refused with
+# NO_ELICITATION_REFUSAL — before any journal write or HTTP. Skills therefore
+# tell the agent NOT to ask «да/нет» in text; the button is the confirmation.
+#
+# Outcomes of _elicit_or. "unavailable" means the client never declared the
+# elicitation capability (or there is no ctx at all: headless / test / direct
+# call). For the pickers that is a soft "guess as before"; for the MONEY gate it is
+# a refusal — money moves only after a human pressed the button, so a client that
+# cannot show one cannot pay (owner's call, replacing the old silent pass-through
+# that left confirmation to the agent's prose). Everything else means the user WAS
+# asked — decline/cancel/error must all leave the money untouched.
 ELICIT_ACCEPT, ELICIT_DECLINE, ELICIT_CANCEL = "accept", "decline", "cancel"
 ELICIT_ERROR, ELICIT_UNAVAILABLE = "error", "unavailable"
+
+# One sentence, same in every money tool: what happened, why, and what works.
+# No "repeat the call" hint on purpose — repeating in the same client cannot help.
+NO_ELICITATION_REFUSAL = (
+    "ПЛАТЁЖ НЕ ВЫПОЛНЕН: этот клиент не поддерживает подтверждение кнопкой "
+    "(MCP elicitation), а деньги двигаются только после того, как пользователь "
+    "сам нажал кнопку подтверждения. Ничего не отправлено, {safe}. Нужен клиент с "
+    "элиситацией (Hermes, Claude Code ≥ 2.1.76); порог TBANK_CONFIRM_ABOVE — "
+    "настройка владельца сервера, не аргумент тула.")
+
+
+def _no_button_refusal(*, safe: str = "деньги на месте") -> str:
+    return NO_ELICITATION_REFUSAL.format(safe=safe)
+
+
+def _payable_amount(amount) -> float | None:
+    """The sum as a number a payment may carry, or None if it is not one.
+
+    NaN and ±inf are the trap this exists for: EVERY guard around money is a float
+    comparison, and every comparison with NaN is False — `nan <= 0`, `nan >= порог`
+    and `abs(booked - nan) > 0.01` all say "fine, carry on". A tool that takes its
+    amount straight from the agent (ticket_pay does; the JSON-RPC layer accepts a
+    bare NaN literal) would then skip the button AND its own cross-check. Anything
+    that is not a finite positive number is not payable, full stop."""
+    try:
+        eff = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if eff != eff or eff in (float("inf"), float("-inf")) or eff <= 0:
+        return None
+    return eff
+
+
+def _needs_button(amount) -> bool:
+    """True when this sum must be confirmed. Unknown means YES: an amount that
+    cannot be compared (NaN, junk) is exactly the case where nobody should be
+    guessing on the human's behalf. Tools validate the amount separately; this
+    only decides whether the dialog is owed."""
+    eff = _payable_amount(amount)
+    if eff is None:
+        return True
+    return eff >= _confirm_threshold()
+
+
+def _button_required(ctx, amount) -> str | None:
+    """Cheap pre-check for tools that know the amount up front: a refusal string
+    when the sum needs the button and the client cannot show one, else None. Runs
+    BEFORE any network (recipient resolve, commission quote) so a headless caller
+    is told at once instead of after a round-trip; _money_gate re-checks anyway.
+
+    A non-positive amount is NOT pre-refused: there is nothing to confirm yet, and
+    the tool's own validation names the real problem instead of blaming the
+    client. Junk (NaN/inf) IS pre-refused — see _payable_amount."""
+    if _payable_amount(amount) is None:
+        try:
+            eff = float(amount)
+        except (TypeError, ValueError):
+            return None                         # the tool's own validation owns it
+        if eff == eff and eff not in (float("inf"), float("-inf")):
+            return None                         # a plain non-positive number
+    if _needs_button(amount) and not _elicitation_available(ctx):
+        return _no_button_refusal()
+    return None
 
 
 def _elicitation_available(ctx) -> bool:
@@ -255,10 +329,19 @@ class _TransferGateForm(BaseModel):
 def _confirm_threshold() -> float:
     # Read per call, not at import: tests flip the env var between cases, and a
     # frozen module-level value would pin whatever the first test set.
+    #
+    # Anything that is not a finite non-negative number means 0 — ask about every
+    # payment. `float()` happily accepts "nan", "inf" and "1e999", and each of them
+    # makes `сумма >= порог` False forever: no button on any tool, and no refusal
+    # for a client that cannot show one, from one typo in an env var. A misread
+    # threshold must fail towards asking, never towards paying.
     try:
-        return float(os.environ.get("TBANK_CONFIRM_ABOVE", "0"))
+        raw = float(os.environ.get("TBANK_CONFIRM_ABOVE", "0"))
     except ValueError:
         return 0.0
+    if raw != raw or raw in (float("inf"), float("-inf")) or raw < 0:
+        return 0.0
+    return raw
 
 
 def _choice_form(prompt: str, options: list[str]):
@@ -315,17 +398,27 @@ async def _resolve_source(ctx, from_account):
                   "Ничего не отправлено, деньги на месте.")
 
 
-async def _money_gate(ctx, message: str, *, safe: str = "деньги на месте") -> str | None:
-    """The «действие/Отмена» button shared by every confirming tool. None → proceed;
-    a string → the refusal to return (nothing sent, nothing journalled). `safe` is
-    the reassurance tail — money tools keep the default, others pass their own."""
+async def _money_gate(ctx, message: str, *, safe: str = "деньги на месте",
+                      did: str = "Ничего не сделано") -> str | None:
+    """The «действие/Отмена» button shared by every confirming tool. None → proceed
+    (the human pressed Accept); a string → the refusal to return (nothing sent,
+    nothing journalled). A client without elicitation is refused, not waved
+    through: there is no button, so there is no confirmation.
+
+    `safe` is the reassurance tail — money tools keep the default, others pass
+    their own. `did` is the claim about what was NOT done: the default is only
+    honest when nothing at all ran before the button, so a tool that did
+    preparatory work the human can observe (grocery quotes a delivery slot) passes
+    a narrower one instead of promising more than the code can keep."""
     outcome, _ = await _elicit_or(ctx, message, _TransferGateForm)
-    if outcome in (ELICIT_ACCEPT, ELICIT_UNAVAILABLE):
+    if outcome == ELICIT_ACCEPT:
         return None
+    if outcome == ELICIT_UNAVAILABLE:
+        return _no_button_refusal(safe=safe)
     if outcome == ELICIT_DECLINE:
-        return f"Отменено пользователем (кнопка «Отмена»). Ничего не сделано, {safe}."
+        return f"Отменено пользователем (кнопка «Отмена»). {did}, {safe}."
     return (f"Подтверждение не получено (окно закрыто или истёк таймаут). "
-            f"Ничего не сделано, {safe}. Когда пользователь готов — повтори тот же вызов.")
+            f"{did}, {safe}. Когда пользователь готов — повтори тот же вызов.")
 
 
 _session: MobileSession | None = None
@@ -1359,9 +1452,12 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
             # is not what gets charged — and expected_sum is compared to the kopeck.
             # Naming the next call here is what stops the sum being re-typed from the
             # screen, which is how 3700.63 became 3700 and cost two checkout rounds.
-            totals += (f"\n→ дальше: grocery_checkout(app_id={app_id}, point_id={point_id}, "
-                       f"dry_run=True) — он вернёт финальную сумму (весовые товары "
-                       f"пересчитываются при оформлении доставки), её и подтверждай.\n")
+            totals += (f"\n→ дальше: grocery_checkout(app_id={app_id}, "
+                       f"point_id={point_id}) — он сам узнает финальную сумму "
+                       f"(весовые товары пересчитываются при оформлении доставки) "
+                       f"и переспросит её у пользователя кнопкой. Хочешь назвать "
+                       f"итог и слот заранее — сначала тот же вызов с "
+                       f"dry_run=True.\n")
         return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{totals}{body}"
     except Exception as e:
         return _err(e)
@@ -1372,65 +1468,88 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
                            dry_run: bool = False, ctx: Context = None) -> str:
     """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
-    Клиент с элиситацией: если expected_sum не передан, тул сам сделает предпросмотр,
-    покажет кнопки с финальной суммой и оформит заказ на неё — dry_run не нужен.
+
+    Подтверждение — кнопка, не текст: тул сам делает предпросмотр (только бэкенд
+    знает, во что пересчитаются весовые товары), показывает пользователю кнопки
+    «Оформить заказ на N ₽ / Отмена» с ФИНАЛЬНОЙ суммой и оформляет заказ ровно на
+    неё. Покажи состав корзины ДО вызова (кнопка называет только итог), но НЕ
+    спрашивай «да/нет» текстом — согласие даёт кнопка. Клиент без элиситации
+    получает отказ «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
 
     dry_run=True — ПРЕДПРОСМОТР: доводит до доставки и возвращает финальную сумму,
-    НЕ создавая заказ и НЕ списывая деньги. Вызывай его ВСЕГДА перед оплатой: только
-    бэкенд знает, во что пересчитаются весовые товары, и только магазин знает, отдаёт
-    ли он сейчас слот доставки. Сумму из предпросмотра показывай пользователю и её же
-    передавай в expected_sum — тогда оплата проходит с первой попытки.
+    НЕ создавая заказ и НЕ списывая деньги. Работает в любом клиенте. Нужен, если
+    хочешь назвать пользователю итог и слот доставки заранее; для оплаты не
+    обязателен — чекаут делает свой предпросмотр сам.
 
     СЧЁТ СПИСАНИЯ по умолчанию — тот, которым пользователь последний раз платил
     за продукты В ПРИЛОЖЕНИИ (банк отдаёт его сам), а НЕ первый счёт с балансом.
     Хочешь другой — передай account_id из list_accounts(). Списанный счёт печатается
     в ответе.
 
-    expected_sum — сумма, которую подтвердил пользователь. Передавай её ВСЕГДА и
-    РОВНО как есть, до копейки (3700.63, не 3700): сравнение точное, допуск 0.01 ₽.
-    Без неё (и без элиситации) чекаут НЕ списывает деньги: он вернёт предпросмотр и
-    попросит повторить с expected_sum. Банк дважды пересчитывает корзину уже ПОСЛЕ
-    подтверждения (веб-корзина, затем доставка); расхождение отменяет чекаут ДО
-    создания заказа.
+    expected_sum — необязательная сверка: сумма, которую ты уже называл пользователю
+    (из dry_run). Если она разошлась с предпросмотром чекаута, кнопка покажет ОБЕ
+    суммы («… было N — банк пересчитал»), а спишется та, что на кнопке. Банк дважды
+    пересчитывает корзину уже ПОСЛЕ кнопки (веб-корзина, затем доставка);
+    расхождение с суммой на кнопке (допуск 0.01 ₽) отменяет чекаут ДО создания заказа.
 
     При неопределённом результате (заказ мог создаться) повтор БЛОКИРУЕТСЯ —
     сначала grocery_attempts() и проверь заказ в приложении. force=True — только если
-    пользователь ЯВНО подтвердил, что прошлого заказа нет. Всегда показывай состав и
-    сумму и жди явного подтверждения перед вызовом.
+    пользователь ЯВНО подтвердил, что прошлого заказа нет; кнопка при повторе
+    показывается снова.
 
     Реализация: тул асинхронный и запускает браузер Playwright в отдельном worker-потоке
     (asyncio.to_thread) — sync_playwright падает, если звать его внутри event-loop, а
     FastMCP крутит sync-тулы именно в loop. Если тул падает с Playwright-ошибкой —
     проверь `python -m playwright install chromium` (в окружении MCP)."""
     try:
-        # Elicitation path: quote the final sum ourselves, show it on the buttons,
-        # and lock it as expected_sum — the agent no longer relays the number.
-        if _elicitation_available(ctx) and not dry_run and not expected_sum:
+        safe = "заказ не создан, деньги на месте"
+        if not dry_run:
+            # Charging always goes through the button: quote the final sum
+            # ourselves, show it, and lock it as expected_sum — the agent never
+            # relays the number. A client that cannot show the button is refused
+            # BEFORE the quote, whatever the threshold: unlike every other paying
+            # tool, this one cannot know the sum without a Playwright run that
+            # loads the checkout page and POSTs /grocery/deliveries. Quoting first
+            # only to refuse afterwards would do real work for a client that can
+            # never pay — and would make "refused before any HTTP" a lie.
+            if not _elicitation_available(ctx):
+                return _no_button_refusal(safe=safe)
             quoted = await asyncio.to_thread(
                 _grocery_quote_sum, app_id, point_id, account_id)
             if isinstance(quoted, str):
                 return quoted                  # empty cart / preview failed
             total, quote_text = quoted
-            gate = await _money_gate(
-                ctx, f"Оформить заказ на {_money(total, 'RUB')}?",
-                safe="заказ не создан, деньги на месте")
-            if gate is not None:
-                return gate
+            # An unpriced quote (missing/zero sum) must not become the confirmed
+            # number: it would put «0.00 ₽» on the button and — because the
+            # kopeck-exact guard in checkout.py reads `if expected_sum and …` —
+            # switch that guard OFF, charging whatever the bank recomputes.
+            if _payable_amount(total) is None:
+                return ("ОПЛАТА НЕ ВЫПОЛНЕНА: предпросмотр вернул сумму "
+                        f"{total!r} — по ней нельзя ни спросить пользователя, ни "
+                        "сверить списание, поэтому заказ не создан и деньги на "
+                        "месте. Покажи предпросмотр ниже, проверь корзину "
+                        "(grocery_cart) и попробуй ещё раз.\n\n" + quote_text)
+            if _needs_button(total):
+                msg = f"Оформить заказ на {_money(total, 'RUB')}?"
+                if expected_sum and abs(float(expected_sum) - total) > 0.01:
+                    # The agent quoted the user a different number (usually a
+                    # weight recount since dry_run) — say so ON the button, so the
+                    # human confirms the real total knowingly, not a stale one.
+                    msg = (f"Оформить заказ на {_money(total, 'RUB')}? "
+                           f"(было {_money(expected_sum, 'RUB')} — банк пересчитал "
+                           f"корзину)")
+                # The quote already loaded the checkout page and asked the store
+                # for a delivery slot, so a refusal here must not claim «ничего не
+                # сделано» — it says what is actually true: no order, no money.
+                # `safe` drops its own «заказ не создан» here: `did` already says it.
+                gate = await _money_gate(ctx, msg, safe="деньги на месте",
+                                         did="Заказ не создан")
+                if gate is not None:
+                    return gate
+            # Below the threshold nothing is asked, but the charge is still pinned
+            # to the quote: the kopeck-exact guard in checkout.py is
+            # `if expected_sum and …`, so 0 would let any recount through silently.
             expected_sum = total               # the confirmed sum; the body re-checks it
-        # No confirmed sum and no elicitation gate to establish one (a headless
-        # client that skipped expected_sum): the kopeck-exact guard in checkout.py is
-        # `if expected_sum and …`, so expected_sum=0 DISABLES it and whatever the bank
-        # recomputes gets charged silently. Refuse the charge and hand back the
-        # dry-run quote instead, so the agent comes back with the number the user
-        # actually approved.
-        if not dry_run and expected_sum <= 0:
-            quote = await asyncio.to_thread(_do_grocery_checkout, app_id, point_id,
-                                            force, account_id, 0.0, True)
-            return ("ОПЛАТА НЕ ВЫПОЛНЕНА: не передан expected_sum — сумма, которую "
-                    "подтвердил пользователь. Без неё оплатилась бы молча любая "
-                    "пересчитанная банком сумма. Ниже предпросмотр: покажи сумму "
-                    "пользователю и повтори grocery_checkout(...) с expected_sum РОВНО "
-                    "как в предпросмотре.\n\n" + quote)
         return await asyncio.to_thread(_do_grocery_checkout, app_id, point_id, force,
                                        account_id, expected_sum, dry_run)
     except Exception as e:
@@ -1459,9 +1578,10 @@ def _format_quote(app_id: str, point_id: str, q: dict) -> str:
             and q["item_count"] < q["pre_item_count"]:
         lines.append(f"⚠ позиций стало меньше ({q['pre_item_count']} → {q['item_count']}) — "
                      f"часть товаров отвалилась при оформлении, покажи корзину заново")
-    lines.append(f"Дальше: назови пользователю ИМЕННО {total} ₽, и после явного «да» — "
+    lines.append(f"Дальше: назови пользователю сумму и слот, потом оформляй — "
                  f"grocery_checkout(app_id={app_id}, point_id={point_id}, "
-                 f"expected_sum={total})")
+                 f"expected_sum={total}). Своё «да/нет» текстом не спрашивай: "
+                 f"чекаут сам переспросит сумму кнопкой и оформит заказ на неё.")
     return "\n".join(lines)
 
 
@@ -2309,9 +2429,11 @@ async def transfer(amount: float, to_account: str, description: str = "",
                    masked_fio: str = "", pointer_link_id: str = "",
                    from_account: str = "", force: bool = False,
                    ctx: Context = None) -> str:
-    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем конкретную сумму и получателя).
-    Клиент с элиситацией сам покажет выбор банка (если их несколько) и кнопки
-    «Перевести/Отмена» для сумм от TBANK_CONFIRM_ABOVE — отдельно подтверждать не нужно.
+    """Перевод (РЕАЛЬНЫЕ ДЕНЬГИ). Подтверждение — кнопка, не текст: тул сам покажет
+    пользователю выбор банка (если их несколько) и кнопки «Перевести/Отмена»
+    (для сумм от TBANK_CONFIRM_ABOVE). НЕ спрашивай «да/нет» заранее — вызывай, когда
+    сумма и получатель известны; согласие даёт кнопка. Клиент без элиситации
+    получает отказ «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
 
     from_account — счёт списания из list_accounts(). Пусто = первый рублёвый Current
     с положительным балансом; это ДОГАДКА, поэтому если пользователь выбирал счёт —
@@ -2333,8 +2455,17 @@ async def transfer(amount: float, to_account: str, description: str = "",
     после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
 
     Возвращает paymentId — по нему потом payment_receipt(). Больше его взять негде."""
-    if amount is None or float(amount) <= 0:
-        return "Сумма должна быть больше нуля."
+    # Not just «> 0»: NaN and ±inf make every float comparison below False, so a
+    # junk amount used to reach the человека as «Перевести nan RUB → …?» — a
+    # question nobody can answer — after a resolve_recipient round-trip and a
+    # journal row. The button is the ONE disclosure of money; it must never carry
+    # a number that is not one.
+    if _payable_amount(amount) is None:
+        return (f"Сумма должна быть положительным числом, получено {amount!r}.")
+    # No button possible → refuse before the recipient resolve round-trip.
+    refusal = _button_required(ctx, amount)
+    if refusal is not None:
+        return refusal
     # Resolve the recipient (and let the human pick a bank) BEFORE the sync body
     # writes anything to the journal.
     prep = await _transfer_prepare(ctx, amount, to_account, provider, pointer_link_id)
@@ -2348,7 +2479,7 @@ async def transfer(amount: float, to_account: str, description: str = "",
     if src_refusal is not None:
         return src_refusal
     who = (prep.get("who") if prep else "") or (masked_fio or to_account)
-    if float(amount) >= _confirm_threshold():
+    if _needs_button(amount):
         gate = await _money_gate(ctx, f"Перевести {_money(amount, 'RUB')} → {who}?")
         if gate is not None:
             return gate
@@ -2364,8 +2495,8 @@ def _do_transfer(amount: float, to_account: str, description: str = "",
     try:
         import time
         from . import journal
-        if amount is None or float(amount) <= 0:
-            return "Сумма должна быть больше нуля."
+        if _payable_amount(amount) is None:
+            return f"Сумма должна быть положительным числом, получено {amount!r}."
         s = _require(); s.ensure_fresh()
         src = from_account or s._source_account()
         key = _transfer_key(amount, to_account, provider, src)
@@ -2621,7 +2752,9 @@ def payment_qr(qr: str) -> str:
                          "если счёт есть у тебя перед глазами, читай оттуда, а не "
                          "спрашивай. Нет счёта — тогда спроси. Передай comment=…")
         lines.append("Оплата: transfer_requisites(amount=…, qr=<эта же строка>, "
-                     "comment=\"…\") — РЕАЛЬНЫЕ ДЕНЬГИ, сначала подтверди сумму.")
+                     "comment=\"…\") — РЕАЛЬНЫЕ ДЕНЬГИ. Покажи пользователю "
+                     "получателя, реквизиты и назначение, потом вызывай: сумму "
+                     "тул переспросит кнопкой сам, своё «да» текстом не спрашивай.")
         return "\n".join(lines)
     except Exception as e:
         return _err_session(e)
@@ -2629,9 +2762,8 @@ def payment_qr(qr: str) -> str:
 
 async def _transfer_gate(ctx, amount, qr, name) -> str | None:
     """None → proceed to the payment body. A string → the refusal to return;
-    nothing was journalled and nothing was sent."""
-    if ctx is None:
-        return None
+    nothing was journalled and nothing was sent. No ctx / no capability above the
+    threshold → refusal (see NO_ELICITATION_REFUSAL), never a silent pass."""
     eff, who = float(amount or 0), (name or "").strip()
     if qr and (eff <= 0 or not who):
         try:  # local parse only — no network, safe on the event loop
@@ -2640,13 +2772,15 @@ async def _transfer_gate(ctx, amount, qr, name) -> str | None:
             who = who or parsed.get("requisites", {}).get("addressee", "")
         except Exception:
             return None      # junk QR: the payment body owns that refusal
-    if eff <= 0 or eff < _confirm_threshold():
-        return None
+    if _payable_amount(eff) is None or not _needs_button(eff):
+        return None                # nothing to confirm; the body owns the refusal
     outcome, _ = await _elicit_or(
         ctx, f"Перевести {_money(eff, 'RUB')} → {who or 'получатель по реквизитам'}?",
         _TransferGateForm)
-    if outcome in (ELICIT_ACCEPT, ELICIT_UNAVAILABLE):
+    if outcome == ELICIT_ACCEPT:
         return None
+    if outcome == ELICIT_UNAVAILABLE:
+        return _no_button_refusal()
     if outcome == ELICIT_DECLINE:
         return ("Перевод отменён пользователем (кнопка «Отмена»). "
                 "Платёж НЕ отправлен, деньги на месте.")
@@ -2663,9 +2797,11 @@ async def transfer_requisites(amount: float = 0, qr: str = "", comment: str = ""
                               personal_account: str = "", from_account: str = "",
                               force: bool = False, ctx: Context = None) -> str:
     """Перевод юрлицу или ИП по банковским реквизитам (БИК + счёт + ИНН).
-    РЕАЛЬНЫЕ ДЕНЬГИ — подтверди с пользователем конкретную сумму и получателя.
-    Если клиент поддерживает элиситацию, он сам покажет кнопки «Перевести/Отмена»
-    (для сумм от TBANK_CONFIRM_ABOVE) — отдельно подтверждать не нужно.
+    РЕАЛЬНЫЕ ДЕНЬГИ. Подтверждение — кнопка, не текст: тул сам покажет пользователю
+    «Перевести/Отмена» (для сумм от TBANK_CONFIRM_ABOVE) ДО отправки. НЕ спрашивай
+    «да/нет» заранее — покажи реквизиты и назначение (payment_qr для QR), потом
+    вызывай; согласие даёт кнопка. Клиент без элиситации получает отказ
+    «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
 
     Два способа задать реквизиты, их можно смешивать:
     - qr="ST00012|Name=…|PersonalAcc=…" — строка платёжного QR со счёта. Заполняет
@@ -2728,9 +2864,10 @@ def _do_transfer_requisites(amount: float = 0, qr: str = "", comment: str = "",
         fields, qr_amount, from_qr = _legal_requisites(s, qr=qr, explicit=explicit)
 
         amount = float(amount or 0) or float(qr_amount or 0)
-        if amount <= 0:
+        if _payable_amount(amount) is None:
             return ("В QR суммы нет, а amount не задан — передай amount=… явно."
-                    if qr else "Сумма должна быть больше нуля.")
+                    if qr and not amount
+                    else f"Сумма должна быть положительным числом, получено {amount!r}.")
 
         prov = s.find_provider("transfer-legal", group=_LEGAL_GROUP)
         if not prov:
@@ -2947,10 +3084,11 @@ async def pay_bill(provider_id: str, fields: str, amount: float, group: str = ""
     {"account": "1234567890"}. Имена полей у каждого провайдера свои, угадывать их
     нельзя: тул сверяет значения с регуляркой из каталога и откажет до отправки.
 
-    Перед оплатой всегда считается комиссия (это же и проверка тела банком), и
-    итоговая сумма показывается. Показывай её пользователю и жди явного «да»
-    ИМЕННО НА ЭТУ СУММУ — «оплати» без суммы подтверждением не считается. Клиент с
-    элиситацией сам покажет кнопки с итоговой суммой — тогда подтверждать не нужно.
+    Перед оплатой тул сам считает комиссию (это же и проверка тела банком) и
+    показывает пользователю кнопки «Оплатить/Отмена» с ИТОГОВОЙ суммой и комиссией
+    (для сумм от TBANK_CONFIRM_ABOVE) — подтверждение даёт кнопка, НЕ спрашивай
+    «да/нет» текстом заранее. Клиент без элиситации получает отказ
+    «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются вообще.
 
     После оплаты проверь list_operations() — исход подтверждают операции,
     а не ответ этого тула.
@@ -2958,6 +3096,9 @@ async def pay_bill(provider_id: str, fields: str, amount: float, group: str = ""
     Неверный номер лицевого счёта оплачивает чужую квитанцию, и вернуть это
     сложнее, чем перевод. force=True — только если пользователь подтвердил, что
     предыдущий платёж не прошёл."""
+    refusal = _button_required(ctx, amount)     # before the commission round-trip
+    if refusal is not None:
+        return refusal
     from_account, src_refusal = await _resolve_source(ctx, from_account)
     if src_refusal is not None:
         return src_refusal
@@ -2967,10 +3108,17 @@ async def pay_bill(provider_id: str, fields: str, amount: float, group: str = ""
         _pay_bill_prepare, provider_id, fields, amount, group, from_account)
     if isinstance(prepared, str):
         return prepared                       # refusal: bad fields / provider / min-max
-    if float(amount or 0) >= _confirm_threshold():
-        fee, total = prepared["fee"], prepared["total"]
+    fee, total = prepared["fee"], prepared["total"]
+    shown = total if total is not None else amount
+    # The threshold applies to what LEAVES THE ACCOUNT, not to the bill: pay_bill
+    # debits amount + commission, and by now the quote has told us both. Gating on
+    # `amount` meant a 999.99 ₽ bill with a 100 ₽ fee debited 1 099.99 ₽ with no
+    # dialog under «спрашивай от 1000» — the tool naming one number on the button
+    # and deciding on another. `_button_required` above still uses the bare amount:
+    # it runs before the quote exists, and it can only ever ask for MORE dialogs
+    # than this line, never fewer.
+    if _needs_button(shown):
         fee_txt = f" (комиссия {_money(fee, 'RUB')})" if fee is not None else ""
-        shown = total if total is not None else amount
         gate = await _money_gate(
             ctx, f"Оплатить {prepared['prov_name']}: спишется "
                  f"{_money(shown, 'RUB')}{fee_txt}?")
@@ -2993,8 +3141,8 @@ def _pay_bill_prepare(provider_id, fields, amount, group, from_account):
                     f"разобрать не удалось: {e}")
         if not isinstance(vals, dict):
             return "fields должен быть JSON-ОБЪЕКТОМ {поле: значение}, а не списком."
-        if amount is None or float(amount) <= 0:
-            return "Сумма должна быть больше нуля."
+        if _payable_amount(amount) is None:
+            return f"Сумма должна быть положительным числом, получено {amount!r}."
 
         prov = s.find_provider(provider_id, group=group)
         if not prov:
@@ -4950,9 +5098,10 @@ def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,
             out.append(f"Кэшбэк: {cb.get('value')}%")
         out.append(
             f"\nОплатить: ticket_pay(\"{order['orderId']}\", {total}, "
-            f"\"{order.get('nfsPaymentToken','')}\") — РЕАЛЬНЫЕ ДЕНЬГИ, сначала "
-            "подтверди сумму с пользователем. Токен возвращается ТОЛЬКО здесь, "
-            "order_details() его не отдаёт — не потеряй.")
+            f"\"{order.get('nfsPaymentToken','')}\") — РЕАЛЬНЫЕ ДЕНЬГИ. Покажи "
+            "пользователю места и итог со сбором, потом вызывай: сумму тул "
+            "переспросит кнопкой сам, своё «да» текстом не спрашивай. Токен "
+            "возвращается ТОЛЬКО здесь, order_details() его не отдаёт — не потеряй.")
         return "\n".join(out)
     except Exception as e:
         return _err(e)
@@ -4961,10 +5110,11 @@ def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,
 async def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
                      account_id: str = "", force: bool = False,
                      ctx: Context = None) -> str:
-    """ОПЛАТИТЬ бронь билета. РЕАЛЬНЫЕ ДЕНЬГИ — вызывай ТОЛЬКО после того, как
-    пользователь подтвердил конкретную сумму и заказ. Сам по себе запрос
-    пользователя «купи билет» подтверждением НЕ является. Клиент с элиситацией сам
-    покажет кнопки с суммой заказа — тогда подтверждать не нужно.
+    """ОПЛАТИТЬ бронь билета. РЕАЛЬНЫЕ ДЕНЬГИ. Подтверждение — кнопка: тул сам
+    покажет пользователю «Оплатить/Отмена» с суммой заказа (для сумм от
+    TBANK_CONFIRM_ABOVE). НЕ спрашивай «да/нет» текстом заранее — покажи места и
+    итог со сбором (из cinema_book), потом вызывай; согласие даёт кнопка. Клиент
+    без элиситации получает отказ «ПЛАТЁЖ НЕ ВЫПОЛНЕН» — деньги там не двигаются.
 
     Все три первых аргумента бери из ответа cinema_book(): order_id, итоговую
     сумму и nfs_payment_token. Токен живёт только в ответе на создание заказа —
@@ -4972,6 +5122,16 @@ async def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
     account_id — счёт списания (по умолчанию первый рублёвый Current).
     force=True — повторить оплату, чей исход не подтверждён, только после проверки
     в приложении, что деньги не ушли."""
+    # ticket_pay is the one paying tool whose amount comes straight from the agent
+    # (cinema_book's answer), so it validates it here: everything downstream — the
+    # cross-check against the booked sum, the gate, the gateway body — is a float
+    # comparison, and NaN slips through all of them silently.
+    if _payable_amount(amount) is None:
+        return (f"Сумма должна быть положительным числом, получено {amount!r}. "
+                f"Возьми её из ответа cinema_book() для заказа {order_id}.")
+    refusal = _button_required(ctx, amount)     # before the order_details round-trip
+    if refusal is not None:
+        return refusal
     account_id, src_refusal = await _resolve_source(ctx, account_id)
     if src_refusal is not None:
         return src_refusal
@@ -4979,7 +5139,7 @@ async def ticket_pay(order_id: str, amount: float, nfs_payment_token: str,
         _ticket_pay_prepare, order_id, amount, nfs_payment_token, account_id)
     if isinstance(prep, str):
         return prep
-    if float(amount or 0) >= _confirm_threshold():
+    if _needs_button(amount):
         shown = prep["booked"] if prep["booked"] is not None else amount
         gate = await _money_gate(
             ctx, f"Оплатить заказ {order_id}: {_money(shown, 'RUB')}?")

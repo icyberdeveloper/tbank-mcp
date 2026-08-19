@@ -126,7 +126,7 @@ def check_login_blank_session_survives_the_old_file():
     saved = server._blank_session
     server._blank_session = lambda: FakeBlank()
     try:
-        out = server.login("+70000000000")  # sets _session = blank, pins the mtime
+        out = server.login("+79991234567")  # sets _session = blank, pins the mtime
         check("otp" in out, f"login must return the next-step hint: {out}")
         raised = False
         try:

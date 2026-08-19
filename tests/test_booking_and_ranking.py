@@ -9,6 +9,13 @@ Ranking is here too because its one non-obvious rule is easy to regress: a good
 whose nutrition the retailer never published must never win a "highest calories"
 query just because None sorts low.
 
+ticket_pay charges only after the human pressed «Оплатить/Отмена» (MCP
+elicitation) and refuses a client without that capability before it even reads
+the order — so every ticket_pay call here hands the tool `ctx=accept_ctx()` from
+tests/elicit_fake.py, and what is pinned is what happens AFTER the button: the
+amount cross-check, the token guard, the non-SUCCESS stage. The headless refusal
+itself is pinned in tests/test_elicitation.py.
+
     python3 tests/test_booking_and_ranking.py
 """
 import asyncio
@@ -21,7 +28,9 @@ import re
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
 
 # ticket_pay now journals, so redirect the attempt/event logs BEFORE importing
 # server (which resolves their paths at import) — a standalone run must not touch
@@ -31,13 +40,14 @@ os.environ.setdefault("TBANK_ATTEMPTS", os.path.join(_TMP, "attempts.jsonl"))
 os.environ.setdefault("TBANK_EVENTS", os.path.join(_TMP, "events.jsonl"))
 os.environ.setdefault("TBANK_TRACE_FILE", os.path.join(_TMP, "calls.jsonl"))
 
+from elicit_fake import accept_ctx  # noqa: E402
 from src.client import MobileSession  # noqa: E402
 from src.server import _rank_rows, _seat_rows  # noqa: E402
 
 
 def _run(coro_or_val):
-    """ticket_pay is an async tool now; these calls pass ctx=None so no dialog
-    fires — await the coroutine to reach the sync body."""
+    """ticket_pay is an async tool: await the coroutine to reach the sync body.
+    The button is pressed by the FakeCtx each call passes as ctx."""
     return asyncio.run(coro_or_val) if inspect.iscoroutine(coro_or_val) else coro_or_val
 
 CAPTURE = os.environ.get("TBANK_CAPTURE2", os.path.expanduser("~/tbank-app/captures2.xml"))
@@ -238,10 +248,12 @@ def check_ticket_pay_amount_guard():
         # Distinct order id per scenario: ticket_pay now journals with a duplicate
         # guard keyed on (amount, order, account), so re-firing one order id would
         # trip the guard on a later scenario. Each case is independent anyway.
+        # Every call carries a ctx whose human presses Accept: the guards under
+        # test sit AFTER the button, and a headless call is refused before them.
         # Mismatch → refuse, and do NOT call the gateway.
         wrong = PaySession(booked_amount=1760)
         server._require = lambda: wrong
-        out = _run(server.ticket_pay("ORD-MISMATCH", 176, "482"))
+        out = _run(server.ticket_pay("ORD-MISMATCH", 176, "482", ctx=accept_ctx()))
         check(wrong.paid is None, "a mismatched amount still reached the payment gateway")
         check("не сходится" in out, f"the refusal must say why: {out}")
         check("1760" in out and "176" in out,
@@ -250,7 +262,8 @@ def check_ticket_pay_amount_guard():
         # Matching → pays, with the caller's account and token.
         ok = PaySession(booked_amount=1760)
         server._require = lambda: ok
-        out2 = _run(server.ticket_pay("ORD-OK", 1760, "482", account_id="9999999999"))
+        out2 = _run(server.ticket_pay("ORD-OK", 1760, "482", account_id="9999999999",
+                                      ctx=accept_ctx()))
         check(ok.paid is not None, f"a matching amount must be paid: {out2}")
         check(ok.paid["account"] == "9999999999",
               f"the chosen account must be used: {ok.paid}")
@@ -260,21 +273,21 @@ def check_ticket_pay_amount_guard():
         # A missing token must be refused BEFORE any request.
         notoken = PaySession(booked_amount=1760)
         server._require = lambda: notoken
-        out3 = _run(server.ticket_pay("ORD-NOTOKEN", 1760, ""))
+        out3 = _run(server.ticket_pay("ORD-NOTOKEN", 1760, "", ctx=accept_ctx()))
         check(notoken.paid is None, "a payment without the nfs token was attempted")
         check("cinema_book" in out3, f"the message must say where the token comes from: {out3}")
 
         # A non-SUCCESS stage must not be reported as paid.
         pending = PaySession(booked_amount=1760, stage="PENDING")
         server._require = lambda: pending
-        out4 = _run(server.ticket_pay("ORD-PENDING", 1760, "482"))
+        out4 = _run(server.ticket_pay("ORD-PENDING", 1760, "482", ctx=accept_ctx()))
         check("НЕ подтверждена" in out4, f"a non-SUCCESS stage must not read as paid: {out4}")
         check("Не повторяй вслепую" in out4, f"and must warn against a blind retry: {out4}")
 
         # An order the bank cannot price must not silently skip the check.
         unknown = PaySession(booked_amount=None)
         server._require = lambda: unknown
-        _run(server.ticket_pay("ORD-UNPRICED", 1760, "482"))
+        _run(server.ticket_pay("ORD-UNPRICED", 1760, "482", ctx=accept_ctx()))
         check(unknown.paid is not None,
               "with no amount on the order the tool may proceed, but must not crash")
     finally:

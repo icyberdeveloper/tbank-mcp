@@ -17,10 +17,20 @@ character count.
 import os
 import re
 import sys
+import tempfile
 from collections import Counter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+
+# Every log the server writes resolves its path at IMPORT time. run_all.py
+# redirects them per process; a STANDALONE run of this file did not, so its
+# synthetic calls landed in the user's live ~/.local/share/tbank-mcp — the very
+# files debug_report()/diagnostics() read back as real agent behaviour.
+_LOGS = tempfile.mkdtemp(prefix="tbank-test-logs-")
+os.environ.setdefault("TBANK_TRACE_FILE", os.path.join(_LOGS, "calls.jsonl"))
+os.environ.setdefault("TBANK_EVENTS", os.path.join(_LOGS, "events.jsonl"))
+os.environ.setdefault("TBANK_ATTEMPTS", os.path.join(_LOGS, "attempts.jsonl"))
 
 from src import server  # noqa: E402
 
