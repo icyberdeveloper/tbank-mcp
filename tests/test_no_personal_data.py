@@ -113,6 +113,10 @@ ALLOWED = {
     "ST00012",
     # почта — только example.com
     "user@example.com",
+    # не человек: no-reply Claude Code в трейлере Co-Authored-By каждого
+    # ассистентского коммита. Не из трафика, никого не идентифицирует — вписан, чтобы
+    # неизбежный трейлер не считался утечкой в history-скане ниже.
+    "noreply@anthropic.com",
     # координаты по умолчанию для anti-fraud блока /v1/confirm (_CONFIRM_GEO в
     # client.py): центр Москвы, публичный ориентир, НЕ из трафика — реальная гео
     # пользователя в захвате была другой (Петербург) и намеренно не использована.
@@ -225,7 +229,19 @@ def test_no_identity_shaped_value_enters_the_history_after_the_baseline():
     for sha in revs:
         # -p gives the diff; the format prints the full message (%B) ahead of it, so
         # one pass covers both the code and what the commit SAID.
-        blob = _git("show", "--format=%B", "-p", sha).stdout
+        raw = _git("show", "--format=%B", "-p", sha).stdout
+        # git's OWN diff plumbing is not repository content, and it matches these shapes:
+        # an `index` line carries abbreviated blob hashes plus the file mode, and that
+        # «<hash> <mode>» tail is read as a СТС серия+номер though nobody typed it (the
+        # four hex-then-decimal chars before a space and the six-digit mode). Drop the
+        # generated diff headers; the commit message and every +/-/context line — where
+        # real values actually land — stay in the scan.
+        blob = "\n".join(
+            ln for ln in raw.splitlines()
+            if not ln.startswith((
+                "diff --git ", "index ", "old mode ", "new mode ",
+                "new file mode ", "deleted file mode ", "similarity index ",
+                "dissimilarity index ", "rename ", "copy ")))
         scanned += 1
         for label, rx in SHAPES.items():
             for value in set(rx.findall(blob)):
