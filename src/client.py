@@ -325,6 +325,44 @@ def unpack_ref(kind: str, token: str) -> dict:
     return data
 
 
+# The travel webview signs its money calls with an "httpIntegrityCheck" HMAC that is
+# NOT the /v1/pay _sign scheme (different key, different message). Recovered from the
+# payment-child-app JS bundle (action getApiSignature) and verified byte-exact against
+# the flight-pay capture. Two constants come straight from that bundle: the method
+# prefix is the literal "POST", and the header is "x-api-signature".
+_TRAVEL_SIG_METHOD = "POST"
+TRAVEL_SIG_HEADER = "X-Api-Signature"
+# The travel webview is a real browser context, so its money POST carries a browser
+# UA (from the capture), not the native iPhone/iOS(...)/TCSMB string.
+TPAY_WEBVIEW_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+                   "AppleWebKit/605.1.15 (KHTML, like Gecko) TCSMB")
+
+
+def travel_api_signature(session_id: str, operation: str, query: dict | None,
+                         body: str) -> str:
+    """Reproduce the travel-webview x-api-signature for one signed call.
+
+        querystring = urlencode({"context": "travel", **query, "sessionId": session_id})
+        msg         = "\n".join(["POST", operation, querystring, body])
+        signature   = base64(HMAC_SHA256(key=session_id, msg))
+
+    The key and the `sessionId` inside the querystring are the SAME value — the
+    TRAVEL web-session id (minted by the session-link SSO bridge), not the mobile
+    sessionid. `operation` is the endpoint's operation name, e.g. "travel_pay".
+    `body` is the exact JSON string that is sent (sign what you send, byte for byte).
+
+    Why this is not _sign(): _sign's second line is the /v<n> path tail and its key is
+    the mobile sessionid. Here the second line is the operation and the key is the
+    web session — which is why the /v1/pay signer never reproduced this one.
+    """
+    q = {"context": "travel", **(query or {}), "sessionId": session_id}
+    querystring = urllib.parse.urlencode(q)
+    msg = "\n".join([_TRAVEL_SIG_METHOD, operation, querystring, body])
+    digest = hmac.new(session_id.encode("utf-8"), msg.encode("utf-8"),
+                      hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
 def delivery_eta(nearest: dict | None, now=None) -> tuple[float | None, str]:
     """A store's nearest delivery slot as (minutes_until_it_lands, human_label).
 
@@ -1067,6 +1105,7 @@ class MobileSession:
     cookie_str: str = ""            # the cookie header to replay on reads/refresh
     sso_login_cookie: str = ""      # the LOGIN (auth_code) cookie set incl. SSO_SESSION (long-lived) — for silent re-login
     auth_step_fingerprint: str = "" # the static fingerprint blob sent at auth/step (silent re-login)
+    travel_session_id: str = ""     # the WEB travel session id (session-link bridge); key for the travel_pay x-api-signature
     tmsg_session_id: str = ""       # messenger JWT cookie (tm.t-bank-app.ru)
     trains_cookie: str = ""         # rail host cookie (trains.t-bank-app.ru)
     trains_cookie_at: float = 0.0   # when it was minted (unix seconds)
@@ -4962,16 +5001,107 @@ class MobileSession:
         return self._call_read("flight_checkin_calc",
                                body={"offerId": offer_uuid}) or {}
 
-    def flight_pay(self, body: dict) -> dict:
+    def _travel_pay_request(self, session_id: str, cookie: str, body_str: str, *,
+                            detach_key: str | None = None,
+                            travel_session_id: str | None = None,
+                            trace_id: str | None = None) -> tuple[str, dict]:
+        """Build the exact signed travel_pay request as (url, headers).
+
+        Reproduces the captured webview POST /api/prefill/proxy/travel_pay: the lean
+        `context=travel&sessionId=<KEY>` query, the x-api-signature over the body
+        (travel_api_signature), the detach nonce + its 5 s window, and the webview
+        context. Authenticated by the WEB session COOKIE — no Bearer. The detach /
+        travel-session / trace ids are fresh UUIDs per request (the capture shows a
+        new one each time); they are parameters only so a test can pin them.
+
+        `body_str` is signed AND sent unchanged: HMAC over the exact bytes on the
+        wire, never a re-serialization the gateway could disagree with.
+        """
+        import uuid as _uuid
+        query = urllib.parse.urlencode({"context": "travel", "sessionId": session_id})
+        url = f"https://www.tbank.ru/api/prefill/proxy/travel_pay?{query}"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "Origin": "https://www.tbank.ru",
+            "User-Agent": TPAY_WEBVIEW_UA,
+            "X-Travel-Context": "webview",
+            TRAVEL_SIG_HEADER: travel_api_signature(session_id, "travel_pay", {}, body_str),
+            "X-Detach-Key": detach_key or str(_uuid.uuid4()),
+            "X-Detach-Timeout": "5000",
+            "X-Travel-Session-Id": travel_session_id or str(_uuid.uuid4()),
+            "X-Trace-Id": trace_id or str(_uuid.uuid4()),
+            "Cookie": cookie,
+        }
+        return url, headers
+
+    def flight_pay(self, body: dict, *, travel_session_id: str = "",
+                   cookie: str = "") -> dict:
         """POST the booking+payment. REAL MONEY — there is no hold step for
         flights, this call both books and charges.
 
-        Returns the whole envelope, not `payload`. The envelope is where the
-        answer lives: `status` is "Working" while the booking runs and `detachKey`
-        IS the orderId, while `payload` is an empty object until it finishes. The
-        ordinary unwrap would hand back that `{}` and lose both."""
-        r = self._call_read("flight_pay", body=body, return_response=True)
+        The travel gateway checks an x-api-signature (httpIntegrityCheck) that this
+        client now reproduces: the request is built by _travel_pay_request, signed
+        with the TRAVEL web-session id, and sent on the web-session cookie (NOT the
+        mobile Bearer). `travel_session_id`/`cookie` come from the session-link
+        bridge (travel_link_session); pass them explicitly to override.
+
+        Returns the whole envelope, not `payload`. `status` is "Working" while the
+        booking runs and `detachKey` IS the orderId, while `payload` is an empty
+        object until it finishes — the ordinary unwrap would lose both.
+        """
+        sid = travel_session_id or self.travel_session_id
+        if not sid:
+            raise TbankApiError("NO_TRAVEL_SESSION",
+                "нет travel-сессии для подписи оплаты — сначала travel_link_session().")
+        ck = cookie or self._wide_cookie()
+        body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        url, headers = self._travel_pay_request(sid, ck, body_str)
+        r = self._http.post(url, data=body_str.encode("utf-8"),
+                            headers=headers, timeout=30)
         return self._envelope(r)
+
+    @staticmethod
+    def _parse_link_session(html: str) -> dict:
+        """Pull the travel session out of the check_auth response.
+
+        session/link/check_auth answers 200 with an HTML page that posts the result
+        to the opener: `window.parent.postMessage({"sessionId":"…","accessLevel":
+        "CLIENT",…}, '*')`. Returns that object, or {} if the page is not that shape
+        (an error page, a login redirect) — an empty dict is «no session», never a
+        half-parsed one.
+        """
+        m = re.search(r"postMessage\(\s*(\{.*?\})\s*,", html, re.S)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(1))
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def travel_link_session(self) -> str:
+        """Mint the WEB travel session id that keys the travel_pay signature.
+
+        NOT wired to the live flow. The captured bridge is a full OAuth/PKCE SSO
+        link, and shipping it un-run on the money path's auth would be a guess:
+
+          1. GET www.tbank.ru/api/common/v1/session/link/authorize
+               ?appName=travelaviabook&link_token=<T>&origin=web,ib5,platform&theme=
+             (link_token from the travel_link_auth_token endpoint) → 303 to id.tbank.ru
+          2. GET id.tbank.ru/auth/authorize
+               ?auth_token=<A>&client_id=&code_challenge=&code_challenge_method=&
+                redirect_uri=&response_type=&state=<JWT> → 303 back with ?code=
+          3. GET www.tbank.ru/api/common/v1/session/link/check_auth/?code=&state=
+             → HTML postMessage {"sessionId":"…","accessLevel":"CLIENT"} (see
+             _parse_link_session, which IS reproduced against the capture).
+
+        Until step 1–2 are captured/implemented live, pass the sessionId explicitly to
+        flight_pay(travel_session_id=…, cookie=…) or set self.travel_session_id.
+        """
+        raise TbankApiError("TRAVEL_LINK_NOT_WIRED",
+            "мост travel-сессии (session/link OAuth) не реализован вживую — передай "
+            "travel_session_id и cookie в flight_pay явно. См. docstring travel_link_session.")
 
     def flight_pay_result(self) -> dict:
         """Poll the in-flight payment. Same reason for the raw envelope: "Working"

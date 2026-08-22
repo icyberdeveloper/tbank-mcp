@@ -6119,12 +6119,14 @@ async def flight_book(offer_id: str, fare: int = 1, passengers: str = "me",
     тариф, багаж и правила из flight_offer(), согласие даёт кнопка. Клиент без
     элиситации получает отказ, деньги при этом не двигаются.
 
-    ⚠️ ЭТОТ ПУТЬ НИ РАЗУ НЕ ВЫПОЛНЯЛСЯ И НЕ ПРОВЕРЕН НА ПОДПИСИ. В захвате запрос
-    оплаты несёт X-Api-Signature (HMAC по схеме, которую не удалось воспроизвести
-    из захвата — нужен реверс приложения), а также X-Detach-Key/X-Detach-Timeout,
-    которых MCP не шлёт. Если шлюз проверяет подпись, вызов вернёт «ИСХОД
-    НЕИЗВЕСТЕН» на запрос, который не мог пройти. Предупреди пользователя, что
-    оплата авиабилета через MCP экспериментальная; надёжный путь — приложение.
+    ⚠️ ПОДПИСЬ ВОСПРОИЗВЕДЕНА, НО ЖИВОЙ ПЛАТЁЖ НИ РАЗУ НЕ ВЫПОЛНЯЛСЯ. Схема
+    x-api-signature восстановлена из JS travel-вебвью и совпадает с захватом
+    байт-в-байт (HmacSHA256, ключ — travel-сессия; см. client.travel_api_signature),
+    вместе с X-Detach-Key/X-Detach-Timeout — тул шлёт их все. Чего НЕ хватает:
+    ключ подписи — это ОТДЕЛЬНАЯ web-сессия travel, которую даёт SSO-мост
+    session/link (travel_link_session), а он вживую не подключён. Поэтому сейчас
+    тул честно откажет «ОПЛАТА НЕ ОТПРАВЛЕНА» (деньги не двигаются), пока travel-
+    сессия недоступна. Живьём платёж не гонялся — надёжный путь остаётся приложение.
 
     offer_id — из flight_search(), fare — номер тарифа из flight_offer().
     passengers="me" — владелец счёта (паспорт и латиница из данных банка); для
@@ -6259,6 +6261,23 @@ def _do_flight_book(offer_uuid, people, seat_blocks, checkin_price, seat_sum,
         journal.record(attempt, "travel_pay", "posting")
         try:
             started = s.flight_pay(body)
+        except TbankApiError as e:
+            # No travel session to sign with → the request was NEVER sent. That is a
+            # clean refusal, not an unknown outcome: nothing was charged, so it must
+            # not read as «билет мог выписаться». The signature itself is reproduced
+            # (see travel_api_signature); what is missing is the session-link bridge.
+            if getattr(e, "result_code", "") in ("TRAVEL_LINK_NOT_WIRED", "NO_TRAVEL_SESSION"):
+                journal.record(attempt, "travel_pay", "not_sent",
+                               error=getattr(e, "result_code", ""))
+                return ("ОПЛАТА НЕ ОТПРАВЛЕНА: нет web-сессии travel для подписи "
+                        "(session/link мост не подключён). Деньги НЕ двигались, "
+                        "билет НЕ оформлен. Подпись готова — не хватает travel-сессии; "
+                        "оформи авиабилет в приложении. Детали: travel_link_session().")
+            journal.record(attempt, "travel_pay", "unknown",
+                           error=f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}")
+            return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — билет мог "
+                    f"выписаться, а деньги списаться. Проверь trips() и приложение, "
+                    f"и только если брони нет — flight_book(…, force=True).")
         except Exception as e:
             journal.record(attempt, "travel_pay", "unknown",
                            error=f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}")

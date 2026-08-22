@@ -533,6 +533,123 @@ def test_fixture_matches_capture():
               f"re-run tests/fixtures/regen_travel.py")
 
 
+def test_travel_pay_signature_is_reproduced():
+    """The travel-webview x-api-signature, recovered from the payment-child-app JS
+    (getApiSignature / httpIntegrityCheck) and now reproduced in Python.
+
+    Two checks: a fixed synthetic vector pins the MESSAGE FORMAT so any drift in it
+    (line order, the "POST" prefix, the urlencoded query, the operation) breaks the
+    hash; and, when the real capture is present, the exact captured signature of the
+    flight-pay POST (item 1109) is reproduced byte for byte — the non-circular proof,
+    like tests/test_transfer.py does for /v1/pay."""
+    from src.client import travel_api_signature, TRAVEL_SIG_HEADER
+    import urllib.parse
+
+    # (1) format stability — a fake session, a fixed body, a frozen expected hash.
+    sid = "TESTsession.authenticon-testpod-xxxxx"
+    body = '{"amount":100,"offerId":"u-1"}'
+    sig = travel_api_signature(sid, "travel_pay", {}, body)
+    check(sig == "HvdzHmUBGQJKpfP63P7yVeQrcD+gKFAiIy77CcoO5lc=",
+          f"the signature message format drifted: {sig!r}")
+    check(TRAVEL_SIG_HEADER == "X-Api-Signature",
+          f"the signature header name changed: {TRAVEL_SIG_HEADER!r}")
+    # spell the signed message out so a reader can see exactly what is covered.
+    q = urllib.parse.urlencode({"context": "travel", "sessionId": sid})
+    check("\n".join(["POST", "travel_pay", q, body]).count("\n") == 3,
+          "the signed message must be the 4-line POST/operation/query/body form")
+
+    # (2) real capture — reproduce the captured signature exactly.
+    capture = os.environ.get("TBANK_CAPTURE_TRAVEL",
+                             os.path.expanduser("~/tbank-app/captures-flight-train.xml"))
+    if not os.path.exists(capture):
+        print("  travel_pay signature: format pinned (capture absent — real match skipped)")
+        return
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures"))
+    import regen_travel as R
+    req = R.raw(R.items(capture)[R.ITEMS["flight_pay_request"]], "request")
+    head, _, real_body = req.partition(b"\r\n\r\n")
+    hs = head.decode("latin1")
+    path = hs.split("\r\n", 1)[0].split(" ")[1]
+    key = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)["sessionId"][0]
+    real_sig = next((l.split(":", 1)[1].strip() for l in hs.split("\r\n")
+                     if l.lower().startswith("x-api-signature:")), None)
+    got = travel_api_signature(key, "travel_pay", {}, real_body.decode("utf-8"))
+    check(got == real_sig,
+          f"the captured travel_pay signature was not reproduced:\n  got  {got}\n  real {real_sig}")
+
+    # (3) the WHOLE request builder — feed the capture's own detach/trace/session ids
+    # and cookie, then every header the builder sets must equal the capture exactly.
+    def cap_hdr(n):
+        return next((l.split(":", 1)[1].strip() for l in hs.split("\r\n")
+                     if l.lower().startswith(n.lower() + ":")), None)
+    from src.client import MobileSession
+    sess = MobileSession("sid", "rt")
+    url, built = sess._travel_pay_request(
+        key, cap_hdr("Cookie"), real_body.decode("utf-8"),
+        detach_key=cap_hdr("X-Detach-Key"),
+        travel_session_id=cap_hdr("X-Travel-Session-Id"),
+        trace_id=cap_hdr("X-Trace-Id"))
+    check(url == "https://www.tbank.ru" + path,
+          f"the built travel_pay URL diverged:\n  {url}\n  https://www.tbank.ru{path}")
+    for h in ("X-Api-Signature", "X-Detach-Key", "X-Detach-Timeout",
+              "X-Travel-Session-Id", "X-Trace-Id", "X-Travel-Context",
+              "Content-Type", "Cookie"):
+        check(built.get(h) == cap_hdr(h),
+              f"built header {h} != capture:\n  built {built.get(h)!r}\n  cap   {cap_hdr(h)!r}")
+    check("Authorization" not in built,
+          "travel_pay must NOT carry a mobile Bearer — it is a web-cookie request")
+    check(built["X-Travel-Context"] == "webview",
+          f"travel_pay context must be webview: {built['X-Travel-Context']!r}")
+    # (4) the session-link parse: check_auth (item 992) posts the travel sessionId
+    # back to the opener; _parse_link_session must recover it, and it must be the
+    # value used as the signing key upstream.
+    mint_html = R.body_of(R.raw(R.items(capture)[992], "response")).decode("utf-8", "replace")
+    parsed = MobileSession._parse_link_session(mint_html)
+    check(parsed.get("sessionId") == key,
+          f"the check_auth parse did not recover the travel sessionId: {parsed!r}")
+    check(parsed.get("accessLevel") == "CLIENT",
+          f"the minted travel session must be CLIENT level: {parsed!r}")
+    # a page that is not the postMessage shape yields no session, not a guess.
+    check(MobileSession._parse_link_session("<html>login required</html>") == {},
+          "a non-session page must parse to empty, never a partial session")
+    print("  travel_pay: signature AND the whole signed request reproduced byte-exact "
+          "against the flight-pay capture; check_auth sessionId parse pinned too")
+
+
+def test_flight_pay_without_a_travel_session_sends_nothing():
+    """The signature key is the travel web session. Without it flight_pay must refuse
+    BEFORE any network call — nothing is signed, nothing is sent, nothing is charged.
+    A money call that quietly went out unsigned would be the worst outcome."""
+    from src.client import MobileSession, TbankApiError
+
+    posted = []
+
+    class Blocked:
+        def post(self, *a, **k):
+            posted.append(("post", a, k)); raise AssertionError("network!")
+        def get(self, *a, **k):
+            posted.append(("get", a, k)); raise AssertionError("network!")
+
+    s = MobileSession("sid", "rt")   # travel_session_id is "" by default
+    s._http = Blocked()
+    try:
+        s.flight_pay({"offerId": "u-1", "amount": 100})
+        failures.append("flight_pay sent a payment with no travel session")
+    except TbankApiError as e:
+        check(e.result_code in ("NO_TRAVEL_SESSION", "TRAVEL_LINK_NOT_WIRED"),
+              f"wrong refusal code: {e.result_code}")
+    check(not posted, f"flight_pay hit the network before it had a session: {posted}")
+
+    # travel_link_session is honestly not wired live (no blind OAuth on a money path).
+    try:
+        s.travel_link_session()
+        failures.append("travel_link_session pretended to work")
+    except TbankApiError as e:
+        check(e.result_code == "TRAVEL_LINK_NOT_WIRED",
+              f"travel_link_session must declare itself not wired: {e.result_code}")
+    print("  flight_pay: refuses before the wire when there is no travel session to sign with")
+
+
 def test_the_flight_pay_envelope_reports_the_shape_it_got():
     """_envelope carries the state that lives OUTSIDE `payload` for flight pay/result,
     and must never raise on a non-2xx — for those calls a 400 means «nothing in
@@ -579,6 +696,8 @@ def main():
                test_a_minor_is_refused_on_the_booking_path,
                test_tpay_init_shape,
                test_tpay_flow_sends_account_step_and_correct_headers,
+               test_travel_pay_signature_is_reproduced,
+               test_flight_pay_without_a_travel_session_sends_nothing,
                test_the_flight_pay_envelope_reports_the_shape_it_got,
                test_fixture_matches_capture):
         fn()
