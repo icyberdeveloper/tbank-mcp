@@ -4,11 +4,12 @@
 
 ## Features
 
-- **78 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
-  concert tickets, orders, transfers (including payment by bank requisites, from a
-  scanned invoice QR), messenger, investments
+- **90 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+  concert tickets, train and flight booking, hotel search, orders, transfers
+  (including payment by bank requisites, from a scanned invoice QR), messenger,
+  investments
 - **11 skills**, entered through the `tbank` router skill: grocery order, tickets,
-  travel search, transfer, bill pay, cards & documents, messenger, budget analysis,
+  travel, transfer, bill pay, cards & documents, messenger, budget analysis,
   invest advisor, login
 - **Pinned CA trust**: system store + the Russian Trusted Root CA (Минцифры), which no
   OS ships and every `*.t-bank-app.ru` host needs — that is most of the 22 hosts this
@@ -55,7 +56,11 @@ python -m playwright install chromium
 claude mcp add tbank -- ./.venv/bin/python -m src.server
 
 # Skills — a COPY, so it does not follow the repo. Re-run after every pull, or
-# the installed skills quietly describe an older version of these tools:
+# the installed skills quietly describe an older version of these tools.
+# Remove this repo's own skills first (plain cp never deletes a skill that was
+# RENAMED, so its old copy lingers and the agent loads the stale one):
+for d in skills/*/; do rm -rf ~/.claude/skills/"$(basename "$d")"; done
+rm -rf ~/.claude/skills/tbank-travel-search   # retired 2026-08 → now tbank-travel
 cp -r skills/* ~/.claude/skills/
 ```
 
@@ -107,8 +112,9 @@ If you are content to hand the password to the agent:
 account you care about, use Option 1.
 
 Both options need the SMS code typed in either way, so there is no unattended
-login: `TBANK_PASSWORD` / `TBANK_PHONE` are not read anywhere in this codebase,
-and a section here used to claim otherwise.
+login. `TBANK_PASSWORD` (and `TBANK_PIN`) are read **only** by `login_cli.py` — the
+env example above — and never by the MCP server or the LLM. `TBANK_PHONE` is not
+read anywhere: the phone is always a command-line argument.
 
 > **Работа с MyT (рабочий календарь и парковка) переехала** в отдельный MCP:
 > [tbank-myt](https://github.com/icyberdeveloper/tbank-myt). Другой аккаунт, другая
@@ -155,7 +161,10 @@ Russian and so is the person reading the answer.
 | **Afisha** | `afisha_catalog`, `afisha_places`, `place_schedule`, `place_info` |
 | **Tickets** | `cinema_search`, `cinema_schedule`, `cinema_seats`, `concert_schedule`, `concert_hall`, `cinema_book`, `ticket_pay`, `ticket_cancel`, `ticket_qr` |
 | **Search** | `search_app` |
-| **Travel search** | `train_search`, `train_calendar`, `flight_search`, `flight_history` |
+| **Travel search** | `train_search`, `train_calendar`, `flight_search`, `flight_offer`, `flight_history` |
+| **Travel booking** | `train_seats`, `train_book`, `train_pay`, `train_refund`, `flight_seats`, `flight_book` |
+| **Hotels** | `hotel_search`, `hotel_info` |
+| **Trips** | `trips`, `travel_payment_options`, `travel_ticket_file` |
 | **Marketplace** | `shop_search`, `shop_cart` |
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_file`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers`, `confirm_payment`, `payment_status` |
@@ -173,7 +182,7 @@ Grocery tools (`grocery_search`, `grocery_plan_order`, `grocery_add_to_cart`, `g
 | `tbank` | **Entry point** — what the bank can do and which skill handles it |
 | `tbank-grocery-order` | Recipe → search → cart → show it → checkout (the tool's own button confirms the sum) |
 | `tbank-tickets` | Cinema/concert: search → showtime → seats → book → pay |
-| `tbank-travel-search` | Trains, flights, marketplace — search only, no booking |
+| `tbank-travel` | Trains and flights: search → seats → book → pay → refund; hotels and marketplace: search only |
 | `tbank-bill-pay` | Service bills — utilities, taxes, fines: catalogue → provider fields → commission preview → pay |
 | `tbank-transfer-money` | P2P, SBP (СБП), account transfers |
 | `tbank-cards-documents` | Cards, limits, requisites, passport and other documents |
@@ -264,8 +273,9 @@ present the tests additionally check the fixtures have not drifted from it.
   payment ids — are replaced in the recorded line, both to keep them out and because
   the report groups by that line. The `debug_report` tool reads it. On by default;
   `TBANK_TRACE=0` disables it, `TBANK_TRACE_FILE` moves it, and it rotates at 5 MB.
-- **`TBANK_CONFIRM_ABOVE`** — the ruble threshold from which the five paying tools
-  (`transfer`, `transfer_requisites`, `pay_bill`, `ticket_pay`, `grocery_checkout`)
+- **`TBANK_CONFIRM_ABOVE`** — the ruble threshold from which the seven paying tools
+  that debit on the spot (`transfer`, `transfer_requisites`, `pay_bill`,
+  `ticket_pay`, `grocery_checkout`, `train_pay`, `flight_book`)
   show the confirmation button — an MCP elicitation dialog («Перевести/Отмена»,
   «Оплатить …?», «Оформить заказ на N ₽?») rendered by the client (default `0`:
   every payment asks). It is a server-side setting, not a tool argument. Clients
@@ -275,8 +285,8 @@ present the tests additionally check the fixtures have not drifted from it.
   elicitation; Claude Desktop does not (reads work there, paying does not).
   Below a positive threshold nothing is asked and the payment proceeds in any
   client — **except `grocery_checkout`, which refuses a client without elicitation
-  at any threshold**: it is the one paying tool whose sum is not an argument, and
-  learning it means loading the checkout page and asking the store to hold a
+  at any threshold**: it is the one paying tool that must load the checkout page to
+  learn its sum at all, and doing that means asking the store to hold a
   delivery slot, so it says no before doing that work rather than after.
   `grocery_checkout(dry_run=True)` — a preview that creates nothing — still works
   in any client.
@@ -319,17 +329,18 @@ present the tests additionally check the fixtures have not drifted from it.
   second pending payment.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `src/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 60 are `readOnlyHint: true` and
-  may run without a prompt; 12 write something that costs nothing (a cart, a
+  rather than defaulting to anything. Three kinds: 67 are `readOnlyHint: true` and
+  may run without a prompt; 15 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
-  `destructiveHint: false`; 6 debit an account — `transfer`, `transfer_requisites`,
-  `grocery_checkout`, `ticket_pay`, `pay_bill`, `confirm_payment` — and are the only
+  `destructiveHint: false`; 8 debit an account — `transfer`, `transfer_requisites`,
+  `grocery_checkout`, `ticket_pay`, `pay_bill`, `train_pay`, `flight_book`,
+  `confirm_payment` — and are the only
   ones carrying `destructiveHint`, which
   is what makes the host prompt before running them (the sum itself is then
   confirmed by the tool's own elicitation button, see above). The line is drawn at money on purpose: a
   booking expires by itself and a cart line is a rewrite away, so confirming those is
   friction that teaches people to click through the one dialog that matters.
-  The 12 writers are not marked read-only, because they do modify things and that
+  The 15 writers are not marked read-only, because they do modify things and that
   flag states the opposite — if your client still prompts on them, allow them once
   in the client rather than changing what the server claims.
 

@@ -12,6 +12,11 @@ dependencies = [
   "mcp>=1.2,<2",
   "requests>=2.32",
   "playwright>=1.40",
+  # server.py imports pydantic directly (BaseModel for elicitation schemas,
+  # create_model for the pay-bill form). It arrives transitively through mcp
+  # today, but a direct runtime import must be a direct dependency — a change in
+  # mcp's own deps would otherwise break the import with no version signal.
+  "pydantic>=2",
 ]
 
 [project.scripts]

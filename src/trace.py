@@ -84,7 +84,26 @@ _OPAQUE_ARGS = {"text", "description", "password", "pin", "otp", "code", "body",
                 # the same row undoes that, and did it for REFUSED payments too,
                 # where nobody was paid at all. `name` appears on no other tool's
                 # signature, so nothing legitimate is lost.
-                "masked_fio", "name"}
+                "masked_fio", "name",
+                # `passengers` is train_book/flight_book's traveller list, and it is
+                # the same open-ended blob as `fields`: a passport number, a full
+                # name, a date of birth and an airline bonus card, in JSON the agent
+                # composed. None of those keys match _REDACT_KEY, so the value went
+                # to calls.jsonl almost verbatim — and it was `_MAX_ARG`'s 64-char
+                # cut, not any rule, that decided whether the passport made it.
+                # Measured: with `number` written FIRST in the JSON the passport
+                # survives redaction whole. Protection that depends on the order the
+                # agent happened to serialise a dict in is not protection.
+                "passengers",
+                # `arg` is get_data's second positional: a phone (sbp_me2me), an
+                # account number (statements/full_debt_amount/statement_exist) or a
+                # provider list. All are PII or account identifiers, and none match
+                # a sensitive KEY name (`arg` is generic), so each was stored whole
+                # in the file this module promises is safe to share. `query`
+                # (grocery/shop/afisha search) and `ingredients`/`items` (the recipe
+                # and cart the agent composed) are the same open-ended user text as
+                # `fields` — a name or address in a search term reached the file too.
+                "arg", "query", "ingredients", "items"}
 
 # Tools whose ANSWER contains text a person wrote — the message just sent, the chat
 # history, the preview of the last message in each conversation. Blanking the

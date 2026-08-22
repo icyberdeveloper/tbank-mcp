@@ -654,6 +654,43 @@ def test_the_qr_preview_shows_what_the_user_must_confirm():
     print("  payment_qr: payee, requisites, sum, fee and the next call")
 
 
+def test_a_non_legal_qr_hands_over_the_fields_pay_bill_needs():
+    """A QR whose provider is NOT transfer-legal routes to pay_bill(provider, fields,
+    amount). The tool named that call but never printed `fields`, so the values it
+    parsed from the QR were dropped and the agent had nothing to pass. The fields
+    must be handed over machine-ready."""
+    fx = fixture()
+
+    class NonLegal(LegalSession):
+        def qr_providers(self, qr):
+            # A utility/tax provider: its own field schema, filled from the QR.
+            return [{"id": "fns-rf", "name": "ФНС России", "fields": [
+                {"id": "purpose", "defaultValue": "Налог"}]}]
+
+    out = run_tool(NonLegal(fx), server.payment_qr, fx["qr"])
+    check("pay_bill" in out and "fns-rf" in out,
+          f"the pay_bill call must name the provider: {out!r}")
+    # The fields line must be present and be parseable JSON carrying real values.
+    field_lines = [l for l in out.splitlines() if "передай как fields" in l]
+    check(field_lines, f"the machine-ready fields dict must be printed: {out!r}")
+    if not field_lines:
+        return                      # nothing to parse — the miss is already recorded
+    import json as _json, re as _re
+    m = _re.search(r"\{.*\}", field_lines[0])
+    check(m is not None, f"the fields line must contain a JSON object: {field_lines[0]!r}")
+    if not m:
+        return
+    fields = _json.loads(m.group(0))
+    # The QR's own INN wins over the provider default (gap-fill only), and the
+    # provider default fills a field the QR lacked (purpose). Both prove the parsed
+    # values are handed over, not dropped.
+    check(fields.get("inn") == "7700000000",
+          f"the QR-parsed INN must reach the fields dict: {fields}")
+    check(fields.get("purpose") == "Налог",
+          f"a provider default that filled a gap must reach the fields dict: {fields}")
+    print("  payment_qr: a non-legal QR hands pay_bill its fields, not just the provider id")
+
+
 def main():
     print("payment by requisites:")
     test_the_fixture_still_matches_the_capture()
@@ -676,6 +713,7 @@ def main():
     test_a_refusal_is_not_reported_as_a_possible_charge()
     test_the_result_carries_what_the_agent_needs_next()
     test_the_qr_preview_shows_what_the_user_must_confirm()
+    test_a_non_legal_qr_hands_over_the_fields_pay_bill_needs()
     if failures:
         print("\nFAILED:")
         for f in failures:

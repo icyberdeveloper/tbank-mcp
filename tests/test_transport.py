@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.client import MobileSession, _STRICT_XAPP_HOSTS  # noqa: E402
+from src.client import MobileSession, TbankApiError, _STRICT_XAPP_HOSTS  # noqa: E402
 from src.endpoints import BUILTIN_ENDPOINTS  # noqa: E402
 
 failures = []
@@ -528,6 +528,80 @@ def test_a_lean_host_gets_only_what_the_app_sends_it():
     print("  lean hosts: no native context, no Bearer; every other read unchanged")
 
 
+def test_blank_status_posts_an_empty_form_not_json():
+    """train_blank_status is a POST the app sends as an EMPTY form.
+
+    The capture: Content-Type application/x-www-form-urlencoded, Content-Length 0.
+    Posting body={} as JSON sends the two bytes «{}» with application/json — a
+    different request the rail host may answer differently. This drives the real
+    transport and checks it goes out as form data with nothing in it.
+    """
+    s = session()
+    s._cookie_for = lambda host: ""
+    s.trains_cookie, s.trains_cookie_at = "c", 9e18
+    s.train_blank_status("ORDER-1")
+    sent = last(s)
+    check(sent["method"] == "POST", f"blank-status must be a POST: {sent['method']}")
+    check(sent["headers"].get("Content-Type") == "application/x-www-form-urlencoded",
+          f"blank-status must be form-urlencoded, not JSON: {sent['headers'].get('Content-Type')}")
+    check(sent["json"] is None, f"blank-status must NOT post a JSON body: {sent['json']!r}")
+    check(sent["data"] in ({}, None) or not sent["data"],
+          f"blank-status body must be empty: {sent['data']!r}")
+    print("  blank-status: empty form body, not JSON {}")
+
+
+def test_a_path_override_cannot_walk_out_of_its_endpoint():
+    """A tool id interpolated into path_override must not escape the endpoint.
+
+    Several client methods build a URL as f"/api/orders/{order_id}" and friends,
+    and order_id / hotel_id / booking_id come straight from a tool argument. A
+    value like "../../../v1/sign_out" turns a read into an arbitrary POST on the
+    bank host, carrying the Bearer and rail cookie. Measured against the real
+    _call_read: the request must be REFUSED before it reaches the transport, and a
+    legitimate id must still pass.
+    """
+    s = session()
+    # train_order is a rail template; its cookie is normally minted over the
+    # network in a separate jar. Stub that so the test stays offline and exercises
+    # only the path barrier.
+    s._cookie_for = lambda host: ""
+    s.trains_cookie, s.trains_cookie_at = "c", 9e18
+
+    # The exploit and its cousins — none may reach FakeHTTP. Caught broadly (not
+    # by class identity) because running this file as __main__ can import src twice
+    # under different module identities; result_code is the stable signal.
+    for bad in ("../../../v1/sign_out", "x?scope=all", "x#frag", "%2f..%2fx", "a//b"):
+        before = len(s._http.sent)
+        try:
+            s._call_read("train_order",
+                         path_override=f"/api/orders/{bad}")
+            reached = len(s._http.sent) > before
+            check(False, f"traversal {bad!r} was not refused"
+                         + (" and REACHED the network" if reached else ""))
+        except Exception as e:                                   # noqa: BLE001
+            check(getattr(e, "result_code", "") == "BAD_PATH",
+                  f"traversal {bad!r} raised the wrong error: {e!r}")
+            check(len(s._http.sent) == before,
+                  f"traversal {bad!r} raised but still sent a request")
+
+    # A real order id (UUID) and a two-segment path must go through untouched.
+    ok = "8d11c913-c125-44c9-ad08-7da50ed60699"
+    s._call_read("train_order", path_override=f"/api/orders/{ok}")
+    check(last(s)["url"].endswith(f"/api/orders/{ok}"),
+          f"a legitimate order id must pass: {last(s)['url']}")
+    s._call_read("train_order", path_override=f"/api/orders/{ok}/status")
+    check(last(s)["url"].endswith(f"/api/orders/{ok}/status"),
+          "a legitimate two-segment path must pass")
+
+    # And the guard is at the ASSEMBLY point, so it covers every method that builds
+    # a path_override, not just this one — a future call site cannot forget it.
+    import inspect
+    src = inspect.getsource(MobileSession._call_read)
+    check("BAD_PATH" in src,
+          "the path barrier must live in _call_read, not at individual call sites")
+    print("  path_override: traversal refused before the network, real ids pass")
+
+
 def main():
     print("transport:")
     test_the_accept_profile_is_off_by_default_and_correct_when_on()
@@ -546,6 +620,8 @@ def main():
     test_bank_documents_asks_for_the_v2_record_shape()
     test_templates_stay_structurally_sane()
     test_a_lean_host_gets_only_what_the_app_sends_it()
+    test_blank_status_posts_an_empty_form_not_json()
+    test_a_path_override_cannot_walk_out_of_its_endpoint()
     if failures:
         print("\nFAILED:")
         for f in failures:

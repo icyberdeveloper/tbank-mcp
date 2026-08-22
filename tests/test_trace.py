@@ -456,6 +456,78 @@ def test_pay_bills_fields_argument_is_measured_not_stored():
     print("  privacy: pay_bill's provider-defined `fields` blob is measured, not stored")
 
 
+def test_the_passengers_argument_is_measured_not_stored():
+    """train_book/flight_book take a traveller list, and it is the same open-ended
+    blob as pay_bill's `fields`: a passport number, a full name, a date of birth
+    and an airline bonus card, in JSON the agent composed. None of those key names
+    match _REDACT_KEY.
+
+    What made this worth a test of its own: whether the passport survived depended
+    on the ORDER the agent serialised the dict in. The 64-character argument cut
+    happened to land before `number` when the name came first — so the first probe
+    showed «nothing leaked» — and putting `number` first put a real document number
+    on disk. Both orderings are asserted here, because only one of them used to
+    fail."""
+    for label, pii in (
+        ("name first",
+         '{"first":"Пётр","last":"Петров","birthDate":"1990-01-31","number":"1234567890"}'),
+        ("passport first",
+         '{"number":"1234567890","birthDate":"1990-01-31","last":"Петров","first":"Пётр"}'),
+    ):
+        path = fresh_trace()
+
+        @trace.wrap
+        def fake_train_book(train_id, seats, passengers):
+            return "Забронировано"
+
+        blob = "[" + pii + "]"
+        fake_train_book("train_x", "03/10", blob)
+
+        raw = open(path, encoding="utf-8").read()
+        check("Петров" not in raw, f"{label}: a passenger's surname reached the trace")
+        check("1234567890" not in raw, f"{label}: a passport number reached the trace")
+        check("1990-01-31" not in raw, f"{label}: a date of birth reached the trace")
+
+        rec = trace.load(path)[-1]
+        check(rec["args"]["passengers"] == f"<{len(blob)} chars>",
+              f"{label}: passengers must be measured, not stored: {rec['args']}")
+    print("  privacy: the passengers blob is measured, not stored, in either field order")
+
+
+def test_get_data_arg_and_search_query_are_measured_not_stored():
+    """get_data's second positional `arg` is a phone (sbp_me2me), an account number
+    (statements/full_debt_amount/statement_exist) or a provider list — PII or an
+    account id that matches no sensitive KEY name, so it reached calls.jsonl whole.
+    A search `query` (grocery/shop/afisha) is open-ended user text that can carry a
+    name or address. Both must be measured, not stored."""
+    path = fresh_trace()
+
+    @trace.wrap
+    def fake_get_data(section, arg="", days=30, max_chars=5000):
+        return "OK"
+
+    @trace.wrap
+    def fake_grocery_search(query, limit=20):
+        return "OK"
+
+    fake_get_data("statements", "40817810000000000000")
+    fake_grocery_search("перевод Иванову Ивану на Ленина 5")
+
+    raw = open(path, encoding="utf-8").read()
+    check("40817810000000000000" not in raw, "an account number reached the trace via arg")
+    check("Иванову" not in raw, "a name in a search query reached the trace")
+    check("Ленина" not in raw, "an address in a search query reached the trace")
+
+    rows = trace.load(path)
+    gd = next(r for r in rows if r["tool"] == "fake_get_data")
+    check(gd["args"]["arg"] == "<20 chars>",
+          f"get_data's arg must be measured, not stored: {gd['args']}")
+    gs = next(r for r in rows if r["tool"] == "fake_grocery_search")
+    check(str(gs["args"]["query"]).startswith("<") and "chars>" in str(gs["args"]["query"]),
+          f"a search query must be measured, not stored: {gs['args']}")
+    print("  privacy: get_data `arg` and a search `query` are measured, not stored")
+
+
 def test_a_refusal_is_not_recorded_as_an_error():
     """Most failures here are ordinary return values — «NO_STORE_CONTEXT»,
     «Неизвестное поле сортировки». If the tracer guessed at the answer string it
@@ -522,6 +594,38 @@ def test_the_report_finds_an_agent_that_got_stuck():
     slow = next(t for t in rep["tools"] if t["tool"] == "list_accounts")
     check(slow["p95_ms"] == 900, f"latency must survive: {slow}")
     print("  report: repeats, per-tool errors, grouped answers, transitions, starts")
+
+
+def test_debug_report_marks_a_head_it_shortens():
+    """debug_report printed the answer/repeat heads with a bare [:110]/[:90] slice —
+    the one report meant to reveal silent truncation was itself truncating silently.
+    Routed through _cut, a shortened head now ends with «…» and never shows its
+    dropped tail."""
+    long_tail = "УНИКАЛЬНЫЙ_ХВОСТ_КОТОРЫЙ_ДОЛЖЕН_ИСЧЕЗНУТЬ"
+    head = "API error (SOMETHING): " + ("очень длинная строка ответа " * 6) + long_tail
+    rows = [{"run": "r1", "seq": i, "tool": "grocery_search", "args_hash": "b",
+             "ms": 5, "chars": 40, "err": "TbankApiError", "head": head}
+            for i in range(1, 4)]
+    saved = trace.load
+    trace.load = lambda *a, **kw: rows
+    try:
+        out = server.debug_report()
+    finally:
+        trace.load = saved
+    check("…" in out, f"a shortened head must carry the cut marker: {out!r}")
+    check(long_tail not in out,
+          f"the dropped tail must not appear — nor be shown whole: {out[:200]!r}")
+    # And a head that FITS must not gain a spurious «…» (that is the _cut contract).
+    short_rows = [{"run": "r2", "seq": 1, "tool": "list_accounts", "args_hash": "c",
+                   "ms": 9, "chars": 20, "err": None, "head": "- # | Current"}]
+    trace.load = lambda *a, **kw: short_rows
+    try:
+        out2 = server.debug_report()
+    finally:
+        trace.load = saved
+    check("- # | Current" in out2 and "…" not in out2,
+          f"a head that fits must be untouched: {out2!r}")
+    print("  debug_report: shortened heads marked with «…», fitting heads untouched")
 
 
 def test_tracing_off_writes_nothing():
@@ -677,11 +781,14 @@ def main():
     test_a_successful_payment_does_not_record_who_was_paid()
     test_a_refused_payment_is_not_filed_as_a_completed_one()
     test_pay_bills_fields_argument_is_measured_not_stored()
+    test_the_passengers_argument_is_measured_not_stored()
+    test_get_data_arg_and_search_query_are_measured_not_stored()
     test_the_journal_and_the_event_log_redact_too()
     test_the_log_files_are_owner_only_even_if_they_already_existed()
     test_session_file_is_owner_only_even_if_it_already_existed()
     test_a_refusal_is_not_recorded_as_an_error()
     test_the_report_finds_an_agent_that_got_stuck()
+    test_debug_report_marks_a_head_it_shortens()
     test_tracing_off_writes_nothing()
     test_a_broken_tracer_cannot_break_a_payment()
     if failures:

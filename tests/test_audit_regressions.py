@@ -123,6 +123,19 @@ def test_spending_categories_walks_the_interval_tree():
     # The exact bug: iterating the dict yields its KEYS and silently produces nothing.
     check(rep["categories"], "the tree walk produced no categories at all")
 
+    # The request shape now comes from operations_histogram's ONE override builder
+    # (spending_categories used to assemble its own copy, which had drifted). Pin
+    # it so the two cannot diverge again: config/timeZone/accounts must all be here.
+    name, kw = s.calls[0]
+    check(name == "operations_histogram", f"wrong endpoint: {name}")
+    ov = kw.get("overrides") or {}
+    check(ov.get("config") == "allNotInner" and ov.get("timeZone") == "+03:00",
+          f"the histogram override lost config/timeZone: {ov}")
+    check(ov.get("groupBy") == "category" and ov.get("period") == "day",
+          f"spending_categories must ask groupBy=category, period=day: {ov}")
+    check(ov.get("accounts") == "0000000000",
+          f"the account scope must reach the request: {ov}")
+
     # A period with no spending must report zero honestly, not crash.
     empty = HistogramSession({"payload": {"spending": {}, "earning": {}}})
     z = empty.spending_categories(None, 0, 1)
@@ -212,6 +225,36 @@ def test_cinema_schedule_emits_objectid():
     doc = server.cinema_schedule.__doc__ or ""
     check("objectId" in doc, f"cinema_schedule's docstring never mentions objectId: {doc!r}")
     print("  cinema_schedule: objectId + slotId both emitted, and documented")
+
+
+def test_cinema_repertoire_emits_each_films_eventid():
+    """object_id WITHOUT event_id lists a whole cinema's repertoire — every row is a
+    DIFFERENT film, so the caller has no eventId to reuse. The render printed the
+    film name and slotId but dropped eventId, leaving cinema_seats()/cinema_book()
+    (which need eventId+slotId+objectId) with no way to reach the showing."""
+    venues = [{
+        "info": {"objectId": "10031", "objectName": "Каро 11",
+                 "geo": {"address": "Пресненская наб., 2"}},
+        "events": [
+            {"eventId": "film-A", "eventName": "Дюна",
+             "slots": [{"slotId": "s-A", "startTime": "17:30",
+                        "hallName": "ЗАЛ 1", "prices": {"fix": 500}}]},
+            {"eventId": "film-B", "eventName": "Оппенгеймер",
+             "slots": [{"slotId": "s-B", "startTime": "20:00",
+                        "hallName": "ЗАЛ 2", "prices": {"fix": 600}}]}],
+    }]
+    original = server._require
+    server._require = lambda: ScheduleSession(venues)
+    try:
+        # repertoire mode: object_id set, event_id empty
+        out = server.cinema_schedule(object_id="10031", date="2026-07-26")
+    finally:
+        server._require = original
+    check("eventId=film-A" in out and "eventId=film-B" in out,
+          f"each film in a repertoire must carry its own eventId: {out!r}")
+    check("slotId=s-A" in out and "objectId=10031" in out,
+          f"eventId must join slotId+objectId, not replace them: {out!r}")
+    print("  cinema_schedule repertoire: each film emits its eventId")
 
 
 def node_bin():
@@ -1045,6 +1088,7 @@ def main():
         test_spending_categories_walks_the_interval_tree,
         test_err_redacts_the_sessionid,
         test_cinema_schedule_emits_objectid,
+        test_cinema_repertoire_emits_each_films_eventid,
         test_in_page_fetch_gives_up_instead_of_hanging,
         test_the_checkout_browser_never_receives_the_no_otp_credential,
         test_checkout_uses_the_post_delivery_sum_and_stays_off_stdout,

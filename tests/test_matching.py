@@ -128,6 +128,41 @@ def test_pick_candidate_prefers_higher_match_over_cheaper():
     print("  pick: higher token-match beats cheaper price (Краб over Куриные)")
 
 
+def test_custom_ordered_category_id_is_read_from_the_catalogue_not_guessed():
+    """The «Вы заказывали» category id is store-suffixed and NOT constructible on the
+    client (sibling custom ids carry random/date suffixes). It must be read from the
+    catalogue response — the labeled block wins over a bare custom_ordered, a nested
+    `payload.blocks` shape is handled, and an absent block degrades to '' so the
+    caller falls back to global search rather than inventing an id."""
+    class Catalogue(MobileSession):
+        def __init__(self, data):
+            self._data = data
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            assert key == "grocery_catalog", key
+            assert (overrides or {}).get("appId") and (overrides or {}).get("pointId")
+            return self._data
+
+    # (a) the labeled «Вы заказывали» item wins over an earlier bare custom_ordered.
+    labeled = Catalogue({"blocks": [{"type": "Categories", "list": [
+        {"id": "custom_ordered_000", "name": "что-то"},
+        {"id": "custom_ordered_578", "name": "Вы заказывали"}]}]})
+    cid = labeled._resolve_custom_ordered_id("578", "2")
+    check(cid == "custom_ordered_578",
+          f"the labeled «Вы заказывали» id must win: {cid!r}")
+
+    # (b) nested under payload.blocks (the other real shape).
+    nested = Catalogue({"payload": {"blocks": [{"type": "Categories", "list": [
+        {"id": "custom_ordered_695", "name": "Вы заказывали"}]}]}})
+    check(nested._resolve_custom_ordered_id("695", "1") == "custom_ordered_695",
+          "the payload.blocks nesting must be handled")
+
+    # (c) no such block → '' (safe fallback), never a guessed id.
+    empty = Catalogue({"blocks": [{"type": "Banner", "list": [{"id": "promo"}]}]})
+    check(empty._resolve_custom_ordered_id("204", "5980") == "",
+          "a store with no order-history block must return '' , not a fabricated id")
+    print("  custom_ordered: id read from the catalogue (labeled wins), absent → '' fallback")
+
+
 def main():
     print("matching:")
     test_hygiene_matches_what_substring_could_not()
@@ -136,6 +171,7 @@ def main():
     test_false_positives_are_rejected()
     test_missing_qualifier_lowers_confidence()
     test_plan_order_flags_low_confidence_pick()
+    test_custom_ordered_category_id_is_read_from_the_catalogue_not_guessed()
     if failures:
         print("\nFAILED:")
         for f in failures:

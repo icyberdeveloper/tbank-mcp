@@ -140,34 +140,12 @@ def _delivery_error_text(deliv: dict, code: str, err: str, blame: str, tries: in
     return head + ". " + tail
 
 
-def _poll_until_ready(probe, ready, *, timeout_ms: int, interval_ms: int):
-    """Call `probe` until `ready(result)`, then return (result, elapsed_ms).
+# The poller lives in client.py: rail refunds, flight bookings and the T-Pay
+# gateway all wait on a remote job too, and three more copies of this loop is
+# three more places to get the wall-clock deadline wrong. Re-exported so the
+# existing callers and tests keep importing it from here.
+from .client import poll_until_ready as _poll_until_ready  # noqa: E402
 
-    Returns (None, elapsed_ms) if the deadline passes first.
-
-    Two things this exists to get right, both of which the inline loop got wrong:
-
-    * The deadline is WALL CLOCK. The old loop added up its own sleeps, ignoring the
-      probe itself — and each probe is a real in-page fetch bounded by
-      FETCH_TIMEOUT_MS (30 s). Two hung fetches and a "20 second" wait had already
-      run more than a minute, with the caller, who is mid-checkout, told nothing.
-    * The successful probe's RESULT comes back. The loop used to discard it and the
-      caller reissued the identical request — an extra browser round trip on the
-      money path, and a window in which the second answer can differ from the one
-      that satisfied the check."""
-    started = time.monotonic()
-    deadline = started + timeout_ms / 1000.0
-    while True:
-        try:
-            result = probe()
-            ok = bool(ready(result))
-        except Exception:                                    # noqa: BLE001
-            result, ok = None, False
-        if ok:
-            return result, int((time.monotonic() - started) * 1000)
-        if time.monotonic() >= deadline:
-            return None, int((time.monotonic() - started) * 1000)
-        time.sleep(interval_ms / 1000.0)
 
 # Per-request ceiling for every in-page fetch. Playwright's page.evaluate has NO
 # timeout of its own (Page.evaluate passes timeout_calculator=None and _inner_send

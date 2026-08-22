@@ -132,6 +132,14 @@ ALLOWED = {
     # синтетические id счетов (5-я серия) и карт/ucid (4-я серия), заменившие
     # реальные значения владельца, которые раньше стояли литералами в тестах
     "5000000001", "5000000002", "5000000003", "4000000001", "4000000002",
+    # паспорта пассажиров в travel-фикстуре: счётчик от 1234567890, по одному на
+    # пассажира, чтобы тест мог их различать. Раздаёт Passports в
+    # tests/fixtures/regen_travel.py; ни одного нет в захвате.
+    "1234567891", "1234567892", "1234567893",
+    # 3-я серия — номера бланков и брони РЖД в той же фикстуре. Реальные печатаются
+    # на билете, поэтому перенумерованы подряд классом Ids там же.
+    "300000001", "300000002", "300000003", "300000004", "300000005",
+    "300000006", "300000007", "300000008", "300000009",
     # усечённый счёт (19 цифр) — подставной «плохой» реквизит в test_requisites,
     # заменил первые 19 знаков реального счёта контрагента
     "4070281000000000001",
@@ -184,6 +192,52 @@ def test_no_undeclared_identity_shaped_value_is_tracked():
           f"{len(ALLOWED)} объявленных синтетических значений")
 
 
+# The owner's decision after the audit: the history already carries their PII in
+# seven commits on origin/master, and it is NOT rewritten — the data is public and
+# clones have diverged, so rewriting buys nothing. What this guards is «защита
+# вперёд»: everything up to this baseline is grandfathered, and any NEW commit that
+# introduces an identity-shaped value (in a diff OR a commit message) is caught
+# before it becomes more permanent history. Pin the baseline to the current tip; as
+# the branch grows the scanned range grows with it.
+HISTORY_BASELINE = "6e2f577daf118d95def41a738573c3030fc83bb2"
+
+
+def _git(*args):
+    return subprocess.run(["git", *args], cwd=ROOT,
+                          capture_output=True, text=True)
+
+
+def test_no_identity_shaped_value_enters_the_history_after_the_baseline():
+    """Grep the diffs and messages of commits added since the baseline — the leak
+    the owner chose not to rewrite must not be JOINED by new ones."""
+    # Baseline must be a real, reachable commit; if a rebase orphaned it, say so and
+    # fall back to the working-tree scan rather than failing or scanning everything.
+    if _git("cat-file", "-e", HISTORY_BASELINE + "^{commit}").returncode != 0:
+        print(f"  (baseline {HISTORY_BASELINE[:12]} not in this clone — history scan "
+              f"skipped; the tracked-file scan above still ran)")
+        return
+    # Commits reachable now but not from the baseline — i.e. everything added since.
+    revs = _git("rev-list", f"{HISTORY_BASELINE}..HEAD").stdout.split()
+    if not revs:
+        print("  история: 0 новых коммитов после базовой точки — сканировать нечего")
+        return
+    scanned = 0
+    for sha in revs:
+        # -p gives the diff; the format prints the full message (%B) ahead of it, so
+        # one pass covers both the code and what the commit SAID.
+        blob = _git("show", "--format=%B", "-p", sha).stdout
+        scanned += 1
+        for label, rx in SHAPES.items():
+            for value in set(rx.findall(blob)):
+                if value in ALLOWED:
+                    continue
+                failures.append(
+                    f"commit {sha[:12]} вносит значение вида «{label}» ({value}). "
+                    f"Синтетическое — впиши в ALLOWED. Реальное — НЕ коммить: "
+                    f"переделай коммит до пуша (историю до базовой точки не трогаем).")
+    print(f"  история: {scanned} новых коммит(ов) после базовой точки просканировано")
+
+
 def test_the_scan_actually_catches_a_real_looking_value():
     """A guard whose regexes silently stopped matching would pass forever.
 
@@ -231,6 +285,7 @@ def main():
     print("персональные данные в трекнутых файлах:")
     test_no_undeclared_identity_shaped_value_is_tracked()
     test_the_scan_actually_catches_a_real_looking_value()
+    test_no_identity_shaped_value_enters_the_history_after_the_baseline()
     if failures:
         print("\nFAILED:")
         for f in failures:

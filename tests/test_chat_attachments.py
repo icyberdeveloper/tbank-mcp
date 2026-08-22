@@ -438,6 +438,44 @@ def test_an_existing_file_is_not_silently_overwritten():
     check(open(path, "rb").read() == PDF, "overwrite=True did not replace the bytes")
 
 
+def test_a_save_to_symlink_cannot_redirect_the_write():
+    """save_to that is a symlink must not be followed.
+
+    The write uses O_NOFOLLOW so a symlink at the destination is refused — but the
+    guard is only real if the path is NOT pre-resolved. os.path.realpath() followed
+    the symlink's final component, so O_NOFOLLOW then guarded the RESOLVED target
+    and the symlink write went through: point save_to at a link to ~/.ssh/authorized_keys
+    and the download lands there. With os.path.abspath() the final component stays a
+    symlink and O_NOFOLLOW refuses it.
+    """
+    import tempfile
+    d = tempfile.mkdtemp(prefix="tbank-symlink-")
+    secret = os.path.join(d, "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("ДО АТАКИ")
+    link = os.path.join(d, "innocent.pdf")
+    os.symlink(secret, link)
+
+    # overwrite=True is the vector: with realpath the symlink's final component is
+    # resolved to secret.txt, O_NOFOLLOW then guards that (a regular file, not a
+    # link) and O_TRUNC clobbers it. With abspath the final component stays the
+    # symlink and O_NOFOLLOW refuses. (Without overwrite, O_EXCL would refuse the
+    # already-existing target for the wrong reason and hide the real bug.)
+    out = run(server.messenger_file, FileSession(PDF, "x.pdf"),
+              "CONV1", "FID", save_to=link, overwrite=True)
+    check(open(secret).read() == "ДО АТАКИ",
+          f"the symlink target was overwritten — O_NOFOLLOW was defeated: {out!r}")
+    check("Сохранён:" not in out or saved_path(out) != secret,
+          f"a symlinked save_to must not resolve onto its target: {out!r}")
+
+    # And the source of the fix, so it cannot regress to realpath silently.
+    import inspect
+    src = inspect.getsource(server.messenger_file)
+    check("os.path.realpath(os.path.expanduser(save_to))" not in src,
+          "realpath re-introduces the symlink-follow: use abspath")
+    print("  save_to symlink: refused, target intact, no realpath")
+
+
 def test_any_format_is_just_a_file():
     """No sniffing, no per-format branch: an image, a zip and an unknown blob all
     take the same path through the tool."""
@@ -450,6 +488,39 @@ def test_any_format_is_just_a_file():
         check(os.path.exists(path) and open(path, "rb").read() == blob,
               f"{name}: bytes differ on disk")
         check("СОДЕРЖИМОЕ" not in out, f"{name}: the tool tried to render it")
+
+
+def test_paging_past_the_first_bank_page_names_the_real_cursor():
+    """The tool sliced one bank page locally and, at the oldest message, said
+    «это самые старые» — a dead end that hid the rest of a long chat. The client
+    exposes a real cursor (direction=before, messageId); the tool now (a) forwards
+    before_id to it and (b) at the page edge names the before_id to go further back."""
+    seen = {}
+
+    class S(FileSession):
+        def messenger_messages(self, conversation_id, direction="before",
+                               message_id="", *a, **kw):
+            seen["message_id"] = message_id
+            return [{"id": "old", "messageType": "text",
+                     "timestamp": "2026-08-04T10:00:00.000Z",
+                     "author": {"name": "Михаил", "role": "manager"},
+                     "content": {"text": "первое"}},
+                    {"id": "new", "messageType": "text",
+                     "timestamp": "2026-08-04T12:00:00.000Z",
+                     "author": {"name": "Михаил", "role": "manager"},
+                     "content": {"text": "второе"}}]
+
+    # (a) before_id must reach the client as its cursor.
+    run(server.messenger_messages, S(b""), "CONV1", before_id="cursor-42")
+    check(seen.get("message_id") == "cursor-42",
+          f"before_id was not forwarded to the bank cursor: {seen!r}")
+
+    # (b) at the край the hint must name before_id=<oldest id>, not a dead end.
+    out = run(server.messenger_messages, S(b""), "CONV1")
+    check('before_id="old"' in out,
+          f"page-edge hint must name the oldest message's id as the cursor: {out!r}")
+    check("самые старые" not in out,
+          f"the dead-end «это самые старые» phrasing must be gone: {out!r}")
 
 
 def main():
@@ -471,7 +542,9 @@ def main():
     test_two_documents_whose_names_differ_late_do_not_share_one_file()
     test_the_fallback_name_cannot_collide_either()
     test_an_existing_file_is_not_silently_overwritten()
+    test_a_save_to_symlink_cannot_redirect_the_write()
     test_any_format_is_just_a_file()
+    test_paging_past_the_first_bank_page_names_the_real_cursor()
     if failures:
         print("\nFAILED:")
         for f in failures:

@@ -236,6 +236,94 @@ _PAYMENT_CONFIRMATION_CODES = {
 _LIVE_QUERY = {"sessionid", "wuid"}
 _LIVE_HEADERS = {"authorization", "cookie"}
 
+# The rail front answers on two names. Both resolve, both serve the bootstrap and
+# both accept the same cookie, so every check for «is this the rail host» has to
+# match either — a single-name check would silently stop authorising the moment a
+# template used the other spelling.
+_RAIL_HOSTS = ("trains.t-bank-app.ru", "trains.tbank.ru")
+
+
+def _is_rail(host: str) -> bool:
+    return any(h in (host or "") for h in _RAIL_HOSTS)
+
+
+def _tpay_id_headers(path: str, session_id: str, product_request_id: str) -> dict:
+    """The id headers each tpay endpoint carries, verified against the capture.
+
+    They are NOT uniform, which is the trap: /status keys off the PRODUCT request
+    id, while /account and /pay key off the SESSION id — and both spell the primary
+    header differently (`T-Request-Id` vs `T-Session-Id`). The old code sent
+    `T-Session-Id=sessionId` on every call, so /status went out with the wrong
+    header AND the wrong value. `session` and `token` POSTs carry the id in the
+    BODY, not a header, so they get nothing here."""
+    leaf = path.strip("/").split("/")[0].split("?")[0]
+    if leaf == "status":
+        return {"T-Request-Id": product_request_id, "X-Request-Id": product_request_id}
+    if leaf in ("account", "pay"):
+        return {"T-Session-Id": session_id, "X-Request-Id": session_id}
+    return {}
+
+
+def _cookie_value(cookie: str, name: str) -> str:
+    """One cookie's value out of a `k=v; k=v` header, or ''."""
+    for part in (cookie or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == name:
+            return v
+    return ""
+
+
+# ---- opaque handles -------------------------------------------------------
+# Rail ordering needs six values threaded across three calls: origin, destination,
+# trainNumber, departureDate and trainSearchId to list the cars, then carSearchId
+# and a segmentId that exist ONLY in that car listing. Printing all six and asking
+# the agent to carry them is how ids get crossed — and `trainSearchId` and
+# `carSearchId` look alike, so the mix-up is silent and the booking just fails.
+#
+# Instead each step hands out ONE token that carries its own tuple. Nothing is
+# stored server-side: the token IS the data, so it survives a restart and cannot
+# go stale against a cache that no longer has it. The kind prefix means a seat
+# handle can never be spent where a train handle is expected.
+
+def pack_ref(kind: str, payload: dict) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                     sort_keys=True).encode("utf-8")
+    return f"{kind}_" + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+# Which tool re-mints an opaque handle of each kind. A BAD_REF that only says
+# «получи новый» leaves the agent nowhere — the token is opaque, so it cannot read
+# which call produced it. Naming the tool is the whole point of the diagnosis.
+_REF_REISSUE = {"train": "train_search(origin, destination, date)"}
+
+
+def _reissue_hint(kind: str) -> str:
+    tool = _REF_REISSUE.get(kind)
+    return f" — получи новый через {tool}" if tool else " — получи новый"
+
+
+def unpack_ref(kind: str, token: str) -> dict:
+    """Decode a handle, or raise BAD_REF naming what to call again.
+
+    A token is opaque to the agent, so a wrong one cannot be diagnosed by reading
+    it; the error has to say which tool re-mints it, or the agent has no move."""
+    tok = str(token or "").strip()
+    prefix = f"{kind}_"
+    if not tok.startswith(prefix):
+        raise TbankApiError(
+            "BAD_REF", f"ожидался идентификатор вида {kind}_…, получено "
+                       f"{_excerpt(tok, 40) or 'пусто'}{_reissue_hint(kind)}")
+    body = tok[len(prefix):]
+    try:
+        pad = "=" * (-len(body) % 4)
+        data = json.loads(base64.urlsafe_b64decode(body + pad).decode("utf-8"))
+    except Exception:
+        raise TbankApiError(
+            "BAD_REF", f"идентификатор {kind} испорчен{_reissue_hint(kind)}")
+    if not isinstance(data, dict):
+        raise TbankApiError("BAD_REF", f"идентификатор {kind} испорчен{_reissue_hint(kind)}")
+    return data
+
 
 def delivery_eta(nearest: dict | None, now=None) -> tuple[float | None, str]:
     """A store's nearest delivery slot as (minutes_until_it_lands, human_label).
@@ -368,6 +456,7 @@ _HOST_ACCEPT = {
     "www.tbank.ru": "*/*",
     "webview.t-bank-app.ru": "*/*",
     "trains.t-bank-app.ru": "*/*",
+    "trains.tbank.ru": "*/*",
 }
 # Paths whose host says one thing and whose own capture says another: the lifestyle
 # superapp shelf is served by the same host as Город but answers the native default.
@@ -468,14 +557,56 @@ def _next_step_hint(resp: dict) -> str:
     dump the raw JSON instead, so the normal otp → password hop surfaced to the
     agent as «API error (NO_CODE): {…}» with the answer inside the blob."""
     step = str((resp or {}).get("step", "") or "")
+    if step == "password":
+        # The password must NOT travel through the agent or the chat — login()
+        # and the README both say so. confirm_password exists for login_cli.py,
+        # which reads the password from a terminal the model never sees. Telling
+        # the agent «Вызови confirm_password(<пароль>)» here invited exactly the
+        # leak the rest of the flow is built to avoid.
+        return ("Следующий шаг — password. Пароль вводится НЕ через агента: "
+                "запусти login_cli.py в своём терминале.")
     tool = {"otp": "confirm_otp(<код из СМС>)",
-            "password": "confirm_password(<пароль от аккаунта>)",
             "pin": "confirm_pin(<PIN приложения>)"}.get(step)
     if tool:
         return f"Следующий шаг — {step}. Вызови {tool}."
     return (f"Следующий шаг — '{step or 'неизвестен'}'. Подходящий тул: confirm_otp / "
-            f"confirm_password / confirm_pin. Ответ: "
+            f"confirm_pin; пароль — только через login_cli.py, не через чат. Ответ: "
             f"{json.dumps(resp, ensure_ascii=False)[:200]}")
+
+
+def poll_until_ready(probe, ready, *, timeout_ms: int, interval_ms: int):
+    """Call `probe` until `ready(result)`, then return (result, elapsed_ms).
+
+    Returns (None, elapsed_ms) if the deadline passes first.
+
+    Shared by every wait-for-a-remote-job in this codebase — the grocery checkout,
+    the rail refund, the flight booking and the T-Pay gateway. They differ only in
+    their deadline and interval, which are per-caller constants, so a second copy
+    of the loop would only be a second place to get the two points below wrong.
+
+    Two things this exists to get right, both of which the inline loop got wrong:
+
+    * The deadline is WALL CLOCK. The old loop added up its own sleeps, ignoring the
+      probe itself — and each probe is a real in-page fetch bounded by
+      FETCH_TIMEOUT_MS (30 s). Two hung fetches and a "20 second" wait had already
+      run more than a minute, with the caller, who is mid-checkout, told nothing.
+    * The successful probe's RESULT comes back. The loop used to discard it and the
+      caller reissued the identical request — an extra browser round trip on the
+      money path, and a window in which the second answer can differ from the one
+      that satisfied the check."""
+    started = time.monotonic()
+    deadline = started + timeout_ms / 1000.0
+    while True:
+        try:
+            result = probe()
+            ok = bool(ready(result))
+        except Exception:                                    # noqa: BLE001
+            result, ok = None, False
+        if ok:
+            return result, int((time.monotonic() - started) * 1000)
+        if time.monotonic() >= deadline:
+            return None, int((time.monotonic() - started) * 1000)
+        time.sleep(interval_ms / 1000.0)
 
 
 def _wait_for_propagation(probe, *, timeout_s: float = 8.0, interval_s: float = 0.3) -> None:
@@ -1156,6 +1287,24 @@ class MobileSession:
             params[tpl["session_param"]] = self.mobile_sessionid
         host = tpl.get("host") or self.base_url
         path = path_override or tpl["path"]
+        # A path_override is built by interpolating an id into a path, and several
+        # of those ids come straight from a tool argument (order_id, hotel_id,
+        # booking_id, …). A value like "../../../v1/sign_out" walks OUT of the
+        # intended endpoint and turns a read into an arbitrary POST on the bank
+        # host, carrying the Bearer and rail cookie — measured, not hypothetical.
+        # Per-site _safe_id catches the segment; this is the last-line barrier that
+        # a future call site cannot forget: the ASSEMBLED override must stay inside
+        # one path (no traversal, no query/fragment smuggling). Templates' own
+        # paths are trusted and go through tpl["path"], not here.
+        if path_override is not None:
+            bad = ("..", "//") + tuple("?#")
+            if path_override != "/" and (
+                    not path_override.startswith("/")
+                    or any(t in path_override for t in bad)
+                    or "%2f" in path_override.lower()
+                    or "%2e" in path_override.lower()):
+                raise TbankApiError(
+                    "BAD_PATH", f"недопустимый путь запроса: {path_override!r}")
         # wuid is the WEB portal's device identifier. It went on every request to
         # every host; the app sends it only to www.tbank.ru, and only under
         # /api/common/ (never on the /api/supreme/lifestyle/* checkout paths). On a
@@ -1200,30 +1349,82 @@ class MobileSession:
         cookie = self._cookie_for(host)
         if cookie:
             headers["Cookie"] = cookie
+        # The rail front stamps every call with Travelsessionid, and its value is
+        # the _T_travel_session_id cookie the bootstrap just handed us. Derived
+        # here from the cookie we are already sending rather than stored twice,
+        # so it cannot drift out of step with a re-minted cookie.
+        if _is_rail(host):
+            tsid = _cookie_value(cookie, "_T_travel_session_id")
+            if tsid:
+                headers.setdefault("Travelsessionid", tsid)
         url = f"{host.rstrip('/')}/{path.lstrip('/')}"
         method = (tpl.get("method") or "GET").upper()
-        if method == "POST":
-            post_body = body
-            if post_body is None and tpl.get("body"):
-                raw = tpl["body"]
-                try:
-                    post_body = json.loads(raw) if isinstance(raw, str) else raw
-                except json.JSONDecodeError:
-                    post_body = raw
-            if tpl.get("form"):
-                # A few endpoints (payment_commission) take
-                # application/x-www-form-urlencoded, not JSON — posting JSON there
-                # returns INVALID_REQUEST_DATA. Dict values are JSON-encoded fields.
-                data = {k: (json.dumps(v, ensure_ascii=False)
-                            if isinstance(v, (dict, list)) else v)
-                        for k, v in (post_body or {}).items()}
-                r = self._http.post(url, params=params, data=data, headers=headers, timeout=30)
-            else:
-                r = self._http.post(url, params=params, json=post_body, headers=headers, timeout=30)
-        elif method == "PUT":
-            r = self._http.put(url, params=params, headers=headers, timeout=30)
-        else:
-            r = self._http.get(url, params=params, headers=headers, timeout=30)
+        post_body = body
+        if method == "POST" and post_body is None and tpl.get("body"):
+            raw = tpl["body"]
+            try:
+                post_body = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                post_body = raw
+
+        def send():
+            if method == "POST":
+                if tpl.get("form"):
+                    # A few endpoints (payment_commission) take
+                    # application/x-www-form-urlencoded, not JSON — posting JSON
+                    # there returns INVALID_REQUEST_DATA. Dict values are
+                    # JSON-encoded fields.
+                    data = {k: (json.dumps(v, ensure_ascii=False)
+                                if isinstance(v, (dict, list)) else v)
+                            for k, v in (post_body or {}).items()}
+                    return self._http.post(url, params=params, data=data,
+                                           headers=headers, timeout=30)
+                return self._http.post(url, params=params, json=post_body,
+                                       headers=headers, timeout=30)
+            if method == "PUT":
+                return self._http.put(url, params=params, headers=headers, timeout=30)
+            return self._http.get(url, params=params, headers=headers, timeout=30)
+
+        r = send()
+        # A session-validating endpoint answers 403 once the sessionid's CLIENT
+        # window (~11 min) has closed, while the Bearer is still good for hours —
+        # which is why it reads as a random failure. Measured: travel/checkout/
+        # accounts answered 403 with an EMPTY body, and the same call succeeded
+        # immediately after raising the level.
+        #
+        # Which endpoints check is not knowable by inspection, and a list of them
+        # is a guess that rots. So the 403 itself is the signal: raise the level
+        # once and send again. The flag stops the recursion — ensure_client_session
+        # pings through this same method.
+        if (getattr(r, "status_code", None) == 403
+                and tpl.get("session_param")
+                and not getattr(self, "_raising_level", False)):
+            self._raising_level = True
+            try:
+                if self.ensure_client_session() == "CLIENT":
+                    params[tpl["session_param"]] = self.mobile_sessionid
+                    r = send()
+            except TbankApiError:
+                pass                      # keep the original 403 for the caller
+            finally:
+                self._raising_level = False
+        # The rail cookie dies with the mobile session, not on the clock. Measured:
+        # a cookie 20 minutes old — well inside TRAINS_TTL — answered 401 on
+        # /api/orders/{id}, and a re-mint fixed it immediately. Any fixed TTL is a
+        # guess about someone else's session, so the 401 itself is the signal:
+        # drop the cookie, mint a fresh one and send again, ONCE.
+        # Host first: everything else here is rail-only, and probing a response
+        # object for a status code on hosts this can never apply to is both wasted
+        # and a needless assumption about what the transport handed back.
+        if _is_rail(host) and getattr(r, "status_code", None) in (401, 403):
+            self.trains_cookie, self.trains_cookie_at = "", 0.0
+            fresh = self._cookie_for(host)
+            if fresh and fresh != cookie:
+                headers["Cookie"] = fresh
+                tsid = _cookie_value(fresh, "_T_travel_session_id")
+                if tsid:
+                    headers["Travelsessionid"] = tsid
+                r = send()
         if return_response:
             # The caller wants the response itself, not a parsed body: a download
             # whose FILENAME lives in the headers, not in the bytes. Status handling
@@ -1447,7 +1648,7 @@ class MobileSession:
             # Minted on demand from the access_token via issueTokenBySSO.
             self._ensure_tmsg()
             return f"tmsgSessionID={self.tmsg_session_id}" if self.tmsg_session_id else ""
-        if "trains.t-bank-app.ru" in host:
+        if _is_rail(host):
             self._ensure_trains()
             return self.trains_cookie
         if "webview.t-bank-app.ru" in host:
@@ -1474,6 +1675,213 @@ class MobileSession:
         every other host mid-flight."""
         if self.trains_cookie and time.time() - self.trains_cookie_at < self.TRAINS_TTL:
             return
+        with self._fresh_jar() as jar:
+            jar.get("https://trains.t-bank-app.ru/",
+                    params={"iswebview": "true", "os": "ios", "language": "ru",
+                            "appName": self.app_name, "appVersion": self.app_version},
+                    headers={"Authorization": "Bearer " + self.access_token,
+                             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                             "User-Agent": self._mobile_ua() or "okhttp/4.12.0"},
+                    timeout=30, allow_redirects=True)
+            got = jar.cookies.get_dict()
+        wanted = [f"{k}={v}" for k, v in got.items()
+                  if k in ("sessionID", "SSO_ID", "_T_travel_session_id",
+                           "SSO_ID_TOKEN", "SSO_VALIDATION")]
+        if wanted:
+            self.trains_cookie = "; ".join(wanted)
+            self.trains_cookie_at = time.time()
+            self._persist()
+
+    # The tpay webview's viewport, which it reports as part of the payment
+    # fingerprint. Not a secret and not a device id — the anti-fraud side wants a
+    # plausible, STABLE pair, and a value that changed per call would look worse
+    # than one that does not move.
+    TPAY_VIEWPORT = (420, 912)
+    TPAY_THEME = 17
+    TPAY_SSO_CLIENT = "tinkoff-pay-web"
+    # The tpay flow runs in a WEBVIEW, and every one of its requests carries the
+    # webview's own Safari-style UA — NOT the native app UA (_mobile_ua()). Sending
+    # the native one is a divergence the anti-fraud side can see. Taken verbatim
+    # from the capture; the iOS token here is WebKit's, unrelated to _IOS_VERSION.
+    TPAY_WEBVIEW_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) TCSMB")
+    # Both waits are MEASURED off the captured checkout, not picked:
+    #   /account  answered NEW once and ACCOUNT ~1 s later, so a second of slack
+    #             over that is generous and a long deadline buys nothing;
+    #   /pay      was polled once a second and settled on the third poll.
+    # The ceilings are what the gateway is allowed to take before we stop calling
+    # the outcome known — past them the answer is «unknown», never «failed».
+    TPAY_ACCOUNT_TIMEOUT_MS = 20_000
+    TPAY_PAY_TIMEOUT_MS = 90_000
+    TPAY_POLL_INTERVAL_MS = 1_000
+
+    def tpay_pay(self, payment_url: str, card_id: str = "",
+                 dry_run: bool = False) -> dict:
+        """Pay a tpay checkout URL headlessly. REAL MONEY unless dry_run.
+
+        `orders/pay` on the rail host hands back a webview URL instead of charging
+        anything, and this is what the webview does behind the glass:
+
+            INIT_TPW              → sessionId + state
+            id.tbank.ru/authorize → an SSO code (prompt=none, no interaction)
+            TOKEN_TPW             → the session becomes authenticated
+            /account              → the cards and accounts that may pay
+            PAY_TPW + poll /pay   → the charge
+
+        `dry_run` stops after /account and returns the payment methods. That is
+        deliberate and it is the ONLY way to exercise this bridge without spending:
+        every step except the last is free, so a broken SSO leg or a stale session
+        surfaces before any money is at risk.
+
+        Runs in an ISOLATED jar. The gateway sets its own tpw_* cookies and keys
+        the rest of the flow off them; minting those inside the shared jar would
+        put a payment session on every other host's requests."""
+        if not self.sso_login_cookie:
+            raise TbankApiError(
+                "NO_SSO_SESSION",
+                "нет SSO_SESSION — оплатить нельзя; выполни login(phone) + confirm_otp(otp)")
+        parsed = urlparse(payment_url)
+        segments = [p for p in (parsed.path or "").split("/") if p]
+        if not parsed.scheme or not segments:
+            raise TbankApiError(
+                "BAD_PAYMENT_URL",
+                f"не похоже на ссылку оплаты: {_excerpt(payment_url, 60) or 'пусто'}")
+        product_request_id = segments[0]
+        base = f"{parsed.scheme}://{parsed.netloc}"
+
+        with self._fresh_jar() as jar:
+            width, height = self.TPAY_VIEWPORT
+            ua = self.TPAY_WEBVIEW_UA
+            fingerprint = {"userAgent": ua,
+                           "screen_width": width, "screen_height": height,
+                           "os": "iOS" if self.platform == "ios" else "Android"}
+            head = {"Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json", "Origin": base,
+                    "User-Agent": ua}
+
+            def api(method: str, path: str, *, body=None, session_id: str = ""):
+                h = dict(head)
+                # Per-endpoint id headers — /status keys off productRequestId, the
+                # rest off session_id, spelled differently. See _tpay_id_headers.
+                if session_id:
+                    h.update(_tpay_id_headers(path, session_id, product_request_id))
+                url = f"{base}/api/v2/tpayid/{path}"
+                r = (jar.post(url, json=body, headers=h, timeout=30) if method == "POST"
+                     else jar.get(url, headers=h, timeout=30))
+                # `token` answers 200 with a ZERO-LENGTH body — the result of that call
+                # is the cookies it sets, not JSON. _unwrap treats an unparseable 200 as
+                # an unknown outcome and raises, which would abort the flow one step
+                # before the session is usable.
+                if not (r.content or b"").strip():
+                    r.raise_for_status()
+                    return {}
+                return self._unwrap(r)
+
+            init = api("POST", "session", body={
+                "type": "INIT_TPW", "productRequestId": product_request_id,
+                "productId": "tpay", "fingerprint": fingerprint,
+                "scenario": "web", "theme": self.TPAY_THEME}) or {}
+            session_id = str(init.get("sessionId") or "")
+            state = str(init.get("state") or "")
+            if not session_id or not state:
+                # _excerpt, not a bare slice: it says how much was left out, so a
+                # diagnosis is not made from a body that merely LOOKS complete.
+                raise TbankApiError(
+                    "TPAY_NO_SESSION",
+                    "INIT_TPW не дал сессию: "
+                    + _excerpt(json.dumps(init, ensure_ascii=False), 300))
+
+            code = self._tpay_sso_code(jar, state, payment_url)
+            api("POST", "token", body={"code": code, "state": state,
+                                       "redirectUrl": payment_url,
+                                       "ssoClientId": self.TPAY_SSO_CLIENT})
+            api("POST", "session", body={"type": "TOKEN_TPW", "sessionId": session_id,
+                                         "fingerprint": fingerprint})
+            # ACCOUNT_TPW tells the gateway to POPULATE the payment methods. Without
+            # it /account stays status NEW forever and the poll below times out —
+            # AFTER the order already holds a payment timer. Verified in the capture:
+            # TOKEN_TPW → ACCOUNT_TPW → then /account flips NEW → ACCOUNT.
+            api("POST", "session", body={"type": "ACCOUNT_TPW", "sessionId": session_id,
+                                         "fingerprint": fingerprint})
+
+            # /account fills in asynchronously: the first answer is status NEW with no
+            # accounts at all, and reading that as «нечем платить» would be wrong.
+            account, _ = poll_until_ready(
+                lambda: api("GET", "account", session_id=session_id) or {},
+                lambda a: str(a.get("status") or "") != "NEW",
+                timeout_ms=self.TPAY_ACCOUNT_TIMEOUT_MS,
+                interval_ms=self.TPAY_POLL_INTERVAL_MS)
+            if account is None:
+                # Still filling in. Say so rather than presenting an empty list as
+                # «this account cannot pay for anything».
+                raise TbankApiError(
+                    "TPAY_ACCOUNT_TIMEOUT",
+                    "шлюз не успел отдать способы оплаты — повтори вызов")
+            status = api("GET", "status", session_id=session_id) or {}
+            methods = {"accounts": account.get("accounts") or [],
+                       "cards": account.get("cards") or [],
+                       "amount": status.get("amount"),
+                       "brand": (account.get("brandInfo") or {}).get("brandName") or ""}
+            if dry_run:
+                return {"paid": False, "dry_run": True, **methods}
+
+            if not card_id:
+                raise TbankApiError(
+                    "TPAY_NO_CARD",
+                    "не выбрана карта — вызови с dry_run=True, чтобы увидеть список")
+            api("POST", "session", body={"type": "PAY_TPW", "sessionId": session_id,
+                                         "fingerprint": fingerprint, "cardId": card_id})
+            pay, waited = poll_until_ready(
+                lambda: api("GET", "pay", session_id=session_id) or {},
+                lambda p: str(p.get("status") or "") == "PAY",
+                timeout_ms=self.TPAY_PAY_TIMEOUT_MS,
+                interval_ms=self.TPAY_POLL_INTERVAL_MS)
+            if pay is None:
+                # The charge was submitted and never resolved. UNKNOWN, not failed:
+                # the caller must treat it as «money may have moved».
+                return {"paid": False, "result": "UNKNOWN",
+                        "status": f"нет ответа за {waited // 1000} с", **methods}
+            result = str(pay.get("result") or "")
+            return {"paid": result == "SUCCESS", "result": result or "UNKNOWN",
+                    "status": pay.get("status") or "", **methods}
+
+    def _tpay_sso_code(self, jar: requests.Session, state: str,
+                       redirect_uri: str) -> str:
+        """A one-shot OAuth code for the payment gateway, minted silently.
+
+        `prompt=none` means «authorise from the SSO cookie or fail» — no screen,
+        no second factor. The code rides back in the 303's Location, so redirects
+        must NOT be followed: following them spends the code on the gateway page
+        and leaves nothing to read."""
+        params = {"client_id": self.TPAY_SSO_CLIENT, "state": state,
+                  "redirect_uri": redirect_uri, "response_type": "code",
+                  "response_mode": "query", "theme": self.TPAY_SSO_CLIENT,
+                  "prompt": "none"}
+        r = jar.get("https://id.tbank.ru/auth/authorize", params=params,
+                    headers={"Cookie": self.sso_login_cookie,
+                             "Accept": _NATIVE_ACCEPT,
+                             "User-Agent": self._mobile_ua() or "okhttp/4.12.0"},
+                    timeout=30, allow_redirects=False)
+        location = r.headers.get("Location") or ""
+        code = urllib.parse.parse_qs(urlparse(location).query).get("code", [""])[0]
+        if not code:
+            raise TbankApiError(
+                "TPAY_NO_CODE",
+                f"SSO не выдал код для {self.TPAY_SSO_CLIENT} (HTTP {r.status_code}) — "
+                f"сессия могла истечь, попробуй refresh_session()")
+        return code
+
+    def _fresh_jar(self) -> requests.Session:
+        """A requests.Session with this repo's rebuilt CA bundle and NO cookies.
+
+        The bank's hosts serve a Russian Trusted Root chain, so a bare session
+        fails to verify; and an isolated jar is what keeps a host that rewrites
+        cookies for a shared domain from racing every other host mid-flight.
+
+        CLOSE IT — `with self._fresh_jar() as jar:`. Measured, twenty consecutive
+        jars leak no descriptor because refcounting frees each one as it goes out
+        of scope, but that is a CPython implementation detail and this process
+        lives for hours; closing says so instead of relying on it."""
         jar = requests.Session()
         try:
             from . import tls as _tls
@@ -1482,21 +1890,7 @@ class MobileSession:
             jar.verify = _tls.BUNDLE
         except Exception:
             pass
-        jar.get("https://trains.t-bank-app.ru/",
-                params={"iswebview": "true", "os": "ios", "language": "ru",
-                        "appName": self.app_name, "appVersion": self.app_version},
-                headers={"Authorization": "Bearer " + self.access_token,
-                         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                         "User-Agent": self._mobile_ua() or "okhttp/4.12.0"},
-                timeout=30, allow_redirects=True)
-        got = jar.cookies.get_dict()
-        wanted = [f"{k}={v}" for k, v in got.items()
-                  if k in ("sessionID", "SSO_ID", "_T_travel_session_id",
-                           "SSO_ID_TOKEN", "SSO_VALIDATION")]
-        if wanted:
-            self.trains_cookie = "; ".join(wanted)
-            self.trains_cookie_at = time.time()
-            self._persist()
+        return jar
 
     def _ensure_tmsg(self) -> None:
         """Ensure a valid tmsg for messenger. If missing/expired, do a silent
@@ -1534,7 +1928,8 @@ class MobileSession:
         state = str(__import__("uuid").uuid4()).upper()
         params = {"claims": claims, "client_version": self.client_version,
                   "state": state, "redirect_uri": "mobile://", "response_type": "code",
-                  "cpswc": "true", "device_id": self.device_id, "client_id": "gorod-app",
+                  "cpswc": "true", "device_id": self.device_id,
+                  "client_id": self.client_id or "gorod-app",
                   "ccc": "true", "response_mode": "json", "display": "json",
                   "vendor": self.vendor}
         # use a session with the SSO cookies in the jar (so SSO_CONVERSATION_CSRF
@@ -1609,7 +2004,8 @@ class MobileSession:
         state = str(__import__("uuid").uuid4()).upper()
         params = {"claims": claims, "client_version": self.client_version,
                   "state": state, "redirect_uri": "mobile://", "response_type": "code",
-                  "cpswc": "true", "device_id": self.device_id, "client_id": "gorod-app",
+                  "cpswc": "true", "device_id": self.device_id,
+                  "client_id": self.client_id or "gorod-app",
                   "ccc": "true", "response_mode": "json", "display": "json",
                   "vendor": self.vendor}
         # authorize (no SSO_SESSION) — the jar captures SSO_CONVERSATION_CSRF
@@ -1838,12 +2234,6 @@ class MobileSession:
                 f"мессенджер ответил не объектом: {_excerpt(data)}")
         return data
 
-    def messenger_send_message(self, conversation_id: str, body: dict | None = None) -> dict:
-        """POST a message to a conversation (WRITE). Replays the request body or override."""
-        conversation_id = self._safe_id(conversation_id, "conversation_id")
-        return self._messenger_write(body=body,
-            path_override=f"/app/bank/messenger/conversations/{conversation_id}/messages")
-
     def messenger_mark_read(self, conversation_id: str, message_id: str) -> Any:
         """Mark one message read. Its own template, not messenger_base: the captured
         request is a PUT with markRead's own vendor content types, while
@@ -1930,23 +2320,6 @@ class MobileSession:
         if account_id:
             ov["accounts"] = account_id
         return self._call_read("operations_histogram", overrides=ov)
-
-    def list_regular_payments(self, activity_types: str = "payment") -> list[dict]:
-        d = self._call_read("list_regular_payments", overrides={"activityTypes": activity_types})
-        return self._as_list(d)
-
-    def active_loans(self) -> list[dict]:
-        return self._as_list(self._call_read("active_loans"))
-
-    def credit_accounts_list(self) -> list[dict]:
-        return self._as_list(self._call_read("credit_accounts_list"))
-
-    def credit_account_payments(self, account: str) -> list[dict]:
-        return self._as_list(self._call_read("payments_credit_accounts", overrides={"accounts": account}))
-
-    def cashback_summary(self, loyalty_id: str, codes: str = "lifestyle,targetCashback") -> list[dict]:
-        return self._as_list(self._call_read("bonuses_aggregated",
-                                             overrides={"loyaltyId": loyalty_id, "codes": codes}))
 
     def invest_accounts(self) -> list[dict]:
         """The brokerage and InvestBox accounts, unwrapped from payload.accounts.
@@ -2059,18 +2432,6 @@ class MobileSession:
         """POST v1/ping — keep the mobile session alive (unsigned)."""
         return self._call_read("ping")
 
-    def unread_count(self) -> dict:
-        return self._call_read("notification_count")
-
-    def profile_lite(self) -> dict:
-        return self._call_read("profile_own_lite")
-
-    def shopping_favorites(self) -> list[dict]:
-        return self._as_list(self._call_read("shopping_favorites"))
-
-    def shopping_cart(self) -> list[dict]:
-        return self._as_list(self._call_read("shopping_cart"))
-
     # ---- grocery (Город) shopping + checkout + payment (cookie/Bearer, no sig) ----
 
     def grocery_cart_get(self, app_id: str = "", point_id: str = "") -> dict:
@@ -2080,99 +2441,17 @@ class MobileSession:
         ov = {"appId": app_id} if app_id else None
         return self._call_read("grocery_cart_get", overrides=ov)
 
-    def grocery_cart_set(self, body: dict | None = None,
-                         app_id: str = "", point_id: str = "") -> dict:
-        """Set the grocery cart (POST). With body=None this CLEARS the store's cart
-        (goods: []). The delivery block — address with full details, plus areaId for
-        retailers that require it — is resolved by _grocery_delivery."""
-        if body is None:
-            body = {"goods": [], "cartSetMode": "SINGLE_CART",
-                    "delivery": self._grocery_delivery(app_id, point_id)}
-        return self._call_read("grocery_cart_set", body=body,
-                               overrides={"appId": app_id} if app_id else None)
-
-    def grocery_cart_check(self) -> dict:
-        return self._call_read("grocery_cart_check")
-
     def grocery_order_get(self, order_id: str = "", app_id: str = "") -> dict:
         """Look up a grocery order by orderId (GET /api/grocery/order). For
         reconciliation after an UNKNOWN checkout (#10)."""
         ov = {k: v for k, v in (("orderId", order_id), ("appId", app_id)) if v}
         return self._call_read("grocery_order_get", overrides=ov or None)
 
-    def grocery_order_create(self, body: dict | None = None) -> dict:
-        """Create a grocery order (POST, replays the request body or override)."""
-        return self._call_read("grocery_order_create", body=body)
-
-    def grocery_deliveries(self, body: dict | None = None) -> list[dict]:
-        return self._as_list(self._call_read("grocery_deliveries", body=body))
-
-    def grocery_retailers(self) -> list[dict]:
-        return self._as_list(self._call_read("grocery_retailers"))
-
-    def grocery_catalog(self) -> list[dict]:
-        return self._as_list(self._call_read("grocery_catalog"))
-
-    def grocery_categories(self) -> list[dict]:
-        return self._as_list(self._call_read("grocery_categories"))
-
-    def grocery_unseen_orders(self) -> dict:
-        return self._call_read("grocery_unseen_orders")
-
     # (grocery_client_info is defined further down, next to _grocery_delivery — an
     # identical stub used to sit here and was silently shadowed by it, so an edit to
     # this one changed nothing.)
 
     # ---- shopping cart-building (browse products + fill the cart) ----
-
-    def shopping_change_qty(self, body: dict | None = None) -> dict:
-        """POST carts/change-items-quantity — add/remove/change qty of a cart
-        item (the granular cart-fill op). Replays the request body or override."""
-        return self._call_read("shopping_change_qty", body=body)
-
-    def shopping_cart_detail(self, body: dict | None = None) -> dict:
-        """POST carts/cart-detail-info — full cart detail (items, prices, delivery)."""
-        return self._call_read("shopping_cart_detail", body=body)
-
-    def store_products(self) -> list[dict]:
-        """Browse/search store products (to find items to add to the cart)."""
-        return self._as_list(self._call_read("store_products"))
-
-    def store_product(self, product_id: str) -> dict:
-        """Product details (PDP) by id — use before adding to cart."""
-        return self._call_read("store_product",
-            path_override=f"/mybank/api/shopping/mobile/v1/product/{product_id}")
-
-    def store_categories(self) -> list[dict]:
-        """Store categories (browse the catalog)."""
-        return self._as_list(self._call_read("store_categories"))
-
-    def sphere_categories(self) -> list[dict]:
-        """Sphere (Город) categories."""
-        return self._as_list(self._call_read("sphere_categories"))
-
-    def grocery_goods(self, category_id: str = "",
-                      app_id: str = "", point_id: str = "",
-                      page: int = 1) -> list[dict]:
-        """Grocery goods (Город catalog items). Pass category_id to browse a
-        category, page for pagination."""
-        return self._as_list(self._call_read("grocery_goods", overrides={
-            "appId": app_id, "pointId": point_id, "categoryId": category_id,
-            "page": str(page), "count": "50"}))
-
-    def grocery_popular(self) -> list[dict]:
-        """Popular grocery items."""
-        return self._as_list(self._call_read("grocery_popular"))
-
-    def payment_methods(self) -> list[dict]:
-        """Available payment methods for a checkout."""
-        return self._as_list(self._call_read("payment_methods"))
-
-    def payment_gate_pay(self, body: dict | None = None) -> dict:
-        """Pay for a marketplace order (cookie-only, NO signature). MONEY OP.
-        Replays the payment body or uses the override. Default
-        dry_run=False — pass a fresh body (orderId/amount/account) for a new pay."""
-        return self._call_read("payment_gate_pay", body=body)
 
     def payment_commission(self, body: dict | None = None) -> dict:
         """Commission preview (POST /v1/payment_commission), no money moved.
@@ -2188,183 +2467,9 @@ class MobileSession:
         p.setdefault("isUrgentTransfer", "false")
         return self._call_read("payment_commission", body={"payParameters": p})
 
-    def checkout_process_order(self, body: dict | None = None) -> dict:
-        return self._call_read("checkout_process_order", body=body)
-
     # ---- named read tools (each a real, described MCP tool) ----
 
-    def get_requisites(self) -> list[dict]:
-        """Account requisites (account number / corr / bank — for transfers)."""
-        return self._as_list(self._call_read("get_requisites"))
-
-    def subscription_all(self) -> list[dict]:
-        """All subscriptions (recurring services)."""
-        return self._as_list(self._call_read("subscription_all"))
-
-    def subscription_all_bills(self) -> list[dict]:
-        """All subscription bills."""
-        return self._as_list(self._call_read("subscription_all_bills"))
-
-    def account_details(self) -> dict:
-        """Account details (full)."""
-        return self._call_read("account_details")
-
-    def full_debt_amount(self) -> dict:
-        """Full debt amount (credit)."""
-        return self._call_read("full_debt_amount")
-
-    def payment_templates(self) -> list[dict]:
-        """Saved payment templates (favorite recipients)."""
-        return self._as_list(self._call_read("payment_templates"))
-
-    def invoices_to_pay(self) -> list[dict]:
-        """Invoices/money requests to pay."""
-        return self._as_list(self._call_read("invoices_to_pay"))
-
-    def get_invoices(self) -> list[dict]:
-        """Get invoices."""
-        return self._as_list(self._call_read("get_invoices"))
-
-    def my_invoices(self) -> list[dict]:
-        """My invoices (money requests issued)."""
-        return self._as_list(self._call_read("my_invoices"))
-
-    def available_cards(self) -> list[dict]:
-        """Available cards (issuable)."""
-        return self._as_list(self._call_read("available_cards"))
-
-    def statements(self) -> list[dict]:
-        """Account statements."""
-        return self._as_list(self._call_read("statements"))
-
-    def statement_exist(self) -> dict:
-        """Whether a statement exists."""
-        return self._call_read("statement_exist")
-
-    def credit_payment_schedule(self) -> list[dict]:
-        """Credit payment schedule."""
-        return self._as_list(self._call_read("credit_payment_schedule"))
-
-    def credit_rating(self) -> dict:
-        """Credit rating."""
-        return self._call_read("credit_rating")
-
-    def credit_recommendations(self) -> list[dict]:
-        """Credit recommendations."""
-        return self._as_list(self._call_read("credit_recommendations"))
-
-    def manager_info(self) -> dict:
-        """Personal manager info."""
-        return self._call_read("manager_info")
-
-    def bank_info(self) -> dict:
-        """Bank info (branches/contacts)."""
-        return self._call_read("bank_info")
-
-    def autopayments(self) -> list[dict]:
-        """Autopayments."""
-        return self._as_list(self._call_read("autopayments"))
-
-    def sbp_subscriptions(self) -> list[dict]:
-        """SBP (SBP-by-Phone) subscriptions."""
-        return self._as_list(self._call_read("sbp_subscriptions"))
-
-    def providers_compatible(self) -> list[dict]:
-        """Compatible payment providers (for bill payments)."""
-        return self._as_list(self._call_read("providers_compatible"))
-
-    def client_offers(self) -> list[dict]:
-        """Client offers."""
-        return self._as_list(self._call_read("client_offers"))
-
-    def gift_for_recipient(self) -> list[dict]:
-        """Gifts for recipient."""
-        return self._as_list(self._call_read("gift_for_recipient"))
-
-    def finhealth_balance_total(self) -> dict:
-        """Finhealth: total balance metric."""
-        return self._call_read("finhealth_balance_total")
-
-    def finhealth_balance_turnover(self) -> dict:
-        """Finhealth: balance turnover metric."""
-        return self._call_read("finhealth_balance_turnover")
-
-    def finhealth_invest_turnover(self) -> dict:
-        """Finhealth: invest turnover metric."""
-        return self._call_read("finhealth_invest_turnover")
-
-    def p2p_countries(self) -> list[dict]:
-        """P2P transfer countries."""
-        return self._as_list(self._call_read("p2p_countries"))
-
-    def services(self) -> list[dict]:
-        """Connected services."""
-        return self._as_list(self._call_read("services"))
-
-    def invest_pension_profile(self) -> dict:
-        """Invest pension profile."""
-        return self._call_read("invest_pension_profile")
-
-    def investbox_offers(self) -> list[dict]:
-        """InvestBox deposit offers."""
-        return self._as_list(self._call_read("investbox_offers"))
-
-    def investbox_product_yield(self) -> list[dict]:
-        """InvestBox product yield."""
-        return self._as_list(self._call_read("investbox_product_yield"))
-
-    def broker_margin(self) -> dict:
-        """Broker margin attributes."""
-        return self._call_read("broker_margin")
-
-    def invest_offers(self) -> list[dict]:
-        """Invest offers (virtual stock)."""
-        return self._as_list(self._call_read("invest_offers"))
-
-    def bundles_all(self) -> list[dict]:
-        """All bundles (premium service bundles)."""
-        return self._as_list(self._call_read("bundles_all"))
-
     # ---- audit-found extras ----
-
-    def detected_merchant_subscriptions(self) -> list[dict]:
-        """Recurring third-party billing detected from card statements (merchant, price, next payment date)."""
-        return self._as_list(self._call_read("detected_merchant_subscriptions"))
-
-    def user_profile(self) -> dict:
-        """Canonical bank identity profile (name, phone, email, siebel_id)."""
-        return self._call_read("user_profile")
-
-    def broker_portfolio_accounts(self) -> list[dict]:
-        """Brokerage accounts with total amount + expected yield (P&L)."""
-        return self._as_list(self._call_read("broker_portfolio_accounts"))
-
-    def my_homes(self) -> list[dict]:
-        """Linked homes (Мой дом) with address, price, utility providers."""
-        return self._as_list(self._call_read("my_homes"))
-
-    def my_home_activities(self) -> list[dict]:
-        """Per-home utility bills to pay and subscription bills."""
-        return self._as_list(self._call_read("my_home_activities"))
-
-    def my_cars(self) -> list[dict]:
-        """Saved vehicles (make, model, reg number, VIN)."""
-        return self._as_list(self._call_read("my_cars"))
-
-    def payment_shortcuts(self) -> list[dict]:
-        """Payment shortcuts (favorite recipients / autopay deeplinks)."""
-        return self._as_list(self._call_read("payment_shortcuts"))
-
-    def unread_support_requests(self) -> list[dict]:
-        """csc.tbank.ru support/tracker realm — uses a WEBSESS/support session, NOT the
-        mobile session. The mobile Bearer+cookie auth here will likely be REJECTED
-        (401/403). Not wired to any MCP tool / get_data section today (orphan).
-        Capture-verify the support-session auth before exposing it."""
-        return self._as_list(self._call_read("unread_support_requests"))
-
-    def resolve_payment_qr(self, body: dict | None = None) -> dict:
-        """Resolve a QR payload to a payment provider (no money moved)."""
-        return self._call_read("resolve_payment_qr", body=body)
 
     def qr_providers(self, qr: str) -> list[dict]:
         """Ask the bank what a scanned QR means. Read-only, no money.
@@ -2404,41 +2509,9 @@ class MobileSession:
                 f"БИК — это 9 цифр, получено {bik!r}")
         return self._call_read("bank_info", overrides={"bik": digits}) or {}
 
-    def merchant_brand(self) -> list[dict]:
-        """Merchant brand metadata (logos/colors) by merchant id."""
-        return self._as_list(self._call_read("merchant_brand"))
-
-    def money_request_public_page(self) -> list[dict]:
-        """Public share link for a money request."""
-        return self._as_list(self._call_read("money_request_public_page"))
-
-    def finhealth_account_presets(self) -> dict:
-        """Finhealth tracked-account preset (which accounts are in metrics)."""
-        return self._call_read("finhealth_account_presets")
-
-    def get_ip(self) -> dict:
-        """Egress IP of the session (connectivity/geo sanity)."""
-        return self._call_read("get_ip")
-
     def push_unread_count(self) -> dict:
         """Unread push-notification count."""
         return self._call_read("push_unread_count")
-
-    def business_account_info(self) -> list[dict]:
-        """Business account info."""
-        return self._as_list(self._call_read("business_account_info"))
-
-    def shared_resources_owned(self) -> list[dict]:
-        """Shared resources I own."""
-        return self._as_list(self._call_read("shared_resources_owned"))
-
-    def shared_resources(self) -> list[dict]:
-        """Shared resources (accessed)."""
-        return self._as_list(self._call_read("shared_resources"))
-
-    def contact_list(self) -> list[dict]:
-        """Contact list (saved recipients)."""
-        return self._as_list(self._call_read("contact_list"))
 
     def providers_groups(self) -> list[dict]:
         """Payment provider groups — 19 of them live («ЖКХ», «Мобильная связь»,
@@ -2507,26 +2580,6 @@ class MobileSession:
                         "order": pay.get("order", 0)})
         out.sort(key=lambda x: (x["order"], str(x["id"])))
         return out
-
-    def atm_withdrawal_qrs(self) -> list[dict]:
-        """ATM withdrawal QRs."""
-        return self._as_list(self._call_read("atm_withdrawal_qrs"))
-
-    def check_rating(self) -> dict:
-        """Check rating."""
-        return self._call_read("check_rating")
-
-    def credit_collection_info(self) -> dict:
-        """Credit collection info."""
-        return self._call_read("credit_collection_info")
-
-    def active_account_options(self) -> list[dict]:
-        """Active account options."""
-        return self._as_list(self._call_read("active_account_options"))
-
-    def appointment_deliveries(self) -> list[dict]:
-        """Active appointment deliveries."""
-        return self._as_list(self._call_read("appointment_deliveries"))
 
     def grocery_stores(self) -> list[dict]:
         """List available grocery stores for the delivery address."""
@@ -3030,11 +3083,12 @@ class MobileSession:
 
     def spending_categories(self, account_id: str | None, start_ms: int, end_ms: int) -> dict:
         """operations_histogram?groupBy=category, flattened to per-category totals."""
-        ov = {"start": str(start_ms), "end": str(end_ms), "groupBy": "category",
-              "period": "day", "config": "allNotInner", "timeZone": "+03:00"}
-        if account_id:
-            ov["accounts"] = account_id
-        data = self._call_read("operations_histogram", overrides=ov)
+        # Reuse operations_histogram's ONE override builder rather than repeating the
+        # config/timeZone/accounts literals — two copies had already started to drift
+        # (this one hardcoded period="day"), and the request shape must not depend on
+        # which caller assembled it.
+        data = self.operations_histogram(account_id, start_ms, end_ms,
+                                         period="day", group_by="category")
         payload = data.get("payload", data) if isinstance(data, dict) else {}
         total, by_cat = self._histogram_side(payload.get("spending"))
         earned, _ = self._histogram_side(payload.get("earning"))
@@ -4201,14 +4255,6 @@ class MobileSession:
 
     # ---- cards, limits, requisites ---------------------------------------
 
-    def account_cards(self, account_id: str) -> list[dict]:
-        """Cards issued on one account. Each card carries BOTH an `id` and a
-        `ucid` — /v1/limits and /v1/card_credentials key off the **ucid**, while
-        an operation's `card` field holds the **id**. Mixing them up silently
-        returns another card's data."""
-        data = self._call_read("account_cards", overrides={"id": str(account_id)})
-        return data if isinstance(data, list) else []
-
     def cards(self) -> list[dict]:
         """Every card across every account, annotated with its account.
 
@@ -4773,6 +4819,288 @@ class MobileSession:
                 "complete": complete, "batches": batches,
                 "info": first.get("info") or {}}
 
+    # ---- flight booking ----------------------------------------------------
+
+    def flight_preliminary(self, offer_id: str) -> dict:
+        """Re-price one search offer and get the id everything else needs.
+
+        Mandatory, not a preview. `offer_id` is the "{searchId}.{n}" string the
+        search prints; every call after this one — fare rules, baggage, seat maps,
+        the payment itself — takes the bare `uuid` this returns instead, and the
+        two are not interchangeable. It also re-prices: the search number can be
+        stale by the time a human has finished choosing."""
+        return self._call_read("flight_preliminary",
+                               overrides={"uuid": offer_id}, body={}) or {}
+
+    def flight_fare_rules(self, offer_uuid: str) -> dict:
+        return self._call_read("flight_fare_rules",
+                               overrides={"offerId": offer_uuid}) or {}
+
+    def flight_baggage(self, offer_uuid: str) -> dict:
+        return self._call_read("flight_baggage",
+                               overrides={"offerId": offer_uuid}) or {}
+
+    def flight_seatmaps(self, offer_uuid: str) -> dict:
+        return self._call_read("flight_seatmaps",
+                               overrides={"offerId": offer_uuid}) or {}
+
+    def flight_checkin_calc(self, offer_uuid: str) -> dict:
+        """Price of the check-in service for this offer.
+
+        Paid seats ride on it — the captured purchase sends a `seats` block and a
+        `checkin` block together — so a booking with seats owes this on top of the
+        fare. It answers a Logic error when the carrier does not offer it, which
+        is a real «not available», not a failure."""
+        return self._call_read("flight_checkin_calc",
+                               body={"offerId": offer_uuid}) or {}
+
+    def flight_pay(self, body: dict) -> dict:
+        """POST the booking+payment. REAL MONEY — there is no hold step for
+        flights, this call both books and charges.
+
+        Returns the whole envelope, not `payload`. The envelope is where the
+        answer lives: `status` is "Working" while the booking runs and `detachKey`
+        IS the orderId, while `payload` is an empty object until it finishes. The
+        ordinary unwrap would hand back that `{}` and lose both."""
+        r = self._call_read("flight_pay", body=body, return_response=True)
+        return self._envelope(r)
+
+    def flight_pay_result(self) -> dict:
+        """Poll the in-flight payment. Same reason for the raw envelope: "Working"
+        and "Ok" are both HTTP 200 with the state in `status`.
+
+        A 400 here means no payment is in flight for this session — a state
+        answer, not an auth failure."""
+        r = self._call_read("flight_pay_result", return_response=True)
+        return self._envelope(r)
+
+    def flight_documents(self, order_id: str) -> list:
+        data = self._call_read("flight_documents", body={"orderId": order_id})
+        return data if isinstance(data, list) else []
+
+    def flight_document(self, document_id: str, order_id: str) -> bytes:
+        return self._call_read("flight_document",
+                               overrides={"documentId": document_id,
+                                          "orderId": order_id})
+
+    @staticmethod
+    def _envelope(resp: requests.Response) -> dict:
+        """The travel envelope as-is, for the two calls whose state lives OUTSIDE
+        `payload`. Never raises on a non-2xx: the caller decides what a 400 means,
+        and for pay/result it means «nothing in flight», not «broken»."""
+        try:
+            data = resp.json()
+        except ValueError:
+            return {"status": "Unreadable", "http": resp.status_code,
+                    "text": _excerpt(resp.text, 300)}
+        if isinstance(data, dict):
+            data.setdefault("http", resp.status_code)
+            return data
+        return {"status": "Unexpected", "http": resp.status_code, "data": data}
+
+    # ---- rail booking ------------------------------------------------------
+
+    def train_cars(self, origin: str, destination: str, train_number: str,
+                   departure: str, train_search_id: str) -> dict:
+        """Cars and places for one train.
+
+        `train_search_id` comes from the ROOT of the train_search response, not
+        from a segment — and it is NOT the `carSearchId` that ordering needs;
+        that one only exists in THIS response."""
+        return self._call_read("train_cars", body={
+            "origin": origin, "destination": destination,
+            "trainNumber": train_number, "departureDate": departure,
+            "trainSearchId": train_search_id}) or {}
+
+    def train_order_create(self, ways: list, phone: str, email: str) -> dict:
+        """Create the booking. Holds the seats (~15 min) — no money moves here."""
+        return self._call_read("train_order_create", body={
+            "ways": ways, "customer": {"phone": phone, "email": email}}) or {}
+
+    def train_order_pay(self, order_id: str) -> dict:
+        """Hand the order to the payment gateway. Returns {"paymentUrl"} — a tpay
+        webview URL; the money leg is tpay_pay()."""
+        return self._call_read("train_order_pay",
+                               body={"orderId": order_id}) or {}
+
+    def train_order(self, order_id: str) -> dict:
+        return self._call_read("train_order",
+                               path_override=f"/api/orders/{order_id}") or {}
+
+    def train_order_status(self, order_id: str) -> dict:
+        return self._call_read(
+            "train_order_status",
+            path_override=f"/api/orders/{order_id}/status") or {}
+
+    def train_blank_status(self, order_id: str) -> list:
+        """Per-ticket electronic-registration status and isRefundPossible. POST
+        with an EMPTY body, the same shape grocery_order_cancel uses."""
+        data = self._call_read(
+            "train_blank_status",
+            path_override=f"/api/orders/{order_id}/blank-status", body={})
+        return data if isinstance(data, list) else []
+
+    def train_blank(self, order_id: str) -> bytes:
+        return self._call_read("train_blank", overrides={"orderId": order_id})
+
+    def train_contact_info(self) -> dict:
+        """The phone/e-mail the rail host will put on the booking. Doubles as the
+        cheap proof that the minted cookie is an AUTHENTICATED session: anonymous
+        gets nothing back."""
+        return self._call_read("train_contact_info") or {}
+
+    def train_refund_calc(self, order_id: str, ticket_ids: list) -> dict:
+        """What a refund would return, fees already deducted.
+
+        The key is `TicketIds` — capital T. The refund call below spells the same
+        thing `ticketIds`. That disagreement is the API's, not a typo here, and
+        tests/test_travel_booking_bodies.py pins both spellings."""
+        return self._call_read("train_refund_calc", body={
+            "orderId": order_id, "TicketIds": list(ticket_ids)}) or {}
+
+    def train_refund(self, order_id: str, ticket_ids: list) -> dict:
+        """Start the refund. Lowercase `ticketIds` here — see train_refund_calc."""
+        return self._call_read("train_refund", body={
+            "orderId": order_id, "ticketIds": list(ticket_ids)}) or {}
+
+    def train_refund_status(self, operation_id: str) -> dict:
+        """NotStarted → Succeed. `refundedTicketsIds` in the final answer holds
+        NEW ids, not the ones that were sent — matching them up is pointless."""
+        return self._call_read(
+            "train_refund_status",
+            path_override=f"/api/orders/refund/{operation_id}") or {}
+
+    # ---- trips, and what a purchase costs -----------------------------------
+
+    def trips(self) -> list:
+        data = self._call_read("trips") or {}
+        return data.get("trips") or []
+
+    def trip(self, trip_id: str) -> dict:
+        return self._call_read("trip", overrides={"tripId": trip_id}) or {}
+
+    def trip_insurance(self, trip_id: str) -> dict:
+        return self._call_read("trip_insurance",
+                               overrides={"tripId": trip_id}) or {}
+
+    def travel_accounts(self) -> list:
+        data = self._call_read("travel_accounts")
+        return data if isinstance(data, list) else []
+
+    def travel_usable_bonuses(self, account: str, amount: float,
+                              service: str = "AVIA_PAYMENT") -> dict:
+        """How many loyalty bonuses may be burned on this purchase. Not enveloped
+        like the rest of travel — it answers a bare object."""
+        return self._call_read("travel_usable_bonuses", body={
+            "accountNumber": account, "serviceType": service,
+            "operationType": "TRANSFER_TO_CURRENT_ACC",
+            "operationValue": amount}) or {}
+
+    def travel_predict_bonuses(self, amount: float, account: dict) -> dict:
+        """Cashback this purchase would earn. `account` is one entry from
+        travel_accounts() — its loyalty block is what decides the rate.
+
+        An account can carry more than one programme, and the bank answers for the
+        ONE whose code is sent. Picking the highest bonusLimit rather than
+        whichever happened to be first is the choice that matches what the tool
+        claims to show — the cashback this purchase can actually earn — and it is
+        deterministic, which `[0]` on an unordered list is not."""
+        programmes = [p for p in (account.get("loyalty") or []) if isinstance(p, dict)]
+
+        def limit_of(p):
+            try:
+                return float(p.get("bonusLimit") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        loyalty = max(programmes, key=limit_of) if programmes else {}
+        money = account.get("moneyAmount") or {}
+        return self._call_read("travel_predict_bonuses", body={
+            "accountGroup": account.get("accountGroup") or "",
+            "orderSumRub": amount,
+            "cardBalance": {"amount": money.get("value") or 0,
+                            "currency": str((money.get("currency") or {}).get("code") or "643")},
+            "loyaltyInfo": {"loyaltyCode": str(loyalty.get("primeLoyaltyId") or ""),
+                            "partNumber": account.get("partNumber") or ""}}) or {}
+
+    def travel_installment(self, amount: float) -> list:
+        data = self._call_read("travel_installment",
+                               overrides={"price": f"{amount:.2f}"})
+        return data if isinstance(data, list) else []
+
+    def travel_loan_allowance(self) -> bool:
+        data = self._call_read("travel_loan_allowance") or {}
+        return bool(data.get("allowance"))
+
+    # ---- hotels (search only — no capture covers the booking POST) ----------
+
+    def hotel_autocomplete(self, query: str) -> dict:
+        return self._call_read("hotel_autocomplete", body={"input": query}) or {}
+
+    def hotel_search(self, location_id, checkin: str, checkout: str,
+                     adults: int = 2, children: list | None = None) -> dict:
+        """The listing. `isLoadingCompleted` false means the answer is still
+        filling in — the caller must say so rather than present it as the whole
+        result, the same way an aborted flight stream is reported."""
+        return self._call_read("hotel_search", body=self._hotel_query(
+            location_id, checkin, checkout, adults, children)) or {}
+
+    @staticmethod
+    def _hotel_query(location_id, checkin: str, checkout: str, adults: int,
+                     children: list | None) -> dict:
+        """The search body both listing calls share. The poi block is sent with a
+        zero limit: the app asks for landmark COUNTS without the landmarks."""
+        return {"locationId": location_id,
+                "checkinDate": checkin, "checkoutDate": checkout,
+                "guests": {"adultsCount": max(1, int(adults)),
+                           "childrenAge": list(children or [])},
+                "mapFrameInput": {"poiParameters": {
+                    "includePoi": ["landmarks"], "poiLimit": {"landmarks": 0}}}}
+
+    def hotel_static_info(self, hotel_ids: list) -> dict:
+        """{hotelId: {name, stars, location}} for a batch of ids.
+
+        The listing answers with ids and prices only, so without this a search
+        result is a column of numbers. Batched on purpose: one call per hotel
+        would multiply a 15-row page by fifteen."""
+        data = self._call_read("hotel_static_info",
+                               body={"hotelIds": [int(h) for h in hotel_ids]}) or {}
+        return {str(h.get("hotelId")): h for h in (data.get("hotels") or [])
+                if isinstance(h, dict)}
+
+    def hotel_card(self, hotel_id) -> dict:
+        return self._call_read(
+            "hotel_card", path_override=f"/api/v1/hotels/{hotel_id}") or {}
+
+    def hotel_rates(self, hotel_id, checkin: str, checkout: str,
+                    adults: int = 2, children: list | None = None) -> dict:
+        """Tariffs for one hotel: meal, the cancellation ladder, price and
+        `bookHash`. The hash is what a booking would consume — and nothing in any
+        capture shows that call, so it is shown and not used."""
+        return self._call_read(
+            "hotel_rates", path_override=f"/api/v3/hotels/{hotel_id}/rates",
+            body={"filters": [], "checkInDate": checkin, "checkOutDate": checkout,
+                  "guests": [{"adultsCount": max(1, int(adults)),
+                              "childrenAge": list(children or [])}]}) or {}
+
+    def hotel_reviews(self, hotel_id) -> dict:
+        """Generated summary + per-aspect ratings. The summary is often empty —
+        that is a real answer for a hotel with few reviews, not a failure."""
+        out = {}
+        try:
+            out["summary"] = (self._call_read(
+                "hotel_review_summary",
+                path_override=f"/api/v1/review/{hotel_id}/summary")
+                or {}).get("summary") or ""
+        except TbankApiError:
+            out["summary"] = ""
+        try:
+            out["ratings"] = self._call_read(
+                "hotel_review_ratings",
+                path_override=f"/api/v1/review/{hotel_id}/ratings") or {}
+        except TbankApiError:
+            out["ratings"] = {}
+        return out
+
     # ---- marketplace (Шопинг) ---------------------------------------------
 
     def shop_geo(self) -> dict:
@@ -5123,7 +5451,8 @@ class MobileSession:
     # supply — see the docstring).
     _SECTION_ARG = {"providers": "ids", "requisites": "pointer",
                     "statements": "account", "account_details": "id",
-                    "full_debt_amount": "account", "statement_exist": "account"}
+                    "full_debt_amount": "account", "statement_exist": "account",
+                    "sbp_me2me": "pointer"}
 
     # Sections whose endpoint validates the SESSIONID, not just the Bearer. The
     # sessionid's CLIENT window is ~11 minutes, so these fail long before the token
@@ -5174,6 +5503,10 @@ class MobileSession:
             "contacts": "contact_list", "providers": "providers_compatible",
             "cards": "available_cards", "loans": "active_loans",
             "autopayments": "autopayments", "sbp": "sbp_subscriptions",
+            # Where the client's OWN money sits at other banks (SBP me2me pull) —
+            # a different question from transfer_sbp_resolve, which finds where to
+            # send money TO someone.
+            "sbp_me2me": "sbp_me2me", "promocodes": "promocodes",
             "offers": "client_offers", "gifts": "gift_for_recipient",
             "services": "services", "bundles": "bundles_all",
             "manager": "manager_info", "merchant_subs": "detected_merchant_subscriptions",
@@ -5232,6 +5565,12 @@ class MobileSession:
                        if arg_key == "ids" else
                        "Pass the account id from list_accounts()."
                        if arg_key in ("account", "id") else
+                       # Same arg_key as `requisites`, opposite question: this one
+                       # asks where the CLIENT'S OWN money is, so the hint that
+                       # points at transfer_sbp_resolve would send them the wrong way.
+                       "Pass the client's own phone — the answer is the banks where "
+                       "THEY can pull money from, not where to send it."
+                       if section.lower() == "sbp_me2me" else
                        "For a recipient lookup prefer transfer_sbp_resolve(phone), "
                        "which parses the same response; for YOUR OWN account details "
                        "use account_requisites(account_id) — a different endpoint."))

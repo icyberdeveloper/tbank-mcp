@@ -96,7 +96,7 @@ def login(phone):
         srv._session = s
         if not srv._save_session(s):
             return _save_failed()
-        print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
+        print("\n[3/3] Сессия создана.")   # sessionid не печатаем — это секрет
         _success()
         return 0
 
@@ -124,7 +124,7 @@ def login(phone):
     srv._session = s
     if not srv._save_session(s):
         return _save_failed()
-    print(f"\n[3/3] Сессия создана. sessionid={s.mobile_sessionid[:12]}…")
+    print("\n[3/3] Сессия создана.")   # sessionid не печатаем — это секрет
     _success()
     return 0
 

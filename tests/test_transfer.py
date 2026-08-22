@@ -1078,12 +1078,30 @@ def test_a_bill_payment_respects_the_provider_limits():
     print("  pay_bill: the provider's own min/max are enforced before sending")
 
 
+def test_the_app_version_is_frozen_to_the_signed_capture():
+    """APP_VERSION feeds self.app_version, which is part of the SIGNED /v1/pay
+    canonical body — so it must equal the appVersion in transfer.json (the signed
+    capture the byte-exact reproduction below is pinned to). Bumping the constant
+    without a fresh signed-payment capture desyncs the HMAC; this fails FIRST, with
+    a message that says why, instead of leaving a cryptic signature mismatch."""
+    from src.endpoints import APP_VERSION
+    with open(FIXTURE, encoding="utf-8") as fh:
+        captured = (json.load(fh).get("query_static") or {}).get("appVersion")
+    check(APP_VERSION == captured,
+          f"endpoints.APP_VERSION ({APP_VERSION!r}) no longer matches the signed "
+          f"capture transfer.json ({captured!r}). Bumping the app version means "
+          f"re-capturing a real signed /v1/pay at the new version and regenerating "
+          f"transfer.json — it is NOT a one-line edit (see the note at endpoints.py).")
+    print(f"  app version: frozen to the signed capture ({APP_VERSION})")
+
+
 def main():
     print("transfer money path:")
     test_a_bill_payment_is_refused_before_it_is_sent_when_the_fields_are_wrong()
     test_pricing_a_bill_runs_the_real_commission_contract()
     test_a_bill_payment_respects_the_provider_limits()
     test_the_fixture_still_matches_the_capture()
+    test_the_app_version_is_frozen_to_the_signed_capture()
     test_body_matches_the_real_pay_request()
     test_the_pay_request_looks_like_the_device_it_claims_to_be()
     test_the_device_profile_is_configuration_not_a_constant()

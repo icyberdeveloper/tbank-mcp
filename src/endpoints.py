@@ -5,6 +5,17 @@ args (account, start/end, ...) are added at runtime by MobileSession. NO user se
 # The app version string captured across every template below, plus the few
 # spots in client.py/server.py/checkout.py that need it outside a template.
 # One literal, not five copies of it.
+#
+# FROZEN at 7.31.6 ON PURPOSE — do NOT bump without a coordinated re-capture.
+# This value feeds self.app_version (server.py builds the live session with it),
+# and self.app_version is part of the SIGNED /v1/pay canonical body. The byte-exact
+# signature reproduction in tests/test_transfer.py is pinned to the transfer.json
+# capture, which was recorded at 7.31.6 — change this string and the reproduced
+# HMAC no longer matches that capture, with no way to regenerate it short of a fresh
+# signed-payment capture at the new version. Later read-only captures (recipient.json
+# on 7.39.1) run fine against 7.31.6, so the bank accepts it; the freeze is about the
+# signed money path, not about the reads. Bumping = re-capture /v1/pay + regenerate
+# transfer.json, not a one-line edit.
 APP_VERSION = "7.31.6"
 
 BUILTIN_ENDPOINTS = {
@@ -62,21 +73,6 @@ BUILTIN_ENDPOINTS = {
    "platform": "ios"
   }
  },
- "list_regular_payments": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/list_regular_payments_v2",
-  "params": {
-   "appVersion": APP_VERSION,
-   "origin": "mobile,ib5,loyalty,platform",
-   "appName": "mobile",
-   "connectionType": "WiFi",
-   "ccc": "true",
-   "cpswc": "true",
-   "platform": "ios",
-   "inache": "drivetransitt"
-  }
- },
  "active_loans": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -90,21 +86,6 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "origin": "mobile,ib5,loyalty,platform",
    "cpswc": "true"
-  }
- },
- "credit_accounts_list": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/closing_accounts/credit_accounts_list",
-  "params": {
-   "origin": "mobile,ib5,loyalty,platform",
-   "inache": "drivetransitt",
-   "appName": "mobile",
-   "connectionType": "WiFi",
-   "appVersion": APP_VERSION,
-   "cpswc": "true",
-   "ccc": "true",
-   "platform": "ios"
   }
  },
  "payments_credit_accounts": {
@@ -246,26 +227,6 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt"
   }
  },
- "shopping_favorites": {
-  "method": "GET",
-  "host": "https://shopping.t-bank-app.ru",
-  "path": "/api/v1/favorites",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "ios"
-  }
- },
- "shopping_cart": {
-  "method": "POST",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/carts/get-user-carts",
-  "params": {
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
  "get_requisites": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -386,36 +347,6 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true"
   }
  },
- "get_invoices": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/get_invoices",
-  "params": {
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "inache": "drivetransitt",
-   "origin": "mobile,ib5,loyalty,platform",
-   "platform": "ios",
-   "connectionType": "WiFi",
-   "cpswc": "true",
-   "ccc": "true"
-  }
- },
- "my_invoices": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/cm/my_invoices",
-  "params": {
-   "cpswc": "true",
-   "appVersion": APP_VERSION,
-   "connectionType": "WiFi",
-   "appName": "mobile",
-   "platform": "ios",
-   "inache": "drivetransitt",
-   "origin": "mobile,ib5,loyalty,platform",
-   "ccc": "true"
-  }
- },
  "available_cards": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -491,21 +422,6 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform"
   }
  },
- "credit_recommendations": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/credit/recommendations",
-  "params": {
-   "connectionType": "WiFi",
-   "cpswc": "true",
-   "inache": "drivetransitt",
-   "platform": "ios",
-   "appVersion": APP_VERSION,
-   "ccc": "true",
-   "appName": "mobile",
-   "origin": "mobile,ib5,loyalty,platform"
-  }
- },
  "manager_info": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -564,6 +480,42 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform",
    "appName": "mobile",
    "inache": "drivetransitt"
+  }
+ },
+ # ?pointer=<phone>&me2meOnly=true — the banks where THIS phone is registered for
+ # SBP, i.e. where the client can pull their own money from. Not the same question
+ # as transfer_sbp_resolve, which asks where to SEND money to someone else.
+ "sbp_me2me": {
+  "method": "GET",
+  "host": "https://api.t-bank-app.ru",
+  "path": "/v1/get_sbp_cache",
+  "params": {
+   "me2meOnly": "true",
+   "cpswc": "true",
+   "ccc": "true",
+   "connectionType": "WiFi",
+   "platform": "ios",
+   "appVersion": APP_VERSION,
+   "origin": "mobile,ib5,loyalty,platform",
+   "appName": "mobile",
+   "inache": "drivetransitt"
+  }
+ },
+ # POST with an EMPTY body — the client is identified by the session alone.
+ "promocodes": {
+  "method": "POST",
+  "host": "https://lifestyle.t-bank-app.ru",
+  "path": "/api/promocodes",
+  "body": {},
+  "params": {
+   "origin": "mobile,ib5,loyalty,platform",
+   "appName": "mobile",
+   "inache": "drivetransitt",
+   "platform": "ios",
+   "appVersion": APP_VERSION,
+   "cpswc": "true",
+   "ccc": "true",
+   "connectionType": "WiFi"
   }
  },
  "providers_compatible": {
@@ -656,21 +608,6 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi"
   }
  },
- "p2p_countries": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/p2panybank/countries",
-  "params": {
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "inache": "drivetransitt",
-   "origin": "mobile,ib5,loyalty,platform",
-   "platform": "ios",
-   "connectionType": "WiFi",
-   "cpswc": "true",
-   "ccc": "true"
-  }
- },
  "services": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -743,21 +680,6 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "connectionType": "WiFi",
    "platform": "ios",
-   "appVersion": APP_VERSION
-  }
- },
- "invest_offers": {
-  "method": "GET",
-  "host": "https://api-invest-gw.t-bank-app.ru",
-  "path": "/offer/api/v1/instance/virtual-stock",
-  "params": {
-   "connectionType": "WiFi",
-   "ccc": "true",
-   "platform": "ios",
-   "appName": "mobile",
-   "inache": "drivetransitt",
-   "origin": "mobile,ib5,loyalty,platform",
-   "cpswc": "true",
    "appVersion": APP_VERSION
   }
  },
@@ -875,66 +797,6 @@ BUILTIN_ENDPOINTS = {
    "frontendFeatureFlag": "SHAWithSubs"
   }
  },
- "atm_withdrawal_qrs": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/atm_withdrawal_qrs",
-  "params": {
-   "appVersion": APP_VERSION,
-   "connectionType": "WiFi",
-   "ccc": "true",
-   "platform": "ios",
-   "appName": "mobile",
-   "origin": "mobile,ib5,loyalty,platform",
-   "inache": "drivetransitt",
-   "cpswc": "true"
-  }
- },
- "check_rating": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/check_rating",
-  "params": {
-   "appVersion": APP_VERSION,
-   "platform": "ios",
-   "origin": "mobile,ib5,loyalty,platform",
-   "cpswc": "true",
-   "appName": "mobile",
-   "inache": "drivetransitt",
-   "ccc": "true",
-   "connectionType": "WiFi"
-  }
- },
- "credit_collection_info": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/credit/collection_info",
-  "params": {
-   "ccc": "true",
-   "cpswc": "true",
-   "connectionType": "WiFi",
-   "platform": "ios",
-   "appName": "mobile",
-   "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": APP_VERSION,
-   "inache": "drivetransitt"
-  }
- },
- "active_account_options": {
-  "method": "GET",
-  "host": "https://api.t-bank-app.ru",
-  "path": "/v1/active_account_options",
-  "params": {
-   "ccc": "true",
-   "cpswc": "true",
-   "connectionType": "WiFi",
-   "platform": "ios",
-   "appName": "mobile",
-   "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": APP_VERSION,
-   "inache": "drivetransitt"
-  }
- },
  "appointment_deliveries": {
   "method": "GET",
   "host": "https://api.t-bank-app.ru",
@@ -980,21 +842,6 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi"
   }
  },
- "grocery_cart_check": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/grocery/cart/check",
-  "params": {
-   "connectionType": "WiFi",
-   "inache": "drivetransitt",
-   "cpswc": "true",
-   "appVersion": APP_VERSION,
-   "platform": "ios",
-   "ccc": "true",
-   "origin": "mobile,ib5,loyalty,platform",
-   "appName": "mobile"
-  }
- },
  "grocery_order_get": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",
@@ -1008,41 +855,6 @@ BUILTIN_ENDPOINTS = {
    "ccc": "true",
    "cpswc": "true",
    "appVersion": APP_VERSION
-  }
- },
- "grocery_order_create": {
-  "method": "POST",
-  "host": "https://www.tbank.ru",
-  "path": "/api/supreme/lifestyle/api/grocery/order/create",
-  "params": {
-   "appName": "grocery_evo",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- },
- "grocery_deliveries": {
-  "method": "POST",
-  "host": "https://www.tbank.ru",
-  "path": "/api/supreme/lifestyle/api/grocery/deliveries",
-  "params": {
-   "appName": "grocery_evo",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- },
- "grocery_retailers": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/grocery/retailers",
-  "params": {
-   "appVersion": APP_VERSION,
-   "inache": "drivetransitt",
-   "connectionType": "WiFi",
-   "platform": "ios",
-   "origin": "mobile,ib5,loyalty,platform",
-   "ccc": "true",
-   "cpswc": "true",
-   "appName": "mobile"
   }
  },
  "grocery_catalog": {
@@ -1060,36 +872,6 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform"
   }
  },
- "grocery_categories": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/grocery/categories",
-  "params": {
-   "appName": "mobile",
-   "connectionType": "WiFi",
-   "ccc": "true",
-   "cpswc": "true",
-   "origin": "mobile,ib5,loyalty,platform",
-   "appVersion": APP_VERSION,
-   "platform": "ios",
-   "inache": "drivetransitt"
-  }
- },
- "grocery_popular": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/grocery/popular",
-  "params": {
-   "ccc": "true",
-   "platform": "ios",
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "connectionType": "WiFi",
-   "origin": "mobile,ib5,loyalty,platform",
-   "inache": "drivetransitt",
-   "cpswc": "true"
-  }
- },
  "grocery_client_info": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",
@@ -1103,36 +885,6 @@ BUILTIN_ENDPOINTS = {
    "inache": "drivetransitt",
    "cpswc": "true",
    "appVersion": APP_VERSION
-  }
- },
- "grocery_unseen_orders": {
-  "method": "GET",
-  "host": "https://lifestyle.t-bank-app.ru",
-  "path": "/api/orders/unseen/count",
-  "params": {
-   "platform": "ios",
-   "origin": "mobile,ib5,loyalty,platform",
-   "ccc": "true",
-   "inache": "drivetransitt",
-   "appVersion": APP_VERSION,
-   "cpswc": "true",
-   "connectionType": "WiFi",
-   "appName": "mobile"
-  }
- },
- # The WEB payment gate (the grocery Playwright checkout). Pg-Api-System names the
- # calling system and the gate receives it on EVERY captured call — the comment on
- # the mobile sibling below has always said so and named this exact value, but the
- # header was never actually set here.
- "payment_gate_pay": {
-  "method": "POST",
-  "host": "https://www.tbank.ru",
-  "path": "/api/common/pg-api/v1/payment-gate/payments",
-  "params": {
-   "origin": "web,ib5,platform"
-  },
-  "headers": {
-   "Pg-Api-System": "t-grocery-ib"
   }
  },
  "payment_commission": {
@@ -1151,66 +903,6 @@ BUILTIN_ENDPOINTS = {
    "appVersion": APP_VERSION
   }
  },
- "shopping_change_qty": {
-  "method": "POST",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/carts/change-items-quantity",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
- "shopping_cart_detail": {
-  "method": "POST",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/carts/cart-detail-info",
-  "params": {
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
- "store_products": {
-  "method": "GET",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/store-products",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
- "store_product": {
-  "method": "GET",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/product",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
- "store_categories": {
-  "method": "GET",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v4/store-categories",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
- "sphere_categories": {
-  "method": "GET",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v5/sphere/categories",
-  "params": {
-   "appName": "mobile",
-   "platform": "webview_ios",
-   "appVersion": APP_VERSION
-  }
- , "no_base_params": True, "no_bearer": True},
  "grocery_goods": {
   "method": "GET",
   "host": "https://lifestyle.t-bank-app.ru",
@@ -1228,16 +920,6 @@ BUILTIN_ENDPOINTS = {
    "connectionType": "WiFi"
   }
  },
- "payment_methods": {
-  "method": "POST",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v6/payment-methods",
-  "params": {
-   "appVersion": APP_VERSION,
-   "appName": "mobile",
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
  "v1_pay": {
   "method": "POST",
   "host": "https://api.t-bank-app.ru",
@@ -1253,16 +935,6 @@ BUILTIN_ENDPOINTS = {
    "origin": "mobile,ib5,loyalty,platform"
   }
  },
- "checkout_process_order": {
-  "method": "POST",
-  "host": "https://webview.t-bank-app.ru",
-  "path": "/mybank/api/shopping/mobile/v1/checkout/process-order",
-  "params": {
-   "appName": "mobile",
-   "appVersion": APP_VERSION,
-   "platform": "webview_ios"
-  }
- , "no_base_params": True, "no_bearer": True},
  # Shared by conversations / messages / hints / faq (path per call).
  #
  # no_base_params: the app sends the messenger host NOTHING in the query — every
@@ -1313,17 +985,11 @@ BUILTIN_ENDPOINTS = {
 BUILTIN_ENDPOINTS.update({
     "detected_merchant_subscriptions": {"method": "GET", "host": "https://api.t-bank-app.ru", "path": "/subscriptions/merchant/v2/subscriptions", "params": {}},
     "user_profile": {"method": "GET", "host": "https://id.t-bank-app.ru", "path": "/userinfo/userinfo", "params": {"ccc": "true", "cpswc": "true", "client_id": "gorod-app"}},
-    "broker_portfolio_accounts": {"method": "POST", "host": "https://api-invest-gw.t-bank-app.ru", "path": "/invest-portfolio/portfolios/accounts/for-mb", "params": {"withClosingIis": "false", "currency": "RUB"}},
     "my_homes": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/homes", "params": {}},
-    "my_home_activities": {"method": "GET", "host": "https://my-home.tinkoff.ru", "path": "/api/v1/gw/activities", "params": {}},
     "my_cars": {"method": "GET", "host": "https://myauto.t-bank-app.ru", "path": "/api/my-auto/v2/cars/list-light", "params": {"inache": "drivetransitt"}},
     "payment_shortcuts": {"method": "GET", "host": "https://shortcuts.t-bank-app.ru", "path": "/v2/shortcuts", "params": {}},
-    "unread_support_requests": {"method": "GET", "host": "https://csc.tbank.ru", "path": "/app/bank/api/v1/tracker/userRequests/unread", "params": {}},
     "resolve_payment_qr": {"method": "POST", "host": "https://api.t-bank-app.ru", "path": "/providers/providers/qr/resolve", "params": {}},
-    "merchant_brand": {"method": "GET", "host": "https://api.t-bank-app.ru", "path": "/v1/brand_by_merchant", "params": {}},
-    "money_request_public_page": {"method": "GET", "host": "https://api.t-bank-app.ru", "path": "/v1/cm/public_page/money_request", "params": {}},
     "finhealth_account_presets": {"method": "GET", "host": "https://api.t-bank-app.ru", "path": "/finhealth/v2/settings/accounts/presets/default", "params": {}},
-    "get_ip": {"method": "GET", "host": "https://api.tbank.ru", "path": "/v1/get_ip", "params": {}},
     "push_unread_count": {"method": "GET", "host": "https://push-history-api.t-bank-app.ru", "path": "/bank/v3/notifications/unseen/count", "params": {}},
 })
 
@@ -1335,9 +1001,6 @@ BUILTIN_ENDPOINTS.update({
 # hosts take `sessionid`, but the prefill-profile and insurance hosts spell it
 # `sessionId` and 401 on the lowercase form.
 BUILTIN_ENDPOINTS.update({
-    # ---- cards & accounts (items 368/370/374/428) --------------------------
-    "account_cards": {"method": "GET", "host": "https://api.t-bank-app.ru",
-                      "path": "/v1/account_cards", "params": {}},
     # ?ucid=<card ucid> — the card's ucid, NOT its id (account_cards gives both)
     "card_limits": {"method": "GET", "host": "https://api.t-bank-app.ru",
                     "path": "/v1/limits", "params": {}},
@@ -1789,6 +1452,147 @@ BUILTIN_ENDPOINTS.update({
 })
 
 
+# ---- flight booking (www.tbank.ru) -----------------------------------------
+# The capture runs this leg under a linked WEB session minted through
+# travel_link_auth_token → session/link/authorize → check_auth. Probed live, it is
+# not needed: every call below answers 200 under the plain mobile session, the
+# same way search does. The bridge is not built.
+#
+# TWO different ids are in play and they are not interchangeable:
+#   offerId  "{searchId}.{n}"  — what flight_search prints
+#   uuid     a bare UUID       — what preliminary RETURNS, and the only id
+#                                fareRules/getBaggage/getSeatMaps/travel_pay take
+# So preliminary is a mandatory step, not an optional preview: it re-prices the
+# offer and hands out the id everything downstream needs. The tools keep the uuid
+# internal so an agent can never send the wrong one.
+BUILTIN_ENDPOINTS.update({
+    # ?uuid={searchId}.{n} — body is an EMPTY object, not the offer.
+    "flight_preliminary": {"method": "POST", "host": "https://www.tbank.ru",
+                           "path": "/api/travel/flight/booking/v2/preliminary",
+                           "params": {"context": "travel"}, **_TRAVEL_MB_POST},
+    "flight_fare_rules": {"method": "GET", "host": "https://www.tbank.ru",
+                          "path": "/api/travel/flight/booking/fareRules",
+                          "params": {"context": "travel"}, **_TRAVEL_MB},
+    "flight_baggage": {"method": "GET", "host": "https://www.tbank.ru",
+                       "path": "/api/travel/flight/getBaggage",
+                       "params": {"context": "travel"}, **_TRAVEL_MB},
+    "flight_seatmaps": {"method": "GET", "host": "https://www.tbank.ru",
+                        "path": "/api/travel/flight/getSeatMaps",
+                        "params": {"context": "travel", "isNative": "true"},
+                        **_TRAVEL_MB},
+    # {"offerId"} -> the price of the check-in service. Seats are sold as part of
+    # it: the captured purchase carries BOTH a `seats` block and a `checkin` block,
+    # and the charge is fare + seats + this — three numbers, not two.
+    "flight_checkin_calc": {"method": "POST", "host": "https://www.tbank.ru",
+                            "path": "/api/travel/checkin/calcPrice",
+                            "params": {"context": "travel"}, **_TRAVEL_MB_POST},
+    # The money call. It BOOKS AND PAYS in one POST — there is no separate hold
+    # step for flights — and answers asynchronously: status "Working" plus a
+    # detachKey that IS the orderId. The result is polled from pay/result.
+    "flight_pay": {"method": "POST", "host": "https://www.tbank.ru",
+                   "path": "/api/prefill/proxy/travel_pay",
+                   "params": {"context": "travel"}, **_TRAVEL_MB_POST},
+    # Polled until status leaves "Working": Ok carries bookingInfo.bookingNumber
+    # (the PNR). A 400 here means no payment is in flight, not an auth failure.
+    "flight_pay_result": {"method": "GET", "host": "https://www.tbank.ru",
+                          "path": "/api/travel/flight/booking/pay/result",
+                          "params": {"context": "travel"}, **_TRAVEL_MB},
+    # {"orderId"} -> the order's documents (itinerary receipts), each with a
+    # document_id fetched separately as PDF bytes.
+    "flight_documents": {"method": "POST", "host": "https://www.tbank.ru",
+                         "path": "/api/travel/flight/v2/documents",
+                         "params": {"context": "travel"}, **_TRAVEL_MB_POST},
+    # PDF bytes. Accept is spelled out: some routes choose their serializer from
+    # it and the session default is application/json.
+    "flight_document": {"method": "GET", "host": "https://www.tbank.ru",
+                        "path": "/api/travel/flight/v1/document",
+                        "params": {}, "raw": True,
+                        "session_param": "sessionId",
+                        "headers": {"X-Travel-Context": "mb", "Accept": "*/*"}},
+})
+
+
+# ---- trips: one feed across flights, rail and hotels ------------------------
+# The cross-vertical answer to «where am I going». Distinct from orders(): that
+# lists ORDERS (including groceries and cinema), this lists TRIPS with their
+# timeline, and a rail order reaches it through train_trip_id.
+BUILTIN_ENDPOINTS.update({
+    "trips": {"method": "GET", "host": "https://www.tbank.ru",
+              "path": "/api/travel/v1/trips/get-trips", "params": {}, **_TRAVEL_MB},
+    "trip": {"method": "GET", "host": "https://www.tbank.ru",
+             "path": "/api/travel/v1/trips/get-trip", "params": {}, **_TRAVEL_MB},
+    "trip_insurance": {"method": "GET", "host": "https://www.tbank.ru",
+                       "path": "/api/travel/v1/trips/get-insurance",
+                       "params": {}, **_TRAVEL_MB},
+})
+
+
+# ---- what a travel purchase actually costs ---------------------------------
+# Four different services answer four different halves of «how should I pay»:
+# which accounts are eligible, how many loyalty bonuses may be burned, how much
+# cashback comes back, and what the installment plans are.
+BUILTIN_ENDPOINTS.update({
+    "travel_accounts": {"method": "GET", "host": "https://www.tbank.ru",
+                        "path": "/api/common/v1/travel/checkout/accounts",
+                        "params": {}, **_TRAVEL_MB},
+    # This one is NOT under /api/travel and takes no travel context header.
+    "travel_usable_bonuses": {
+        "method": "POST", "host": "https://www.tbank.ru",
+        "path": "/api/loyalty/compensation/api/mother-api/v1/get_usable_bonuses",
+        "params": {}, "session_param": "sessionId",
+        "headers": {"Content-Type": "application/json"}},
+    "travel_predict_bonuses": {"method": "POST", "host": "https://www.tbank.ru",
+                               "path": "/api/travel/miles/predictBonusesForOrder",
+                               "params": {"context": "travel"}, **_TRAVEL_MB_POST},
+    "travel_installment": {"method": "GET", "host": "https://www.tbank.ru",
+                           "path": "/api/travel/flight/loan/calcInstallment",
+                           "params": {"context": "travel"}, **_TRAVEL_MB},
+    "travel_loan_allowance": {"method": "GET", "host": "https://www.tbank.ru",
+                              "path": "/api/travel/flight/loan/checkAllowance",
+                              "params": {"context": "travel"}, **_TRAVEL_MB},
+})
+
+
+# ---- hotels (hotels.t-bank-app.ru) -----------------------------------------
+# Plain Bearer, no travel context header, no cookie of its own — the simplest of
+# the three verticals to reach and the only one that cannot be BOUGHT: no capture
+# covers the booking POST, so `bookHash` from the rates call has nowhere to go and
+# guessing that shape is exactly the mistake this repo keeps paying for.
+_HOTELS = "https://hotels.t-bank-app.ru"
+_HOTELS_POST = {"headers": {"Content-Type": "application/json"}}
+
+BUILTIN_ENDPOINTS.update({
+    # {"input": "Сочи"} -> locations[] (locationId for search) + hotels[] (direct hits)
+    "hotel_autocomplete": {"method": "POST", "host": _HOTELS,
+                           "path": "/search-api/search/autocomplete",
+                           "params": {}, **_HOTELS_POST},
+    # The listing. isLoadingCompleted=false means the answer is still filling in —
+    # the same «this is not the whole result» honesty the flight stream needs.
+    "hotel_search": {"method": "POST", "host": _HOTELS,
+                     "path": "/search-api/v2/hotels/map/searchHotelPoints",
+                     "params": {}, **_HOTELS_POST},
+    # {"hotelIds":[…]} -> name, stars, location for a BATCH. The listing carries
+    # only ids, so this is what turns a search result into something readable —
+    # one call for the whole page, not one per hotel.
+    "hotel_static_info": {"method": "POST", "host": _HOTELS,
+                          "path": "/search-api/v1/hotels/getHotelStaticInfo",
+                          "params": {}, **_HOTELS_POST},
+    # path parameterized: /api/v1/hotels/{hotelId}
+    "hotel_card": {"method": "GET", "host": _HOTELS,
+                   "path": "/api/v1/hotels/_", "params": {}},
+    # path parameterized: /api/v3/hotels/{hotelId}/rates — tariffs, meal, the
+    # cancellation ladder and bookHash.
+    "hotel_rates": {"method": "POST", "host": _HOTELS,
+                    "path": "/api/v3/hotels/_/rates", "params": {}, **_HOTELS_POST},
+    # path parameterized: /api/v1/review/{hotelId}/summary — one sentence of
+    # generated prose, and it is often empty.
+    "hotel_review_summary": {"method": "GET", "host": _HOTELS,
+                             "path": "/api/v1/review/_/summary", "params": {}},
+    "hotel_review_ratings": {"method": "GET", "host": _HOTELS,
+                             "path": "/api/v1/review/_/ratings", "params": {}},
+})
+
+
 # ---- rail (trains.t-bank-app.ru) -------------------------------------------
 # This host keeps its own session: GET https://trains.t-bank-app.ru/ with the
 # ordinary mobile Bearer answers with Set-Cookie, and the search API accepts
@@ -1798,20 +1602,119 @@ BUILTIN_ENDPOINTS.update({
 # It takes none of the native query context and no Bearer on the API calls; the
 # cookie is what authorises, and MobileSession._ensure_trains mints it in an
 # ISOLATED jar because the bootstrap response also clears the tbank.ru cookie.
-_RAIL = {"no_base_params": True, "no_bearer": True,
-         "headers": {"Content-Type": "application/json",
-                     "Origin": "https://trains.t-bank-app.ru",
-                     "Referer": "https://trains.t-bank-app.ru/"}}
+#
+# That cookie also authorises the ORDER endpoints, not just search: probed live,
+# `/api/info/contactInfo` answers with the real phone and e-mail and
+# `/api/orders?status[0]=Booked` answers 200. The SSO redirect chain the browser
+# front runs (authorize → hidden-auth-html → session/get_by_token) buys nothing
+# we do not already have.
+#
+# `trains.tbank.ru` is the same host under a second name — both resolve and both
+# serve the bootstrap — so the alias is matched in _cookie_for rather than
+# duplicated here.
+RAIL_HOST = "https://trains.t-bank-app.ru"
+# The rail front's own version, NOT the mobile app's APP_VERSION: these calls go
+# out as trains-front, and that is the pair the host is sent.
+RAIL_APP_NAME = "trains-front"
+RAIL_APP_VERSION = "1.66.0"
+
+
+def _rail(api_method: str, *, post: bool = False, accept: str = "",
+          form: bool = False) -> dict:
+    """Rail request profile. `api_method` is X-Api-Method-Name, which the front
+    sends on EVERY call with a per-endpoint value (orderApiCreateOrder,
+    searchApiSearchTrains, …). It is not decoration — this repo's bug history is
+    largely dropped headers answering 406 — so it is required per template rather
+    than defaulted, and a new rail endpoint cannot be added without naming it.
+
+    Travelsessionid is the third header the front always sends; its value is the
+    `_T_travel_session_id` cookie, so it is injected at call time from the minted
+    cookie (see MobileSession._call_read) instead of being frozen here."""
+    headers = {"X-App-Name": RAIL_APP_NAME, "X-App-Version": RAIL_APP_VERSION,
+               "X-Api-Method-Name": api_method,
+               "Origin": RAIL_HOST, "Referer": RAIL_HOST + "/"}
+    profile = {}
+    if form:
+        # An empty-body POST the app sends as a FORM, not JSON: blank-status carries
+        # Content-Length 0 with application/x-www-form-urlencoded. Posting {} as
+        # JSON sends the two bytes "{}" with application/json — a different request.
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        profile["form"] = True
+    elif post:
+        headers["Content-Type"] = "application/json"
+    if accept:
+        # Some routes pick their response serializer from Accept, and the
+        # session-wide default is application/json — which is not what a PDF
+        # route should be asked for.
+        headers["Accept"] = accept
+    return {"no_base_params": True, "no_bearer": True, "headers": headers, **profile}
+
 
 BUILTIN_ENDPOINTS.update({
     # {"directions":[{"origin","destination","departureDate"}],
     #  "adultsCount","childrenCount"} — origin/destination are NUMERIC station
     # codes (2000000 = Moscow), and nothing in the captures resolves a name to
     # one, so the tools take codes and say where to get them.
-    "train_search": {"method": "POST", "host": "https://trains.t-bank-app.ru",
-                     "path": "/api/search/trains", "params": {}, **_RAIL},
+    "train_search": {"method": "POST", "host": RAIL_HOST,
+                     "path": "/api/search/trains", "params": {},
+                     **_rail("searchApiSearchTrains", post=True)},
     # ?origin=&destination= — which dates are on sale at all.
-    "train_calendar": {"method": "GET", "host": "https://trains.t-bank-app.ru",
+    "train_calendar": {"method": "GET", "host": RAIL_HOST,
                        "path": "/api/search/sale-calendar", "params": {},
-                       "no_base_params": True, "no_bearer": True},
+                       **_rail("searchApiSaleCalendar")},
+    # {"origin","destination","trainNumber","departureDate","trainSearchId"} —
+    # cars, their places and prices. trainSearchId comes from the ROOT of the
+    # train_search response, not from a segment.
+    "train_cars": {"method": "POST", "host": RAIL_HOST,
+                   "path": "/api/search/train/cars", "params": {},
+                   **_rail("searchApiSearchTrainCars", post=True)},
+
+    # --- orders -------------------------------------------------------------
+    # create takes ways[][] with the segment's own id AND carSearchId — which
+    # comes from the train_cars response, not from the search. Confusing the two
+    # is the single easiest way to get a rejected booking.
+    "train_order_create": {"method": "POST", "host": RAIL_HOST,
+                           "path": "/api/orders/create", "params": {},
+                           **_rail("orderApiCreateOrder", post=True)},
+    # {"orderId"} -> {"paymentUrl"} — a tpay webview URL; the money leg lives in
+    # MobileSession.tpay_pay.
+    "train_order_pay": {"method": "POST", "host": RAIL_HOST,
+                        "path": "/api/orders/pay", "params": {},
+                        **_rail("orderApiPayOrder", post=True)},
+    # path is parameterized: /api/orders/{orderId}
+    "train_order": {"method": "GET", "host": RAIL_HOST,
+                    "path": "/api/orders/_", "params": {},
+                    **_rail("orderApiGetOrder")},
+    # /api/orders/{orderId}/status -> {"status","paymentDueInSeconds"}
+    "train_order_status": {"method": "GET", "host": RAIL_HOST,
+                           "path": "/api/orders/_/status", "params": {},
+                           **_rail("orderApiOrderStatus")},
+    # /api/orders/{orderId}/blank-status -> per-ticket erStatus + isRefundPossible.
+    # A POST with an EMPTY body — same shape as grocery_order_cancel.
+    "train_blank_status": {"method": "POST", "host": RAIL_HOST,
+                           "path": "/api/orders/_/blank-status", "params": {},
+                           **_rail("orderApiBlankStatus", form=True)},
+    # ?orderId= -> application/pdf. raw: the bytes are the answer.
+    "train_blank": {"method": "GET", "host": RAIL_HOST,
+                    "path": "/api/orders/documents/blank", "params": {},
+                    "raw": True, **_rail("orderApiGetBlank", accept="*/*")},
+
+    # --- refund -------------------------------------------------------------
+    # The two refund calls DISAGREE on the case of the ticket-id key: calculate
+    # wants "TicketIds", refund wants "ticketIds". Verified in the capture; both
+    # spellings are pinned by tests/test_travel_booking_bodies.py.
+    "train_refund_calc": {"method": "POST", "host": RAIL_HOST,
+                          "path": "/api/orders/refund/calculate", "params": {},
+                          **_rail("orderApiCalculateRefund", post=True)},
+    "train_refund": {"method": "POST", "host": RAIL_HOST,
+                     "path": "/api/orders/refund", "params": {},
+                     **_rail("orderApiRefund", post=True)},
+    # /api/orders/refund/{operationId} -> NotStarted → Succeed, and the ids it
+    # returns in refundedTicketsIds are NEW ones, not the ids that were sent.
+    "train_refund_status": {"method": "GET", "host": RAIL_HOST,
+                            "path": "/api/orders/refund/_", "params": {},
+                            **_rail("orderApiRefundStatus")},
+    "train_contact_info": {"method": "GET", "host": RAIL_HOST,
+                           "path": "/api/info/contactInfo", "params": {},
+                           **_rail("infoContactInfo")},
 })

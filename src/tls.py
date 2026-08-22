@@ -8,8 +8,7 @@ The bank's hosts split in two, by suffix rather than by count:
     changed under us and nothing needed to be done, which is the point).
 
 So the bundle is: **system CAs + the pinned Russian root**, and nothing else, which
-passes every host in `BANK_HOSTS`. That list is derived from the endpoint table
-rather than typed out — see bank_hosts() for what the typed-out version cost.
+passes every bank host the endpoint table names.
 
 WHY THIS FILE WAS REWRITTEN (audit, 2026-07-25). It used to "self-heal": on any TLS
 failure it ran `openssl s_client` against the failing host — with no verification —
@@ -64,27 +63,6 @@ PINNED_ROOTS = {
     "russian-trusted-root-ca.pem":
         "d26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31",
 }
-
-# Hosts reached outside the endpoint table: search posts straight through _http.
-EXTRA_HOSTS = ["search.t-bank-app.ru"]
-
-
-def bank_hosts() -> list[str]:
-    """Every bank host the MCP talks to, DERIVED from the endpoint table.
-
-    It used to be a hand-written list, and it drifted: it named 18 hosts while the
-    code was calling 22, so the four newest (hotels, insurance, cx-evolution and
-    search) were outside everything that walks this list — including the
-    connectivity check that is supposed to prove the trust store is complete. A
-    list that silently omits what it is meant to cover is worse than no list.
-    Nothing is fetched from these at runtime; this is the set to TEST against."""
-    from .endpoints import BUILTIN_ENDPOINTS
-    hosts = {(ep.get("host") or "").split("://")[-1].strip("/")
-             for ep in BUILTIN_ENDPOINTS.values() if isinstance(ep, dict)}
-    return sorted(hosts.union(EXTRA_HOSTS) - {""})
-
-
-BANK_HOSTS = bank_hosts()
 
 _PEM_RE = re.compile(
     r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.S)

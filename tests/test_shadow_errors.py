@@ -286,8 +286,12 @@ def test_an_unreadable_cart_is_not_an_empty_cart():
             # The real lifestyle error envelope, HTTP 200 + status:Error.
             raise TbankApiError("500", "Сервис временно недоступен. Попробуйте позже.")
 
-        def grocery_cart_set(self, *a, **kw):
-            posted.append(kw)
+        # The write choke is _grocery_cart_write (→ _call_read("grocery_cart_set")),
+        # NOT a grocery_cart_set method — the old override intercepted nothing, so
+        # the «no write happened» check was vacuous. Overriding the real writer makes
+        # it catch a write if the refusal ever stops short-circuiting.
+        def _grocery_cart_write(self, *a, **kw):
+            posted.append((a, kw))
             return {"goodsSum": 1.0}
 
     s = Broken()
@@ -501,6 +505,140 @@ def test_an_empty_policy_list_is_not_one_policy():
     print("  insurance: the capital-R envelope is seen, an empty list stays empty")
 
 
+def test_travel_payment_options_marks_a_failed_subrequest():
+    """«Рассрочки нет» and «не смог узнать рассрочку» are different answers. Each of
+    the three sub-lookups (bonuses, cashback, installments) must, on failure, say so
+    — not vanish and read as «this option does not exist»."""
+    class Flaky(MobileSession):
+        def __init__(self):
+            pass
+
+        def ensure_client_session(self):
+            return None
+
+        def travel_accounts(self):
+            return [{"id": "1", "name": "Счёт",
+                     "moneyAmount": {"value": 100, "currency": {"name": "RUB"}}}]
+
+        def travel_usable_bonuses(self, *a, **k):
+            raise TbankApiError("500", "boom")
+
+        def travel_predict_bonuses(self, *a, **k):
+            raise TbankApiError("500", "boom")
+
+        def travel_loan_allowance(self, *a, **k):
+            raise TbankApiError("500", "boom")
+
+    saved = server._require
+    server._require = lambda: Flaky()
+    try:
+        out = server.travel_payment_options(10000)
+    finally:
+        server._require = saved
+    check("Бонусы: не удалось" in out, f"a failed bonus lookup must say so: {out}")
+    check("Кэшбэк: не удалось" in out, f"a failed cashback lookup must say so: {out}")
+    check("Рассрочка: не удалось" in out,
+          f"a failed installment check must not read as «no installments»: {out}")
+    print("  travel_payment_options: a failed sub-request is marked, not dropped")
+
+
+def test_documents_says_when_the_owner_filter_could_not_run():
+    """If the owner's birthDate can't be fetched, the relative filter passes
+    EVERYTHING — a relative's passport shown as the client's. That must be flagged,
+    not leaked silently."""
+    class NoBrief(MobileSession):
+        def __init__(self):
+            pass
+
+        def ensure_client_session(self):
+            return None
+
+        def identity_documents(self):
+            return {"RusNationalID": [
+                {"value": {"serial": {"value": "1234"}, "number": {"value": "567890"},
+                           "name": {"value": "Паспорт"},
+                           "person": {"birthDate": {"value": "1955-05-05"}}}}]}
+
+        def identity_brief(self):
+            raise TbankApiError("500", "boom")
+
+    saved = server._require
+    server._require = lambda: NoBrief()
+    try:
+        out = server.documents()
+    finally:
+        server._require = saved
+    check("не отфильтрованы" in out or "могут быть чужие" in out,
+          f"a failed owner lookup must warn the relatives are unfiltered: {out}")
+    print("  documents: a failed owner lookup is flagged, not a silent PII mix")
+
+
+def test_grocery_order_status_not_found_is_not_unpaid():
+    """An order the bank returns nothing for is «not found», NOT «created and
+    unpaid». The old code printed «paid=no payment id» over an empty order."""
+    class Empty(MobileSession):
+        def __init__(self):
+            pass
+
+        def ensure_fresh(self):
+            return None
+
+        def grocery_order_get(self, order_id, app_id):
+            return {"payload": {"order": {}}}
+
+    saved = server._require
+    server._require = lambda: Empty()
+    try:
+        out = server.grocery_order_status("ORD-X", app_id="204")
+    finally:
+        server._require = saved
+    check("не найден" in out, f"an empty order must read as not-found: {out}")
+    check("paid=no payment id" not in out and "paid=" not in out,
+          f"an empty order must NOT print a fake «unpaid» line: {out}")
+    print("  grocery_order_status: an empty answer is not-found, not «unpaid»")
+
+
+def test_a_cart_answer_for_the_wrong_store_is_flagged_not_shown_as_empty():
+    """grocery_cart echoes the store the bank ANSWERED for at payload.application.id.
+    When that differs from the store asked about, the cart shown belongs to another
+    store — printing its (often empty) goods as this store's cart is a silent lie.
+    The mismatch must be flagged; a matching answer must NOT raise a false alarm."""
+    class CartSession(MobileSession):
+        def __init__(self, env):
+            self._memo = {}
+            self._env = env
+        def ensure_fresh(self, *a, **kw):
+            return None
+        def grocery_cart_get(self, **kw):
+            return self._env
+
+    # (a) the answer is for a DIFFERENT appId → flagged, both ids named.
+    wrong = CartSession({"application": {"id": "578"},
+                         "cart": {"goods": [], "delivery": {"pointId": "2"}}})
+    saved = server._require
+    server._require = lambda: wrong
+    try:
+        out = server.grocery_cart(app_id="204", point_id="5980")
+    finally:
+        server._require = saved
+    check("CART_CONTEXT_MISMATCH" in out,
+          f"a cart answered for another store must be flagged: {out!r}")
+    check("578" in out and "204" in out,
+          f"the mismatch must name both the answered and the requested store: {out!r}")
+
+    # (b) the answer is for the SAME store → no false alarm.
+    right = CartSession({"application": {"id": "204"},
+                         "cart": {"goods": [], "delivery": {"pointId": "5980"}}})
+    server._require = lambda: right
+    try:
+        out2 = server.grocery_cart(app_id="204", point_id="5980")
+    finally:
+        server._require = saved
+    check("CART_CONTEXT_MISMATCH" not in out2,
+          f"a matching store must not raise a false mismatch: {out2!r}")
+    print("  grocery_cart: a wrong-store answer is flagged, a matching one is not")
+
+
 def main():
     print("shadow errors:")
     test_an_error_status_with_an_innocent_body_is_not_returned_as_data()
@@ -513,6 +651,10 @@ def main():
     test_a_rejected_messenger_token_is_not_no_unread_messages()
     test_a_messenger_send_the_server_rejected_is_not_reported_as_sent()
     test_an_empty_policy_list_is_not_one_policy()
+    test_travel_payment_options_marks_a_failed_subrequest()
+    test_documents_says_when_the_owner_filter_could_not_run()
+    test_grocery_order_status_not_found_is_not_unpaid()
+    test_a_cart_answer_for_the_wrong_store_is_flagged_not_shown_as_empty()
     if failures:
         print("\nFAILED:")
         for f in failures:

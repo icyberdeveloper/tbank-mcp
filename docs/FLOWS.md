@@ -7,7 +7,7 @@ don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
 Served section-by-section by the `flows(topic)` tool — call it with no argument
 for the list of topics. Reading the whole file is rarely what you want.
 
-> **Tool names:** the **78 MCP tools** and their docstrings are the authoritative
+> **Tool names:** the **90 MCP tools** and their docstrings are the authoritative
 > interface. Some sections below describe INTERNAL api steps — e.g. the web
 > checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
 > tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
@@ -366,18 +366,21 @@ concerts, flights, trains and hotels together (188 orders back to 2018).
 `order_details(order_id)` adds hall/seats/booking code for entertainment orders;
 groceries have their own `grocery_order_status`.
 
-Travel is split by vertical, because each one authorizes differently:
-- **Hotels** — `travel_order_details(order_id)` works: `hotels.t-bank-app.ru`
-  accepts the plain Bearer, and returns dates, city, hotel, room, guests, price.
-- **Flights and trains** return only the `orders()` summary — and NOT because the
-  bank refuses. Each detail endpoint wants a session this MCP does not yet build:
-  the flight order lives on `www.tbank.ru/api/travel/flight/order`, which needs a
-  web session layered over the mobile one (the bridge IS in the capture —
-  `session/webview/get_by_token` hands back a portal session — it is simply not
-  wired up), and the train order lives on `trains.t-bank-app.ru/api/orders/{id}`,
-  which authorises by a cookie that host sets itself in response to a Bearer
-  request. `travel_order_details` says exactly that, naming the host and what is
-  missing, instead of retrying.
+`travel_order_details(order_id)` covers all three travel verticals:
+- **Hotels** — dates, city, hotel, room, guests, price.
+- **Rail** — the car, the berths, what each ticket cost and its electronic-
+  registration status, plus the `ticket_id` values `train_refund` takes. They
+  exist nowhere else, which is why they are printed here.
+- **Flights** — the route and the issued documents (one itinerary receipt per
+  passenger, plus one for the order).
+
+`travel_ticket_file(order_id)` saves the PDFs; `trips()` is the journey-shaped
+view of the same thing, and is where a trip's route and insurance live.
+
+An earlier version of this section said flights and trains could not be detailed
+without a web session layered over the mobile one. That was wrong: probed live,
+the flight endpoints answer under the plain mobile session, and the rail host's
+own cookie — which `_ensure_trains` already mints — authorises its order API too.
 
 ## 10. Grocery nutrition / lowest-calorie shopping
 
@@ -508,51 +511,84 @@ already holds, and wants none of the native query context — which is what the
 > step that places or pays for a marketplace order and none is invented. Search
 > and read the cart here; finish in the app.
 
-## 14. Flights — searching, and only searching
+## 14. Flights — search, then buy  (REAL money at step 4)
 
-`flight_search(from_code, to_code, date, only_bookable)` plus `flight_history()`.
+Full detail lives in the `tbank-travel` skill. The order is the part you must not
+improvise, and the ids are why:
 
-The captured traffic runs this under a web session behind a multi-step bridge,
-which reads as unreachable from a mobile one. It is not: probed live, the same
-endpoints answer under the plain mobile Bearer with `X-Travel-Context: mb` and
-the session in `sessionId`. No bridge is built, because none is needed.
+1. `flight_search(from_code, to_code, date, only_bookable)` → rows carrying
+   `offerId`. There is **no name→IATA resolver anywhere in the captures**;
+   `flight_history()` is the one place a code comes back with its name, so take
+   codes from there rather than guessing.
+2. `flight_offer(offer_id)` → the fares. One search row expands into a FAMILY of
+   fares — same flight and same seat, different baggage and refund rules — so the
+   search price is only the cheapest of several. This step also re-prices, and it
+   is not optional: it mints the internal id every later call needs.
+3. `flight_seats(offer_id, fare)` — optional and paid. Skipping it is normal; a
+   seat is then assigned at check-in.
+4. `flight_book(offer_id, fare, passengers, seats)` — **books AND charges in one
+   call.** Flights have no hold step, so there is nothing between the button and
+   the ticket. The button carries the tool's OWN re-priced total, never a number
+   the agent typed. Choosing seats also buys the check-in service, so the charge
+   is fare + seats + check-in — three numbers.
+5. `travel_order_details(order_id)` / `trips()` → the route and the PNR;
+   `travel_ticket_file(order_id)` saves the itinerary receipts.
 
-The search STREAMS. `startStreaming` returns the first batch; `nextBatch` blocks
-for the next and sets `isOver` on the last. Measured on one route: 4 batches, 757
-flights, 4348 offers, the final batch alone adding 2836. `offers[].flights` index
-the CONCATENATION of every batch — 757 flights, highest index 756 — so nothing
-resolves until the stream is stitched, and a caller that stops early is told.
+`passengers="me"` fills the passport from `documents()` — the same store the app
+prefills from, Latin spellings included, so nothing is transliterated by guesswork.
+Co-passengers are passed as JSON: the bank keeps documents for ONE contact, and
+picking a relative's passport out of that store unasked would put a stranger on a
+ticket.
 
-`only_bookable` (the default) stops after the first batch: only `vendor ==
-"Tinkoff"` offers are buyable inside the bank, and all 101 of them arrived in
-that first batch, so the other three round trips buy partner listings that lead
-out of the app.
+> **There is no flight refund.** `grefund/calc` in the API is the «guaranteed
+> refund» ADD-ON sold with the ticket, not a cancellation, and no capture shows a
+> cancellation call. Say so rather than inventing a tool.
 
-> **There is no name→IATA resolver anywhere in the captures.** `flight_history()`
-> is the one place a code comes back with its name; take codes from there rather
-> than guessing. And buying is not supported — no confirmed booking or payment
-> step exists, so this searches and compares, nothing more.
+## 15. Rail — search, seats, book, pay, refund  (REAL money at step 4)
 
-## 15. Rail — searching trains
+1. `train_calendar(origin, destination)` — which dates are on sale, and the cheap
+   check that a pair of station codes is valid: a wrong pair comes back empty.
+   origin/destination are the bank's NUMERIC codes (2000000 is Moscow) and nothing
+   resolves a name to one.
+2. `train_search(origin, destination, date)` → rows carrying `train_id`.
+3. `train_seats(train_id)` → cars and free places, printed as `вагон/место`.
+4. `train_book(train_id, seats="03/10,03/12", passengers)` → an order that **holds
+   the seats for about fifteen minutes** and charges nothing.
+5. `train_pay(order_id)` — call it FIRST WITHOUT a card: that lists the cards and
+   accounts that can pay and charges nothing. Then `train_pay(order_id,
+   card_id=…)`, where the button confirms. Payment runs through the T-Pay gateway
+   headlessly; the webview the app opens is not needed.
+6. `train_refund(order_id)` shows what would come back after fees and refunds
+   NOTHING; `train_refund(order_id, confirm=True)` performs it. Show the
+   calculation first — the fees are the whole point of looking.
 
-`train_search(origin, destination, date)` and `train_calendar(origin, destination)`.
+`train_id` and the seat list are handles, not data: prices, availability and the
+ids the order needs are re-read at the moment they are used, because all of them
+go stale within minutes. A seat sold while the user was deciding fails by name.
 
-This host keeps its own session, and getting it is one request: GET
-https://trains.t-bank-app.ru/ with the ordinary mobile Bearer answers with
-Set-Cookie, and the search API accepts those cookies. No redirect chain, no
-browser — the older note calling rail unreachable was reading a different
-bootstrap path. The mint happens in an ISOLATED jar, because that same response
-also clears the cookie for the tbank.ru domain and doing it in the shared jar
-would race every other host mid-flight.
+## 16. Hotels — searching, and only searching
 
-origin/destination are the bank's NUMERIC station codes (2000000 is Moscow) and
-nothing in the captures resolves a name to one, so the tools take codes.
-`train_calendar` doubles as the cheap check that a pair is valid: a wrong pair
-comes back empty.
+`hotel_search(query, checkin, checkout, adults)` → hotels with prices and
+`hotel_id`; `hotel_info(hotel_id, checkin, checkout)` → the card, the generated
+review summary, the ratings and the tariffs with their cancellation ladder.
 
-> **Buying is not supported.** `orders/pay` hands back a tpay webview URL that
-> cannot be completed headlessly, and creating an order needs passenger passport
-> data. This searches and compares.
+`isLoadingCompleted: false` on a search means the answer is still filling in —
+the tool says so, and «дешевле нет» must not be concluded from a partial list.
+
+> **Booking is not supported.** The tariff carries a `bookHash`, and no capture
+> anywhere shows the call that would consume it. Guessing that request shape is
+> exactly the mistake this repo keeps paying for, so hotels are searched here and
+> booked in the app.
+
+## 17. Trips, and what a trip really costs
+
+`trips()` — flights, trains and hotels in one feed; `trips(trip_id)` — the card
+with its route and insurance. This is NOT `orders()`: that lists orders across
+every vertical including groceries and cinema, this lists journeys.
+
+`travel_payment_options(amount)` answers the question a price alone cannot: which
+accounts may pay, how many loyalty bonuses can be burned, how much cashback comes
+back, and what the installment plans are. It changes nothing.
 
 ## Notes
 
@@ -593,14 +629,20 @@ comes back empty.
   redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
   secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
   confirmed step.
-- Money tools — all six — are REAL: `transfer`, `transfer_requisites`,
-  `pay_bill`, `grocery_checkout`, `ticket_pay`, and `confirm_payment` (which
-  completes a payment the bank is holding for a second factor). The confirmation is
-  the BUTTON the five paying tools show themselves (see «Elicitation» below) — a
-  concrete sum the user presses «Перевести/Оплатить/Оформить» on. Your part is
-  BEFORE the call: show the recipient + sum + fee (transfer), the requisites +
-  purpose (transfer_requisites), the cart contents (grocery_checkout) or the seats +
-  fee (ticket_pay) in text, then call. Do NOT ask «да/нет» in text on top — that is
+- Money tools — all eight — are REAL: `transfer`, `transfer_requisites`,
+  `pay_bill`, `grocery_checkout`, `ticket_pay`, `train_pay`, `flight_book`, and
+  `confirm_payment` (which completes a payment the bank is holding for a second
+  factor). The confirmation is the BUTTON the paying tools show themselves (see
+  «Elicitation» below) — a concrete sum the user presses
+  «Перевести/Оплатить/Оформить» on. Your part is BEFORE the call: show the
+  recipient + sum + fee (transfer), the requisites + purpose
+  (transfer_requisites), the cart contents (grocery_checkout), the seats + fee
+  (ticket_pay), the car and berths (train_pay) or the fare, baggage and refund
+  rules (flight_book) in text, then call.
+  `train_book` and `train_refund` are NOT in this list and show no button:
+  the first only holds seats that lapse on their own, the second is a
+  cancellation. `train_refund` still refuses to act without `confirm=True`, and
+  what it prints first is the fee — which is the reason to look. Do NOT ask «да/нет» in text on top — that is
   a double question in a client with buttons. A request to buy something is not a
   confirmation to pay for it; the button is.
 - **WAITING_CONFIRMATION.** A large or risk-flagged `/v1/pay` comes back

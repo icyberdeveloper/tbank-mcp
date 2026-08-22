@@ -216,8 +216,14 @@ def test_every_tool_declares_what_it_does_to_the_world():
     # booking that expires by itself, a cart line, a chat message and an SMS are all
     # recoverable, and a payment is not. confirm_payment completes a payment the bank
     # holds at WAITING_CONFIRMATION — the second half of a debit — so it is MONEY too.
+    #
+    # Travel splits the same way the cinema does. train_pay charges a booked rail
+    # order and flight_book books AND charges in one call (flights have no hold
+    # step), so both are MONEY. train_book only reserves seats — they lapse in
+    # about fifteen minutes on their own — and train_refund is a cancellation,
+    # which by the same rule as ticket_cancel is recoverable, not a debit.
     MONEY = {"transfer", "transfer_requisites", "grocery_checkout", "ticket_pay",
-             "pay_bill", "confirm_payment"}
+             "pay_bill", "confirm_payment", "train_pay", "flight_book"}
     # WRITE changes something that costs nothing. They must NOT claim to be
     # read-only — `readOnlyHint: true` states that a tool does not modify its
     # environment, and every one of these does.
@@ -228,7 +234,9 @@ def test_every_tool_declares_what_it_does_to_the_world():
         "messenger_send",                                    # a message to a person
         "login", "confirm_otp", "confirm_password",          # sends an SMS / auth state
         "confirm_pin", "refresh_session",                    # rotates a live credential
-        "payment_receipt",                                   # writes a local file
+        "payment_receipt", "travel_ticket_file",             # writes a local file
+        "train_book",                                        # holds seats, ~15 min
+        "train_refund",                                      # cancels a ticket
     }
 
     for name, tool in sorted(tools.items()):
@@ -381,6 +389,13 @@ RETIRED_CLAIMS = [
     (r"link-token minted outside this host",
      "same paragraph, same wrong diagnosis: the flight order needs a web session "
      "layered over the mobile one (the bridge IS in the capture), not a link-token"),
+    (r"для поездок деталей в этом API нет",
+     "order_details said trips have no detail tool — travel_order_details(order_id) "
+     "is exactly that tool (вагон, места, маршрут, отель)"),
+    (r"Купить билет через MCP нельзя",
+     "flight_search said a flight cannot be bought via MCP — flight_book exists "
+     "(experimental/unverified, but present); the honest wording flags the risk, "
+     "it does not deny the path"),
 ]
 
 
@@ -430,6 +445,48 @@ def test_every_tool_is_documented():
     check(not missing,
           f"tools documented nowhere (invisible to an agent): {', '.join(missing)}")
     print(f"  {len(tools) - len(missing)}/{len(tools)} tools appear in a doc or skill")
+
+
+RETIRED_SKILL_NAMES = ["tbank-travel-search"]
+
+
+def test_a_renamed_skill_leaves_no_live_reference():
+    """A skill this repo renamed must not survive under its old name — neither as an
+    installed directory nor as a reference in a SKILL.md, the router, or the source.
+    Plain `cp -r` never deletes the old copy, so a stale skill kept loading; the
+    install now removes it, and this guards against the name creeping back."""
+    import glob
+    # (a) no directory under skills/ carries a retired name.
+    for name in RETIRED_SKILL_NAMES:
+        check(not os.path.isdir(os.path.join(ROOT, "skills", name)),
+              f"a retired skill directory is back: skills/{name}")
+    # (b) no SKILL.md, router or source file references it as if it were live.
+    scanned = glob.glob(os.path.join(ROOT, "skills", "*", "SKILL.md"))
+    scanned += glob.glob(os.path.join(ROOT, "src", "*.py"))
+    for f in scanned:
+        text = open(f, encoding="utf-8").read()
+        for name in RETIRED_SKILL_NAMES:
+            check(name not in text,
+                  f"{os.path.relpath(f, ROOT)} still references retired skill «{name}»")
+    print(f"  no live reference to any of {len(RETIRED_SKILL_NAMES)} retired skill name(s)")
+
+
+def test_the_readme_tool_table_lists_every_tool():
+    """The README §Tools table is the one flat map of the whole surface. It silently
+    lost the entire travel-booking, hotels and trips rows (12 tools) while still
+    claiming «90 tools» — the table read as complete and was not. Guard it directly:
+    test_every_tool_is_documented only asks that a tool appear SOMEWHERE (a skill
+    counts), so it stayed green through the gap."""
+    tools = tool_names()
+    readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
+    lo = readme.index("## Tools")
+    hi = readme.index("## Skills", lo)
+    table = readme[lo:hi]
+    listed = set(re.findall(r"`([a-z_]+)`", table))
+    missing = sorted(t for t in tools if t not in listed)
+    check(not missing,
+          f"tools absent from the README §Tools table: {', '.join(missing)}")
+    print(f"  README §Tools table lists all {len(tools)} tools")
 
 
 def test_every_tool_is_reachable_from_a_skill():
@@ -584,6 +641,8 @@ def main():
     test_the_documented_counts_match_the_registry()
     test_disproven_claims_do_not_come_back()
     test_every_tool_is_documented()
+    test_a_renamed_skill_leaves_no_live_reference()
+    test_the_readme_tool_table_lists_every_tool()
     test_every_tool_is_reachable_from_a_skill()
     test_plugin_ships_every_skill()
     test_evals_only_ask_for_tools_that_exist()

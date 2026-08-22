@@ -32,6 +32,13 @@ tests pin:
   * threshold    — «для сумм ОТ порога» is inclusive: at exactly TBANK_CONFIRM_ABOVE
                    the button IS shown, one kopeck below it is not (all four tools,
                    in a client that CAN show one).
+  * travel       — train_pay and flight_book are money and owe a button; train_book
+                   (holds seats, charges nothing) and train_refund (a cancellation,
+                   like ticket_cancel) deliberately do NOT, and train_refund is
+                   pinned as taking no ctx at all so a later pass cannot grow one.
+                   flight_book's button carries the tool's OWN re-priced total, not
+                   the agent's; train_pay without a card lists the payment methods
+                   and charges nothing, so it works in a client with no button.
 
     python3 tests/test_elicitation_flows.py
 """
@@ -895,6 +902,377 @@ def test_confirm_threshold_boundary_is_inclusive_everywhere():
           "is not (transfer/pay_bill/ticket_pay/grocery)")
 
 
+# ---- travel: which tools owe a button, and which must NOT ask ---------------
+#
+# Two rail tools deliberately have no gate, and that is easy to "fix" by mistake:
+#   train_book   holds seats and moves no money — the same class as cinema_book;
+#   train_refund is a cancellation, and the owner's decision removed the gates from
+#                cancellations (ticket_cancel, grocery_order_cancel). It shows the
+#                refund CALCULATION instead and refuses to act without confirm=True.
+# The two that DO move money — train_pay and flight_book — must refuse a client
+# that cannot show a button, before any journal line and before any HTTP.
+
+class RailPaySession:
+    """A rail order that is booked and awaiting payment."""
+
+    def __init__(self, amount=13656.36):
+        self.amount = amount
+        self.paid = None
+        self.pay_opened = False
+
+    def ensure_fresh(self):
+        pass
+
+    def train_order(self, order_id):
+        return {"price": self.amount}
+
+    def train_order_status(self, order_id):
+        return {"status": "Booked", "paymentDueInSeconds": 800}
+
+    def train_order_pay(self, order_id):
+        self.pay_opened = True
+        return {"paymentUrl": "https://tpay.tbank.ru/REQ1/17/tpay"}
+
+    def tpay_pay(self, url, card_id="", dry_run=False):
+        if dry_run:
+            return {"paid": False, "dry_run": True, "accounts": [],
+                    "cards": [{"cardId": "1", "maskedCardNumber": "5536******0000"}],
+                    "amount": self.amount, "brand": ""}
+        self.paid = {"url": url, "card": card_id}
+        return {"paid": True, "result": "SUCCESS", "status": "PAY"}
+
+
+def test_train_pay_gate_pays_on_accept():
+    _reset()
+    s = RailPaySession()
+    out = run_tool(s, server.train_pay, "ORD-1", card_id="1", ctx=accept_ctx())
+    check(s.paid is not None, f"accept must pay: {out}")
+    print("  train_pay: gate pays on accept")
+
+
+def test_train_pay_decline_pays_nothing():
+    _reset()
+    s = RailPaySession()
+    out = run_tool(s, server.train_pay, "ORD-2", card_id="1", ctx=decline_ctx())
+    check(s.paid is None, f"a declined rail payment must not charge: {out}")
+    check(not s.pay_opened,
+          "a declined payment must not even open a payment session")
+    blob = open(journal.ATTEMPTS_FILE, encoding="utf-8").read()
+    check(blob.strip() == "", "a declined rail payment must leave no attempt")
+    print("  train_pay: decline pays nothing, no journal")
+
+
+def test_train_pay_headless_refuses_before_anything():
+    _reset()
+    s = RailPaySession()
+    out = run_tool(s, server.train_pay, "ORD-3", card_id="1", ctx=incapable_ctx())
+    check("ПЛАТЁЖ НЕ ВЫПОЛНЕН" in out, f"headless must be refused: {out}")
+    check(s.paid is None and not s.pay_opened,
+          "headless refusal must happen before the payment session is opened")
+    check(open(journal.ATTEMPTS_FILE, encoding="utf-8").read().strip() == "",
+          "headless refusal must leave no attempt")
+    print("  train_pay: headless refused before any HTTP or journal")
+
+
+def test_train_pay_without_a_card_lists_methods_and_charges_nothing():
+    """No card → show what can pay. Opening a payment session is not a charge, so
+    this must work in a client with no button at all."""
+    _reset()
+    s = RailPaySession()
+    out = run_tool(s, server.train_pay, "ORD-4", ctx=incapable_ctx())
+    check(s.paid is None, "listing methods must not charge")
+    check("card_id=" in out, f"the list must name the card ids to pass back: {out}")
+    check("Ничего не списано" in out, f"the answer must say nothing was charged: {out}")
+    print("  train_pay: no card → methods listed, nothing charged, no button needed")
+
+
+def test_train_pay_button_names_the_order_and_the_sum():
+    _reset()
+    s = RailPaySession(amount=13656.36)
+    ctx = accept_ctx()
+    run_tool(s, server.train_pay, "ORD-5", card_id="1", ctx=ctx)
+    check(len(ctx.asked) == 1, f"exactly one dialog, got {len(ctx.asked)}")
+    msg, schema = ctx.asked[0]
+    check("ORD-5" in msg, f"button must name the order: {msg!r}")
+    check("13 656.36" in msg, f"button must name the sum via _money: {msg!r}")
+    check(not schema.model_json_schema().get("properties"),
+          "the money gate takes no fields — Accept IS the confirmation")
+    print("  train_pay: button names the order and the sum, no fields")
+
+
+class RailRefundSession:
+    def __init__(self):
+        self.refunded = None
+
+    def ensure_fresh(self):
+        pass
+
+    def train_blank_status(self, order_id):
+        return [{"ticketId": "T1", "erStatus": "ElectronicRegistrationPresent",
+                 "isRefundPossible": True}]
+
+    def train_refund_calc(self, order_id, ticket_ids):
+        return {"refundable": "refundable",
+                "ticketRefundInfos": [{"TicketId": "T1", "refundAmount": 6625.6,
+                                       "providerFee": 3.7, "serviceFee": 198.88}]}
+
+    def train_refund(self, order_id, ticket_ids):
+        self.refunded = list(ticket_ids)
+        return {"operationId": "OP-1"}
+
+    def train_refund_status(self, operation_id):
+        return {"refundStatus": "Succeed", "refundedTicketsIds": ["T9"]}
+
+
+def test_train_refund_shows_the_calculation_before_acting():
+    """Without confirm it must compute and STOP — the fee is the whole point."""
+    _reset()
+    s = RailRefundSession()
+    out = run_tool(s, server.train_refund, "ORD-R")
+    check(s.refunded is None, f"refund ran without confirm=True: {out}")
+    check("6 625.60" in out, f"the refunded amount must be shown: {out}")
+    check("202.58" in out, f"the withheld fees must be shown: {out}")
+    check("confirm=True" in out, f"the answer must name how to proceed: {out}")
+    print("  train_refund: shows the calculation, refunds nothing")
+
+
+def test_train_refund_asks_no_button():
+    """A cancellation does not get a gate — the owner's decision, pinned here so a
+    later 'consistency' pass does not add one back."""
+    _reset()
+    s = RailRefundSession()
+    params = inspect.signature(server.train_refund.__wrapped__).parameters
+    check("ctx" not in params,
+          "train_refund must not take a ctx at all — no ctx, no dialog, and no way "
+          "for a later change to grow one by accident")
+    out = run_tool(s, server.train_refund, "ORD-R2", confirm=True)
+    check(s.refunded == ["T1"], f"confirm=True must refund: {out}")
+    check("Возврат выполнен" in out, f"a completed refund must say so: {out}")
+    print("  train_refund: confirm=True refunds, no button")
+
+
+class FlightSession:
+    """A flight offer that re-prices to `fare` and books successfully."""
+
+    def __init__(self, fare=22986.76):
+        self.fare = fare
+        self.booked = None
+
+    def ensure_fresh(self):
+        pass
+
+    def flight_preliminary(self, offer_id):
+        return {"flights": [{"duration": 155, "flightSegments": [{
+            "number": 1420, "duration": 155,
+            "carriers": {"marketing": {"code": "SU", "name": "Аэрофлот"},
+                         "operating": {"code": "SU", "name": "Аэрофлот"}},
+            "departure": {"time": "2026-08-25T21:45:00+0300",
+                          "airport": {"code": "SVO"}, "city": {"code": "MOW"}},
+            "arrival": {"time": "2026-08-26T02:20:00+0500",
+                        "airport": {"code": "CEK"}, "city": {"code": "CEK"}}}]}],
+            "offers": [{"uuid": "OFFER-UUID",
+                        "price": {"amount": str(self.fare), "currency": "RUB"}}]}
+
+    def identity_documents(self):
+        return {"RusNationalID": [{"value": {
+            "serial": {"value": "1234"}, "number": {"value": "567890"},
+            "person": {"firstName": {"value": "Иван"},
+                       "lastName": {"value": "Петров"},
+                       "middleName": {"value": "Сергеевич"},
+                       "firstNameEn": {"value": "IVAN"},
+                       "lastNameEn": {"value": "PETROV"},
+                       "middleNameEn": {"value": "SERGEEVICH"},
+                       "birthDate": {"value": "1990-01-31"},
+                       "sexCode": {"value": "male"}}}}]}
+
+    def identity_brief(self):
+        return {"birthDate": {"value": "1990-01-31"}, "sexCode": {"value": "male"}}
+
+    def ruble_source_accounts(self):
+        return [{"id": "0000000000", "name": "Основной", "balance": 100000}]
+
+    def _source_account(self):
+        return "0000000000"
+
+    def train_contact_info(self):
+        return {"phone": "+79991234567", "email": "user@example.com"}
+
+    def flight_pay(self, body):
+        self.booked = body
+        return {"status": "Working", "detachKey": "ORDER-1", "payload": {}}
+
+    def flight_pay_result(self):
+        return {"status": "Ok", "payload": {"bookingInfo": {
+            "bookingNumber": "AAAAAA", "orderNumber": "ORDER-1"}}}
+
+
+def test_flight_book_gate_charges_on_accept():
+    _reset()
+    s = FlightSession()
+    out = run_tool(s, server.flight_book, "SEARCH.1", ctx=accept_ctx())
+    check(s.booked is not None, f"accept must book and charge: {out}")
+    check("AAAAAA" in out, f"a completed booking must return the PNR: {out}")
+    charged = s.booked["pay_request"]["moneyAmount"]
+    check(charged == 22986.76,
+          f"the charge must be the RE-PRICED fare, got {charged}")
+    print("  flight_book: gate charges on accept, PNR returned")
+
+
+def test_flight_book_decline_charges_nothing():
+    _reset()
+    s = FlightSession()
+    out = run_tool(s, server.flight_book, "SEARCH.1", ctx=decline_ctx())
+    check(s.booked is None, f"a declined flight booking must not charge: {out}")
+    check(open(journal.ATTEMPTS_FILE, encoding="utf-8").read().strip() == "",
+          "a declined flight booking must leave no attempt")
+    print("  flight_book: decline charges nothing, no journal")
+
+
+def test_flight_book_headless_refuses_before_anything():
+    _reset()
+    s = FlightSession()
+    out = run_tool(s, server.flight_book, "SEARCH.1", ctx=incapable_ctx())
+    check("ПЛАТЁЖ НЕ ВЫПОЛНЕН" in out, f"headless must be refused: {out}")
+    check(s.booked is None, "headless refusal must happen before the POST")
+    check(open(journal.ATTEMPTS_FILE, encoding="utf-8").read().strip() == "",
+          "headless refusal must leave no attempt")
+    print("  flight_book: headless refused before booking")
+
+
+def test_flight_book_button_names_the_price_the_tool_computed():
+    """The agent's number never reaches the button: the tool re-prices and shows
+    ITS own total, because the search price can be minutes stale."""
+    _reset()
+    s = FlightSession(fare=31000.0)
+    ctx = accept_ctx()
+    run_tool(s, server.flight_book, "SEARCH.1", ctx=ctx)
+    msg, schema = ctx.asked[-1]
+    check("31 000.00" in msg, f"button must name the re-priced total: {msg!r}")
+    check("ПЕТРОВ" in msg.upper(), f"button must name the passenger: {msg!r}")
+    check(not schema.model_json_schema().get("properties"),
+          "the money gate takes no fields")
+    print("  flight_book: button names the tool's own re-priced total")
+
+
+class FlakyFlightSession(FlightSession):
+    """The POST goes out and the answer never comes — the unknown outcome."""
+
+    def flight_pay(self, body):
+        raise ConnectionError("reset")
+
+
+def test_travel_duplicate_guard_blocks_unconfirmed_then_force():
+    """A charge whose outcome is unknown must not be repeated on its own.
+
+    Neither gateway takes an idempotency key we control, and for flights the
+    repeat is worse than a double charge: flight_book books AND pays, so a blind
+    retry issues a SECOND ticket."""
+    _reset()
+    bad = FlakyFlightSession()
+    out1 = run_tool(bad, server.flight_book, "SEARCH.1", ctx=accept_ctx())
+    check("НЕ подтверждена" in out1 or "НЕИЗВЕСТ" in out1.upper(),
+          f"a transport failure must read as an unknown outcome: {out1}")
+
+    s2 = FlightSession()
+    out2 = run_tool(s2, server.flight_book, "SEARCH.1", ctx=accept_ctx())
+    check(s2.booked is None and "ЗАБЛОКИРОВАН" in out2,
+          f"a repeat of an unconfirmed purchase must be blocked: {out2}")
+
+    s3 = FlightSession()
+    out3 = run_tool(s3, server.flight_book, "SEARCH.1", force=True, ctx=accept_ctx())
+    check(s3.booked is not None, f"force must override the guard: {out3}")
+    print("  flight_book: unconfirmed repeat blocked, force overrides")
+
+
+class FlakyRailPaySession(RailPaySession):
+    def tpay_pay(self, url, card_id="", dry_run=False):
+        if dry_run:
+            return {"paid": False, "dry_run": True, "accounts": [], "cards": [],
+                    "amount": self.amount, "brand": ""}
+        raise ConnectionError("reset")
+
+
+def test_train_pay_duplicate_guard_blocks_unconfirmed_then_force():
+    _reset()
+    bad = FlakyRailPaySession()
+    run_tool(bad, server.train_pay, "ORD-D", card_id="1", ctx=accept_ctx())
+
+    s2 = RailPaySession()
+    out2 = run_tool(s2, server.train_pay, "ORD-D", card_id="1", ctx=accept_ctx())
+    check(s2.paid is None and "ЗАБЛОКИРОВАН" in out2,
+          f"a repeat of an unconfirmed rail payment must be blocked: {out2}")
+
+    s3 = RailPaySession()
+    out3 = run_tool(s3, server.train_pay, "ORD-D", card_id="1", force=True,
+                    ctx=accept_ctx())
+    check(s3.paid is not None, f"force must override the guard: {out3}")
+    print("  train_pay: unconfirmed repeat blocked, force overrides")
+
+
+class StuckFlightSession(FlightSession):
+    """The POST lands, and the booking never leaves «Working»."""
+
+    def flight_pay_result(self):
+        return {"status": "Working", "payload": {}}
+
+
+def test_a_booking_that_never_resolves_is_unknown_not_failed():
+    """A poll that runs out is the most dangerous answer in the file: the charge
+    was submitted and its outcome is not known.
+
+    It must read as UNKNOWN, must leave a BLOCKING journal line, and the next
+    identical call must be refused — «не прошло» would invite a retry that books a
+    second ticket."""
+    _reset()
+    slow_ms, slow_int = server._AVIA_PAY_TIMEOUT_MS, server._AVIA_PAY_INTERVAL_MS
+    server._AVIA_PAY_TIMEOUT_MS, server._AVIA_PAY_INTERVAL_MS = 40, 10
+    try:
+        s = StuckFlightSession()
+        out = run_tool(s, server.flight_book, "SEARCH.1", ctx=accept_ctx())
+        check("ИСХОД НЕИЗВЕСТЕН" in out,
+              f"a timed-out booking must read as unknown, not failed: {out}")
+        check(s.booked is not None, "the charge really was submitted")
+        s2 = FlightSession()
+        out2 = run_tool(s2, server.flight_book, "SEARCH.1", ctx=accept_ctx())
+        check(s2.booked is None and "ЗАБЛОКИРОВАН" in out2,
+              f"a repeat after an unknown outcome must be blocked: {out2}")
+    finally:
+        server._AVIA_PAY_TIMEOUT_MS, server._AVIA_PAY_INTERVAL_MS = slow_ms, slow_int
+    print("  flight_book: a poll that runs out is UNKNOWN, and blocks the repeat")
+
+
+class StuckRefundSession(RailRefundSession):
+    def train_refund_status(self, operation_id):
+        return {"refundStatus": "NotStarted"}
+
+
+def test_a_refund_that_never_resolves_says_so_without_calling_it_a_failure():
+    _reset()
+    slow_ms, slow_int = server._REFUND_TIMEOUT_MS, server._REFUND_INTERVAL_MS
+    server._REFUND_TIMEOUT_MS, server._REFUND_INTERVAL_MS = 40, 10
+    try:
+        s = StuckRefundSession()
+        out = run_tool(s, server.train_refund, "ORD-S", confirm=True)
+        check(s.refunded == ["T1"], "the refund really was started")
+        check("НЕ отказ" in out or "не отказ" in out,
+              f"a slow refund must not read as a refusal: {out}")
+        check("не запускай" in out,
+              f"the answer must warn against a second refund: {out}")
+    finally:
+        server._REFUND_TIMEOUT_MS, server._REFUND_INTERVAL_MS = slow_ms, slow_int
+    print("  train_refund: a poll that runs out is reported, not called a failure")
+
+
+def test_flight_book_passenger_count_must_match_seats():
+    _reset()
+    s = FlightSession()
+    out = run_tool(s, server.flight_book, "SEARCH.1", seats="13A,13B",
+                   ctx=accept_ctx())
+    check(s.booked is None, "a seat/passenger mismatch must not book")
+    check("поровну" in out, f"the mismatch must be explained: {out}")
+    print("  flight_book: seats and passengers must match before any charge")
+
+
 def main():
     for t in (test_transfer_bank_picker_then_gate_pays_the_chosen_bank,
               test_transfer_bank_picker_declined_writes_no_journal,
@@ -920,7 +1298,23 @@ def main():
               test_transfer_button_names_the_sum_and_the_payee,
               test_money_gate_cancel_confirms_nothing,
               test_money_gate_client_error_confirms_nothing,
-              test_confirm_threshold_boundary_is_inclusive_everywhere):
+              test_confirm_threshold_boundary_is_inclusive_everywhere,
+              test_train_pay_gate_pays_on_accept,
+              test_train_pay_decline_pays_nothing,
+              test_train_pay_headless_refuses_before_anything,
+              test_train_pay_without_a_card_lists_methods_and_charges_nothing,
+              test_train_pay_button_names_the_order_and_the_sum,
+              test_train_refund_shows_the_calculation_before_acting,
+              test_train_refund_asks_no_button,
+              test_flight_book_gate_charges_on_accept,
+              test_flight_book_decline_charges_nothing,
+              test_flight_book_headless_refuses_before_anything,
+              test_flight_book_button_names_the_price_the_tool_computed,
+              test_flight_book_passenger_count_must_match_seats,
+              test_travel_duplicate_guard_blocks_unconfirmed_then_force,
+              test_train_pay_duplicate_guard_blocks_unconfirmed_then_force,
+              test_a_booking_that_never_resolves_is_unknown_not_failed,
+              test_a_refund_that_never_resolves_says_so_without_calling_it_a_failure):
         t()
     if failures:
         print("\nFAILURES:")

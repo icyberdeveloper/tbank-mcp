@@ -550,6 +550,50 @@ def test_grocery_stores_seeds_the_area_id_memo():
     print("  grocery_stores: lists stores and seeds the areaId memo for free")
 
 
+def test_grocery_stores_names_which_of_several_addresses_it_used():
+    """The store list is built for ONE profile address — the first — and the answer
+    used to never say which. With several saved addresses «доставка за 30 мин» was
+    relative to an address the agent could not identify. Each store must carry the
+    address it was priced for and how many saved addresses exist, and the REQUEST
+    must go out for that first address, not another."""
+    sent = {}
+
+    class RecordingResp:
+        status_code = 200
+        def json(self):
+            return {"categories": [{"name": "Продукты", "retailers": [
+                {"appId": "204", "info": {"name": "ВкусВилл"},
+                 "delivery": {"pointId": "5980", "areaId": "17040911"}}]}]}
+
+    class RecordingHTTP:
+        def get(self, url, **kw):
+            sent.update(kw.get("params") or {})
+            return RecordingResp()
+
+    s = server._blank_session()
+    s._http = RecordingHTTP()
+    s.grocery_client_info = lambda: {"deliveryInfo": {"addresses": [
+        {"value": "ул Первая, 1",
+         "coordinates": {"latitude": "55.70", "longitude": "37.60"}},
+        {"value": "ул Вторая, 2",
+         "coordinates": {"latitude": "59.90", "longitude": "30.30"}}]}}
+
+    stores = s.grocery_stores()
+    check(len(stores) == 1, f"the store must come through: {stores}")
+    st = stores[0]
+    check(st.get("address") == "ул Первая, 1",
+          f"a store must name the address it was priced for: {st.get('address')!r}")
+    check(st.get("addressCount") == 2,
+          f"the answer must say how many addresses are saved: {st.get('addressCount')!r}")
+    # The request itself must have used the FIRST address, not the second city.
+    check(sent.get("address") == "ул Первая, 1" and sent.get("latitude") == "55.70",
+          f"the request must go out for the first address: {sent.get('address')!r}, "
+          f"lat={sent.get('latitude')!r}")
+    check(sent.get("latitude") != "59.90",
+          "the second address's coordinates must not leak into the request")
+    print("  grocery_stores: names which of several addresses the list is priced for")
+
+
 def test_grocery_stores_refuses_instead_of_defaulting_to_a_city():
     """grocery_stores()/_grocery_delivery() used to silently fall back to a
     hardcoded Moscow coordinate when the account had no saved delivery
@@ -858,6 +902,7 @@ def main():
     test_the_catalogue_spans_days_and_paginates_only_where_it_can()
     test_a_named_film_search_sees_every_page()
     test_grocery_stores_seeds_the_area_id_memo()
+    test_grocery_stores_names_which_of_several_addresses_it_used()
     test_grocery_stores_refuses_instead_of_defaulting_to_a_city()
     test_afisha_places_pages_are_fetched_concurrently()
     test_cart_can_shrink_not_only_grow()

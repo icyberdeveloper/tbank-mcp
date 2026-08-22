@@ -338,6 +338,227 @@ def test_the_bank_code_is_recorded_so_the_next_one_is_findable():
     print("  trace: the bank's code is a queryable field, and does not leak forward")
 
 
+def test_a_403_raises_the_level_and_retries_once():
+    """The travel endpoints validate the sessionid, and a lapsed one answers 403
+    with an EMPTY body — no code, no message to key off.
+
+    Which endpoints check is not knowable by inspection and a hand-kept list of
+    them rots, so `_call_read` treats the 403 itself as the signal: raise the
+    level, send again, once. Measured live on travel/checkout/accounts, which
+    answered 403 and then 200 seconds later after a re-mint.
+    """
+    import types
+
+    class Resp:
+        def __init__(self, code, payload):
+            self.status_code = code
+            self._payload = payload
+            self.headers = {}
+            self.content = b"{}"
+            self.text = "{}"
+
+        def json(self):
+            return self._payload
+
+    class Flaky(MobileSession):
+        """403 until the level is raised, 200 after — and it counts both."""
+
+        def __init__(self):
+            self.access_token = "tok"
+            self.mobile_sessionid = "old"
+            self.sent = 0
+            self.raised = 0
+            self._http = types.SimpleNamespace(
+                get=lambda *a, **kw: self._answer(),
+                post=lambda *a, **kw: self._answer(),
+                cookies=types.SimpleNamespace(get_dict=dict))
+
+        def _answer(self):
+            self.sent += 1
+            if self.mobile_sessionid == "old":
+                return Resp(403, {})
+            return Resp(200, {"resultCode": "OK", "payload": [{"id": "1"}]})
+
+        def ensure_client_session(self):
+            self.raised += 1
+            self.mobile_sessionid = "fresh"
+            return "CLIENT"
+
+        def ensure_fresh(self):
+            return None
+
+        def _cookie_for(self, host):
+            return ""
+
+        def _tpl(self, key):
+            return {"method": "GET", "host": "https://www.tbank.ru",
+                    "path": "/api/common/v1/travel/checkout/accounts",
+                    "params": {}, "session_param": "sessionId",
+                    "headers": {"X-Travel-Context": "mb"}}
+
+    s = Flaky()
+    out = s._call_read("travel_accounts")
+    check(s.raised == 1, f"the level must be raised exactly once, was {s.raised}×")
+    check(s.sent == 2, f"exactly one retry after the 403, sent {s.sent}×")
+    check(out == [{"id": "1"}], f"the retry's answer must be returned: {out}")
+
+    # And it must not loop: ensure_client_session pings through this same method,
+    # so a 403 answered during the raise has to fall through, not recurse.
+    class Stubborn(Flaky):
+        def ensure_client_session(self):
+            self.raised += 1
+            return "ANONYMOUS"           # the raise did not take
+
+    s2 = Stubborn()
+    try:
+        s2._call_read("travel_accounts")
+    except Exception:
+        pass
+    check(s2.raised == 1, f"a failed raise must not be retried in a loop, {s2.raised}×")
+    check(s2.sent == 1, f"no retry when the level did not rise, sent {s2.sent}×")
+    print("  a 403 raises the session level and retries once, without looping")
+
+
+def test_session_status_raises_the_client_level_before_it_reports():
+    """session_status() is the tool an agent calls to CHECK the session — so it must
+    raise the portal (~11 min) level to CLIENT ITSELF first, else it reports a lapsed
+    session as the steady state and the agent «recovers» by re-logging in for nothing.
+    The raise must happen BEFORE the status read, not after."""
+    order = []
+
+    class Recording(MobileSession):
+        def __init__(self):
+            super().__init__("sid", "rt")
+        def ensure_client_session(self):
+            order.append("raise")
+            return "CLIENT"
+        def session_status(self):
+            order.append("read")
+            return {"level": "CLIENT"}
+
+    saved = server._require
+    server._require = lambda: Recording()
+    try:
+        out = server.session_status()
+    finally:
+        server._require = saved
+    check("raise" in order, "session_status must raise the client level itself")
+    check(order == ["raise", "read"],
+          f"the level must be raised BEFORE the status is read: {order}")
+    check("CLIENT" in out, f"the raised status must be what gets reported: {out!r}")
+    print("  session_status: raises the CLIENT level itself, before reporting")
+
+
+def test_wait_for_propagation_polls_then_gives_up_without_raising():
+    """A freshly-minted session needs a moment before mobile reads accept it. This
+    replaces a blind sleep: it returns the instant the probe stops raising, and on
+    timeout it degrades to «waited the deadline and proceeded» — never worse than the
+    sleep, and it must never propagate the probe's exception."""
+    import time as _time
+    from src.client import _wait_for_propagation
+
+    # (a) succeeds on the third probe → returns as soon as it stops raising.
+    calls = {"n": 0}
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("not ready")
+    _wait_for_propagation(flaky, timeout_s=1.0, interval_s=0.01)
+    check(calls["n"] == 3, f"must stop polling the moment the probe succeeds: {calls}")
+
+    # (b) always raises → returns after the deadline, WITHOUT raising, and bounded.
+    started = _time.monotonic()
+    raised = {"n": 0}
+    def never():
+        raised["n"] += 1
+        raise RuntimeError("still not ready")
+    try:
+        _wait_for_propagation(never, timeout_s=0.15, interval_s=0.02)
+    except Exception as e:
+        failures.append(f"a timed-out propagation wait must not raise: {e!r}")
+    took = _time.monotonic() - started
+    check(0.15 <= took < 1.0, f"it must wait ~the deadline, then proceed: {took:.3f}s")
+    check(raised["n"] >= 2, f"it must actually poll more than once before giving up: {raised}")
+    print("  _wait_for_propagation: returns on first success, else waits the deadline and proceeds")
+
+
+def test_invest_portfolio_asks_for_dates_in_moscow_not_millisecond_timestamps():
+    """This endpoint wants ISO DATES, unlike every other read here that sends
+    millisecond timestamps — passing ms returned nothing. And the window's upper
+    bound is Moscow «today»: computed in UTC, the 21:00–24:00 UTC band silently
+    dropped the current Moscow trading day. Both are untested; pin the shape."""
+    import re as _re
+    from datetime import datetime, timedelta
+    from src.client import MobileSession
+    try:
+        from src.server import MSK
+    except ImportError:
+        from src.client import MSK
+
+    seen = {}
+
+    class RecordDates(MobileSession):
+        def __init__(self):
+            super().__init__("sid", "rt")
+        def ensure_client_session(self):
+            return None
+        def invest_portfolio(self, account, date_from, date_to, **kw):
+            seen["from"], seen["to"] = date_from, date_to
+            return {"months": []}
+
+    saved = server._require
+    server._require = lambda: RecordDates()
+    try:
+        server.invest_portfolio("acc-1", days=30)
+    finally:
+        server._require = saved
+
+    iso = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not (iso.match(seen.get("from", "")) and iso.match(seen.get("to", ""))):
+        failures.append(
+            f"dates must be ISO YYYY-MM-DD, not millisecond timestamps: {seen}")
+        return                      # nothing more to parse — the shape is already wrong
+    d_from = datetime.strptime(seen["from"], "%Y-%m-%d").date()
+    d_to = datetime.strptime(seen["to"], "%Y-%m-%d").date()
+    check((d_to - d_from).days == 30, f"the window must span the requested days: {seen}")
+    # Upper bound is Moscow today (the test computes it the same way; a UTC «today»
+    # would differ only in the late-UTC band, but equality here is still the contract).
+    check(d_to == datetime.now(MSK).date(),
+          f"the window must end on Moscow today, not UTC today: {seen}, "
+          f"msk={datetime.now(MSK).date()}")
+    print("  invest_portfolio: ISO dates in Moscow time, not millisecond timestamps")
+
+
+def test_the_login_next_step_hint_never_routes_a_password_through_the_chat():
+    """_next_step_hint turns the bank's `step` into the next call. For otp/pin it
+    names the confirm tool; for PASSWORD it must NOT — the password does not travel
+    through the agent (login() and the README say so), so the hint sends the user to
+    login_cli.py. It once said «Вызови confirm_password(<пароль>)», inviting the
+    exact leak the rest of the flow avoids."""
+    from src.client import _next_step_hint
+
+    otp = _next_step_hint({"step": "otp"})
+    check("confirm_otp" in otp, f"otp step must name confirm_otp: {otp!r}")
+
+    pin = _next_step_hint({"step": "pin"})
+    check("confirm_pin" in pin, f"pin step must name confirm_pin: {pin!r}")
+
+    pwd = _next_step_hint({"step": "password"})
+    check("login_cli.py" in pwd,
+          f"the password step must route to login_cli.py: {pwd!r}")
+    check("confirm_password" not in pwd,
+          f"the password hint must NOT tell the agent to call confirm_password: {pwd!r}")
+
+    # An unknown step falls back to naming the confirm tools — but still not
+    # confirm_password (a password never goes through the chat, whatever the step).
+    other = _next_step_hint({"step": "captcha"})
+    check("confirm_password" not in other,
+          f"even the fallback must not offer confirm_password: {other!r}")
+    check("login_cli.py" in other or "confirm" in other,
+          f"the fallback must still point somewhere useful: {other!r}")
+    print("  login: the next-step hint routes password to login_cli.py, never the chat")
+
+
 def main():
     print("session level:")
     test_the_sbp_lookup_raises_the_session_before_asking()
@@ -346,6 +567,11 @@ def main():
     test_an_ordinary_failure_is_not_dressed_up_as_a_session_problem()
     test_the_resolved_name_reaches_both_the_signed_body_and_the_user()
     test_the_bank_code_is_recorded_so_the_next_one_is_findable()
+    test_a_403_raises_the_level_and_retries_once()
+    test_session_status_raises_the_client_level_before_it_reports()
+    test_wait_for_propagation_polls_then_gives_up_without_raising()
+    test_invest_portfolio_asks_for_dates_in_moscow_not_millisecond_timestamps()
+    test_the_login_next_step_hint_never_routes_a_password_through_the_chat()
     if failures:
         print("\nFAILED:")
         for f in failures:

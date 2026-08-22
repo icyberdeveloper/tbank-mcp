@@ -284,12 +284,17 @@ def check_ticket_pay_amount_guard():
         check("НЕ подтверждена" in out4, f"a non-SUCCESS stage must not read as paid: {out4}")
         check("Не повторяй вслепую" in out4, f"and must warn against a blind retry: {out4}")
 
-        # An order the bank cannot price must not silently skip the check.
+        # An order the bank cannot price must REFUSE, not skip the check. The old
+        # `if booked and …` let a missing cartInfo.amount through as if verified —
+        # the charged sum came from the agent and was compared against nothing. A
+        # sum that cannot be checked against the order must not be charged.
         unknown = PaySession(booked_amount=None)
         server._require = lambda: unknown
-        _run(server.ticket_pay("ORD-UNPRICED", 1760, "482", ctx=accept_ctx()))
-        check(unknown.paid is not None,
-              "with no amount on the order the tool may proceed, but must not crash")
+        out5 = _run(server.ticket_pay("ORD-UNPRICED", 1760, "482", ctx=accept_ctx()))
+        check(unknown.paid is None,
+              f"an unverifiable amount reached the gateway: {out5}")
+        check("сверить" in out5.lower() or "не сходится" in out5,
+              f"the refusal must say the sum could not be verified: {out5}")
     finally:
         server._require = saved
     print("  ticket_pay: amount cross-check, token guard, non-SUCCESS all enforced")
@@ -623,11 +628,43 @@ def check_cancel_fixture_still_matches_capture(fx):
         print("  cancel fixture vs capture: DRIFTED — see the failures below")
 
 
+def check_train_pay_methods_do_not_offer_an_unusable_account():
+    """train_pay(order_id) with no card lists payment methods. tpay_pay charges a
+    CARD — there is no way to pass an account — so listing accounts as a «способ
+    оплаты» sent the agent hunting for an argument that does not exist. Accounts
+    must be marked app-only, and the pay instruction must offer card_id alone."""
+    from src import server
+    methods = {"amount": 4200, "cards": [
+                   {"maskedCardNumber": "•• 1234", "cardId": "card-1"}],
+               "accounts": [
+                   {"accountName": "Текущий", "accountId": "acc-9",
+                    "accountBalance": 100000}]}
+    out = server._render_pay_methods("ORD-1", 4200, methods)
+    check("card_id=card-1" in out, f"a card must be selectable by card_id: {out!r}")
+    check("acc-9" in out, f"the account should still be visible: {out!r}")
+    # The account line must NOT read as a selectable method — it carries the app-only
+    # marker, and the pay instruction offers only card_id.
+    acc_line = next(l for l in out.splitlines() if "acc-9" in l)
+    check("только в приложении" in acc_line,
+          f"the account must be marked app-only, not offered as payable here: {acc_line!r}")
+    pay_line = next(l for l in out.splitlines() if l.startswith("Оплатить"))
+    check("card_id" in pay_line and "accountId" not in pay_line,
+          f"the pay instruction must offer card_id alone: {pay_line!r}")
+
+    # Cards-absent branch: don't dead-end on «выбери карту» when there are none.
+    no_cards = server._render_pay_methods("ORD-2", 4200,
+                                          {"amount": 4200, "cards": [], "accounts": methods["accounts"]})
+    check("в приложении" in no_cards,
+          f"with no card, account payment must be sent to the app: {no_cards!r}")
+    print("  train_pay: accounts marked app-only, card_id is the only selectable method")
+
+
 def main():
     print("booking bodies + ranking:")
     check_ranking()
     check_seat_grouping()
     check_ticket_pay_amount_guard()
+    check_train_pay_methods_do_not_offer_an_unusable_account()
     test_the_ticket_payment_names_its_calling_system()
     check_cancel_carries_both_ids()
     check_every_vertical_reaches_its_own_path()

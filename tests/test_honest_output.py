@@ -366,6 +366,38 @@ def test_grocery_search_miss_inside_a_saturated_scan_is_not_absence():
     print("  grocery_search: a miss inside a saturated scan is flagged; a real miss is not")
 
 
+def test_afisha_and_flight_listings_name_the_next_tool_for_their_ids():
+    """Both listings print an eventId/offerId per row and used to stop there. A
+    kino afisha must point at cinema_schedule, a concert afisha at concert_schedule,
+    and a flight listing at flight_offer — otherwise the id is a dead end."""
+    events = [{"eventId": "e1", "eventName": "Концерт", "fields": {}, "slots": []}]
+
+    concert = run(Stub(afisha_catalog=(events, 1, 1)), server.afisha_catalog,
+                  kind="концерт", city="Москва", date_from="2026-08-01")
+    check("concert_schedule(event_id)" in concert,
+          f"a concert afisha must name concert_schedule: {concert!r}")
+
+    kino = run(Stub(afisha_catalog=(events, 1, 1)), server.afisha_catalog,
+               kind="кино", city="Москва", date_from="2026-08-01")
+    check("cinema_schedule(event_id" in kino,
+          f"a kino afisha must name cinema_schedule: {kino!r}")
+
+    # flight_search: offers index into flights; one bookable offer is enough.
+    fway = {"flightSegments": [{"carriers": {"marketing": "SU"},
+              "departure": {"time": "2026-08-01T10:00:00+03:00", "airport": "SVO"},
+              "arrival": {"time": "2026-08-01T12:00:00+03:00", "airport": "LED"}}],
+            "duration": 120}
+    fres = {"flights": [fway], "offers": [
+                {"flights": [0], "price": {"amount": "5000", "currency": "RUB"},
+                 "vendor": "Tinkoff", "offerId": "o1"}],
+            "complete": True, "batches": 1, "info": {}}
+    flights = run(Stub(flight_search=fres), server.flight_search, "SVO", "LED",
+                  "2026-08-01")
+    check("flight_offer(offer_id)" in flights,
+          f"a flight listing must name flight_offer: {flights!r}")
+    print("  afisha/flight: each listing names the tool its ids feed into")
+
+
 def main():
     print("honest output:")
     test_a_capped_catalogue_scan_says_what_it_did_not_look_at()
@@ -377,6 +409,7 @@ def main():
     test_an_id_of_the_wrong_kind_says_so()
     test_a_venue_id_from_the_wrong_vertical_is_named_as_such()
     test_the_venue_list_names_the_tool_its_ids_work_in()
+    test_afisha_and_flight_listings_name_the_next_tool_for_their_ids()
     test_diagnostics_says_how_much_it_is_showing()
     test_grocery_cart_total_is_goods_only_and_names_the_free_threshold()
     test_grocery_search_miss_inside_a_saturated_scan_is_not_absence()

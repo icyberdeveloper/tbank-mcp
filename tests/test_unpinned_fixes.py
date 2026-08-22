@@ -247,8 +247,12 @@ def test_setting_a_cart_refuses_when_the_current_one_cannot_be_read():
         def grocery_cart_get(self, **kw):
             raise TbankApiError("500", "Сервис временно недоступен")
 
-        def grocery_cart_set(self, *a, **kw):
-            writes.append(kw)
+        # The write choke is _grocery_cart_write (→ _call_read("grocery_cart_set")),
+        # NOT a grocery_cart_set method — the old override intercepted nothing, so
+        # the «no write happened» check was vacuous. Overriding the real writer makes
+        # it catch a write if the refusal ever stops short-circuiting.
+        def _grocery_cart_write(self, *a, **kw):
+            writes.append((a, kw))
             return {"goodsSum": 1.0}
 
     try:

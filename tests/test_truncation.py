@@ -328,6 +328,37 @@ JSON_TOOLS = [
     ("invest_portfolio", lambda: server.invest_portfolio("2000000001", 30),
      AnySession(invest_portfolio=BIG)),
 ]
+# --- travel fixtures for ROW_TOOLS -----------------------------------------
+# 200 free places in one carriage / 200 free seats in one cabin: enough to overrun
+# any limit, shaped exactly as the two APIs answer.
+_TRAIN_WAY = {"segments": [{
+    "number": "083Й", "displayTrainNumber": "083Й",
+    "departureDateTime": "2026-09-15T06:05:00+03:00",
+    "arrivalDateTime": "2026-09-16T23:34:00+05:00",
+    "origin": {"stationCode": "2000005", "stationName": "Москва"},
+    "destination": {"stationCode": "2040000", "stationName": "Челябинск"}}]}
+_TRAIN_REF = server.pack_ref("train", {"so": "2000000", "sd": "2040000",
+                                       "date": "2026-09-15", "n": "083Й",
+                                       "dep": "2026-09-15T06:05:00+03:00"})
+_MANY_PLACES = {"carSearchId": "cs-1", "cars": [{
+    "number": "03", "type": "ReservedSeat", "typeName": "ПЛАЦ",
+    "places": [{"enumeration": "Compartments", "gender": "NoValue",
+                "places": [{"number": str(i), "placeType": "Upper",
+                            "serviceClass": "3П",
+                            "refundablePrice": {"price": 5000 + i}}
+                           for i in range(200)]}]}]}
+_PRELIM = {"flights": [{"flightSegments": [{
+    "number": 1420, "carriers": {"marketing": {"code": "SU", "name": "Аэрофлот"},
+                                 "operating": {"code": "SU"}},
+    "departure": {"time": "2026-09-15T21:45:00+0300", "airport": {"code": "SVO"}},
+    "arrival": {"time": "2026-09-16T02:20:00+0500", "airport": {"code": "CEK"}}}]}],
+    "offers": [{"uuid": "u-1", "price": {"amount": "10000.00", "currency": "RUB"}}]}
+_MANY_SEATS = {"minPrice": 199, "flights": [{"segments": [{"rows": [
+    {"number": i, "seats": {"A": {"available": True,
+                                  "price": {"amount": 200 + i},
+                                  "additional": ["window"]}}}
+    for i in range(200)]}]}]}
+
 ROW_TOOLS = [
     ("list_operations", lambda lim: server.list_operations("1111111111", 30, lim),
      AnySession(list_operations=MANY)),
@@ -336,6 +367,21 @@ ROW_TOOLS = [
     ("cinema_search", lambda lim: server.cinema_search("", "Москва", lim),
      AnySession(cinema_movies=([{"name": f"Фильм {i}", "eventId": str(i)}
                                 for i in range(200)], 200, 200))),
+    # Travel listings go through the same check: a 288-place carriage and a
+    # 187-seat cabin are exactly the sizes where an unmarked cut reads as «that is
+    # everything that was free».
+    ("train_seats", lambda lim: server.train_seats(_TRAIN_REF, limit=lim),
+     AnySession(train_search=([_TRAIN_WAY], "sid"), train_cars=_MANY_PLACES)),
+    ("flight_seats", lambda lim: server.flight_seats("SID.1", 1, 0, lim),
+     AnySession(flight_preliminary=_PRELIM, flight_seatmaps=_MANY_SEATS)),
+    ("hotel_search",
+     lambda lim: server.hotel_search("Город", "2026-09-05", "2026-09-08", 2, "", lim),
+     AnySession(hotel_autocomplete={"locations": [{"id": 1, "name": "Город"}]},
+                hotel_search={"isLoadingCompleted": True,
+                              "hotelDetails": [{"hotelId": i,
+                                                "offerDetails": {"price": {"amount": 100 + i}}}
+                                               for i in range(200)]},
+                hotel_static_info={})),
 ]
 
 
@@ -756,6 +802,205 @@ def test_real_capture_payload_survives():
         print(f"  real capture: {n} subscriptions fit whole, nothing dropped")
 
 
+def test_travel_times_are_parsed_not_sliced():
+    """`str(t)[11:16]` and `[:10]` on an ISO instant are the defect this file is
+    about, one layer down: they read POSITIONS out of someone else's formatting.
+
+    Two ways they go wrong, both silent:
+      * an instant the bank writes without zero padding shifts every character,
+        and the slice returns a fragment that still LOOKS like a time;
+      * a date with no time of day slices to nothing, but parsing it yields
+        midnight — so a naive parser would state a departure hour nobody sent.
+    """
+    # The bank's own shape must survive unchanged, in its OWN zone: a flight
+    # leaving at 21:45+0300 leaves at 21:45, and converting to MSK would be a
+    # different (wrong) number for any other offset.
+    check(server._local_hhmm("2026-08-26T02:20:00+0500") == "02:20",
+          "a stated local time must be printed as stated, not converted")
+    check(server._local_date("2026-08-26T02:20:00+0500") == "2026-08-26",
+          "the date must come from the stated instant")
+
+    odd = "2026-8-5T21:45:00+03:00"          # not zero-padded — legal-ish, unusual
+    sliced = odd[11:16]
+    got = server._local_hhmm(odd)
+    check(got != sliced or ":" not in sliced,
+          f"the old slice produced {sliced!r} from {odd!r} — a fragment that reads "
+          f"like a time; the parser must not repeat it")
+
+    check(server._local_hhmm("2026-08-25") == "",
+          "a date with no time must print no time — «00:00» would be invented")
+    check(server._local_date("2026-08-25") == "2026-08-25",
+          "a bare date is still a date")
+    for junk in ("", None, "не дата"):
+        check(server._local_hhmm(junk) == str(junk or ""),
+              f"unparseable input must come back as it arrived, got "
+              f"{server._local_hhmm(junk)!r}")
+    print("  travel times: parsed in the stated zone, never invented, never sliced")
+
+
+def test_train_and_flight_search_show_the_arrival_day():
+    """End-to-end: the renderers must actually USE the parsers, not just have them.
+
+    An overnight Moscow→Chelyabinsk train (06:05 → 23:34 NEXT day, +05:00) rendered
+    as «06:05→23:34» reads as a 17-hour same-day trip. The output must carry the
+    arrival date when it differs — proving the helper is wired into render(), not
+    only unit-tested in isolation."""
+    saved = server._require
+    try:
+        server._require = lambda: AnySession(train_search=([_TRAIN_WAY], "sid"))
+        out = server.train_search("2000000", "2040000", "2026-09-15", limit=1)
+        check("06:05" in out and "23:34" in out, f"both clocks must show: {out}")
+        check("2026-09-16" in out,
+              f"the arrival DATE must show when the train lands next day: {out}")
+
+        # flight_search's own shape (NOT the preliminary one): airport and
+        # carriers.marketing are plain codes, offers index into `flights`.
+        fway = {"flightSegments": [{
+            "carriers": {"marketing": "SU"},
+            "departure": {"time": "2026-09-15T21:45:00+0300", "airport": "SVO"},
+            "arrival": {"time": "2026-09-16T02:20:00+0500", "airport": "CEK"}}],
+            "duration": 275}
+        server._require = lambda: AnySession(flight_search={
+            "flights": [fway], "offers": [
+                {"flights": [0], "price": {"amount": "5000", "currency": "RUB"},
+                 "vendor": "Tinkoff", "offerId": "x.0"}],
+            "complete": True, "batches": 1, "info": {}})
+        out2 = server.flight_search("SVO", "CEK", "2026-09-15", limit=1)
+        check("21:45" in out2 and "02:20" in out2,
+              f"a flight must show departure AND arrival time: {out2}")
+        check("2026-09-16" in out2,
+              f"an overnight flight must show the arrival date: {out2}")
+    finally:
+        server._require = saved
+    print("  train/flight search: arrival day shown, parsers wired into render()")
+
+
+def test_order_created_time_is_moscow_not_a_naive_slice():
+    """order_details showed «создан {created[:16]}» — the [:16] keeps the digits and
+    drops the «Z», so a bank timestamp of 00:30 UTC printed as «00:30» when the
+    owner's clock (and the app) read 03:30 MSK; anything in the 21:00–24:00 UTC
+    band was also stamped a day early. _msk_iso converts to Moscow, like every
+    other bank-side instant in this file."""
+    d = {"orderInfo": {"orderId": "o-1", "status": "PAID",
+                       "created": "2026-08-04T00:30:00Z"},
+         "objectInfo": {}, "eventInfo": {}, "cartInfo": {}}
+    saved = server._require
+    server._require = lambda: AnySession(order_details=d)
+    try:
+        out = server.order_details("o-1")
+        check("03:30" in out,
+              f"a 00:30 UTC order time must render as 03:30 MSK: {out!r}")
+        check("T00:30" not in out and " 00:30" not in out,
+              f"the naive [:16] slice (00:30, wrong zone) must be gone: {out!r}")
+    finally:
+        server._require = saved
+    print("  order_details: created time converted to MSK, not sliced raw")
+
+
+def test_ticket_files_cannot_collide_on_a_long_name():
+    """Two itinerary receipts differ only in the passenger's name, and a bank that
+    spells names in full puts that difference PAST any character cut. The old
+    `re.sub(...)[:120]` merged them onto one path: the second write was refused as
+    «already exists», naming a file holding the FIRST passenger's ticket.
+
+    _attachment_leaf bounds the stem in bytes, keeps `.pdf`, and tags a shortened
+    name with a hash of the whole document id."""
+    import tempfile as _tf
+    out = _tf.mkdtemp(prefix="tbank-tickets-")
+    saved = server._RECEIPTS_DIR
+    server._RECEIPTS_DIR = out
+    try:
+        long_name = "Ticket_passenger_" + "Ж" * 200
+        pdf = b"%PDF-1.4\nfake\n"
+        ok1, note1 = server._save_pdf(pdf, "", long_name + "_A.pdf", "doc-A", False)
+        ok2, note2 = server._save_pdf(pdf, "", long_name + "_B.pdf", "doc-B", False)
+        check(ok1 and ok2, f"both receipts must be saved: {note1!r} / {note2!r}")
+        paths = {note1.splitlines()[0], note2.splitlines()[0]}
+        check(len(paths) == 2,
+              f"two documents landed on ONE path — that is the collision: {paths}")
+        for note in (note1, note2):
+            leaf = note.splitlines()[0].rsplit("/", 1)[-1].split(" ")[0]
+            check(leaf.endswith(".pdf"),
+                  f"the extension must survive the cut, got {leaf!r}")
+            check(len(leaf.encode()) <= server._LEAF_BYTES,
+                  f"{leaf!r} is {len(leaf.encode())} bytes — the limit is measured "
+                  f"in BYTES and Cyrillic costs two")
+        check("длиннее" in note1,
+              f"a shortened name must SAY it was shortened: {note1!r}")
+    finally:
+        server._RECEIPTS_DIR = saved
+    print("  ticket files: long names keep .pdf, stay unique, and report the cut")
+
+
+def test_travel_detail_lists_are_not_silently_capped():
+    """Three lists where «the first few» is the wrong answer, and each was capped.
+
+    Fare rules say whether a ticket can be handed back; hotel ratings are
+    per-aspect and the one a reader wants is not reliably early; installment plans
+    exist to be COMPARED, and in the captured answer the cheapest total was third
+    of four."""
+    rules = {"fareRules": [{"fareName": f"Правило {i}"} for i in range(9)]}
+    line = server._fare_rules_line(rules)
+    check(line.count("Правило") == 9,
+          f"all 9 fare rules must be shown, got {line.count('Правило')}")
+
+    session = AnySession(
+        hotel_card={"hotelName": "Отель", "starRating": "4.5"},
+        hotel_reviews={"summary": "",
+                       "ratings": {"ratings": [{"name": f"Аспект {i}", "value": i}
+                                               for i in range(9)]}})
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out = server.hotel_info("1")
+        check(out.count("Аспект") == 9,
+              f"all 9 rating aspects must be shown, got {out.count('Аспект')}")
+        check(out.startswith("Отель ★★★★"),
+              f"a fractional starRating must not lose the card: {out.splitlines()[0]!r}")
+
+        plans = AnySession(
+            travel_accounts=[{"id": "1", "name": "Счёт",
+                              "moneyAmount": {"value": 100, "currency": {"code": 643}},
+                              "loyalty": [{"primeLoyaltyId": "1", "bonusLimit": 10}]}],
+            travel_usable_bonuses={}, travel_predict_bonuses={},
+            travel_loan_allowance=True,
+            travel_installment=[{"period": p, "monthlyPayment": 1, "totalPrice": p}
+                                for p in range(3, 3 + 7)])
+        server._require = lambda: plans
+        out2 = server.travel_payment_options(10000)
+        check(out2.count("Рассрочка") == 7,
+              f"all 7 installment plans must be shown, got {out2.count('Рассрочка')}")
+    finally:
+        server._require = saved
+    print("  fare rules / ratings / installment plans are shown in full")
+
+
+def test_hotel_search_names_the_place_it_picked_and_the_ones_it_did_not():
+    """Autocomplete answers several places for one word — «Сочи» is a city, an
+    airport and a district. Searching the first without saying so makes a wrong
+    guess indistinguishable from the only possible answer."""
+    session = AnySession(
+        hotel_autocomplete={"locations": [
+            {"id": 1, "name": "Сочи", "type": {"name": "Город"}},
+            {"id": 2, "name": "Аэропорт Сочи", "type": {"name": "Аэропорт"}},
+            {"id": 3, "name": "Сочи (район)", "type": {"name": "Округ"}}], "hotels": []},
+        hotel_search={"isLoadingCompleted": True,
+                      "hotelDetails": [{"hotelId": 7,
+                                        "offerDetails": {"price": {"amount": 100}}}]},
+        hotel_static_info={})
+    saved = server._require
+    server._require = lambda: session
+    try:
+        out = server.hotel_search("Сочи", "2026-09-05", "2026-09-08")
+        check("Аэропорт Сочи" in out and "Сочи (район)" in out,
+              f"the places NOT searched must be named: {out!r}")
+        check("Искал по «Сочи»" in out,
+              f"the answer must say which place it searched: {out!r}")
+    finally:
+        server._require = saved
+    print("  hotel_search: names the place it picked and the ones it skipped")
+
+
 def main():
     print("truncation honesty:")
     test_json_payload_keeps_whole_records()
@@ -781,6 +1026,12 @@ def main():
     test_shop_cart_and_place_info_report_what_they_hide()
     test_insurance_policies_unknown_shape_falls_back_through_json_out()
     test_real_capture_payload_survives()
+    test_travel_times_are_parsed_not_sliced()
+    test_train_and_flight_search_show_the_arrival_day()
+    test_order_created_time_is_moscow_not_a_naive_slice()
+    test_ticket_files_cannot_collide_on_a_long_name()
+    test_travel_detail_lists_are_not_silently_capped()
+    test_hotel_search_names_the_place_it_picked_and_the_ones_it_did_not()
     if failures:
         print("\nFAILED:")
         for f in failures:

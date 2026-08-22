@@ -91,18 +91,37 @@ POST_READS = {
     # "contacts": []}, which states WHY it is empty rather than implying there are
     # none. Verified live.
     "contacts",
+    # POST /api/promocodes with an EMPTY body — the client is identified by the
+    # session alone, and the answer is a list of promo codes to spend in Город.
+    # Nothing is created or consumed by asking. Verified live: it answers the same
+    # header and list on every call.
+    "promocodes",
 }
 
 
 def sections():
-    """Every section name the tool advertises, read off the live implementation."""
-    import inspect
-    src = inspect.getsource(MobileSession.get_data)
-    # The names are the dict KEYS, and the point of reading them here is to drive
-    # the test from whatever the code actually offers rather than from a copy.
-    import re
-    body = src.split("_SECTIONS = {", 1)[1].split("\n        }", 1)[0]
-    return sorted(set(re.findall(r'"([a-z_]+)":\s*"', body)))
+    """Every section name the tool advertises — read off the RUNNING tool, not its
+    source. The old version regexed the `_SECTIONS = {` literal for `"key": "` and
+    silently dropped any entry the pattern did not match (it lost `sbp_me2me`),
+    so the enum tests below were validating a strict SUBSET of the real registry.
+
+    get_data refuses an unknown section with «…Доступные: a, b, c…», where the list
+    is `", ".join(sorted(_SECTIONS))` built from the same dict the tool resolves
+    against. Parsing that refusal drives the tests from what the code actually
+    offers, and cannot fall out of sync with it the way a source regex can."""
+    s = Recorder()
+    try:
+        s.get_data("§not-a-real-section§")
+    except TbankApiError as e:
+        msg = str(e)
+        after = msg.split("Доступные:", 1)[1]
+        listed = after.split(".", 1)[0]
+        names = sorted(n.strip() for n in listed.split(",") if n.strip())
+        assert "sbp_me2me" in names, (
+            "the live refusal no longer lists sbp_me2me — the parser or the "
+            f"message format changed: {msg!r}")
+        return names
+    raise AssertionError("get_data accepted a nonsense section instead of refusing")
 
 
 # ---- 1: the enum is closed ------------------------------------------------
@@ -111,8 +130,9 @@ def test_an_unknown_section_cannot_address_a_write_endpoint():
     """The four below are real template keys, and three of them WRITE. Under the old
     fall-through each one was reachable from a tool a host may run unprompted."""
     s = Recorder()
-    dangerous = ["v1_pay", "grocery_cart_set", "order_cancel", "messenger_mark_read",
-                 "grocery_order_create", "payment_gate_pay"]
+    # grocery_order_create/payment_gate_pay templates were removed with their dead
+    # methods; the surviving write-capable keys are what get_data must still refuse.
+    dangerous = ["v1_pay", "grocery_cart_set", "order_cancel", "messenger_mark_read"]
     for key in dangerous:
         if key not in BUILTIN_ENDPOINTS:
             continue
@@ -183,7 +203,7 @@ def test_a_filter_section_refuses_without_its_filter():
     «долгов нет»."""
     s = Recorder()
     for name in ("account_details", "full_debt_amount", "statement_exist",
-                 "statements", "providers", "requisites"):
+                 "statements", "providers", "requisites", "sbp_me2me"):
         s.sent.clear()
         try:
             s.get_data(name)
@@ -192,7 +212,16 @@ def test_a_filter_section_refuses_without_its_filter():
             check(e.result_code == "ARG_REQUIRED",
                   f"{name}: wrong refusal {e.result_code}")
             check(not s.sent, f"{name}: a request went out anyway")
-    print("  arg: six filter sections refuse instead of querying nothing")
+    # Cover EVERY arg-required section, not a hand-picked subset: the old
+    # source-regex sections() dropped sbp_me2me, and this test's list had dropped
+    # it too, so a whole arg-required section went unchecked in both places at once.
+    covered = {"account_details", "full_debt_amount", "statement_exist",
+               "statements", "providers", "requisites", "sbp_me2me"}
+    required = set(MobileSession("sid", "rt")._SECTION_ARG)
+    check(covered == required,
+          f"arg-required sections not all covered by the refusal test: "
+          f"missing {required - covered}, stale {covered - required}")
+    print("  arg: seven filter sections refuse instead of querying nothing")
 
 
 # ---- 3: the bills that were never asked for ------------------------------

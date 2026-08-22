@@ -41,13 +41,30 @@ def main():
 
     width = max(len(f) for f in files)
     failed, results = [], []
+    # A per-file wall-clock cap: without it one hung test (a real socket that never
+    # answers, a deadlocked poll) hangs the WHOLE run with no output, and CI just
+    # times out with nothing to point at. 300 s is far above the slowest file
+    # (~4 s here) — it fires only on a genuine hang, and names the file that hung.
+    PER_FILE_TIMEOUT = 300
     for name in files:
         started = time.monotonic()
-        proc = subprocess.run([sys.executable, os.path.join(HERE, name)],
-                              cwd=ROOT, env=env, capture_output=True, text=True)
-        took = time.monotonic() - started
-        ok = proc.returncode == 0
-        results.append((name, ok, took, proc.stdout, proc.stderr))
+        try:
+            proc = subprocess.run([sys.executable, os.path.join(HERE, name)],
+                                  cwd=ROOT, env=env, capture_output=True, text=True,
+                                  timeout=PER_FILE_TIMEOUT)
+            took = time.monotonic() - started
+            ok = proc.returncode == 0
+            results.append((name, ok, took, proc.stdout, proc.stderr))
+        except subprocess.TimeoutExpired as e:
+            took = time.monotonic() - started
+            ok = False
+            out = e.stdout or ""
+            err = (e.stderr or "") + (
+                f"\n*** TIMED OUT after {PER_FILE_TIMEOUT}s — the file hung and was "
+                f"killed; the run did not wait on it forever. ***")
+            out = out.decode() if isinstance(out, bytes) else out
+            err = err.decode() if isinstance(err, bytes) else err
+            results.append((name, ok, took, out, err))
         print(f"{name:{width}}  {'PASS' if ok else 'FAIL'}  {took:5.2f}s")
         if not ok:
             failed.append(name)

@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -22,7 +23,8 @@ from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
 from pydantic import BaseModel
 from . import client, trace
 from .client import (MobileSession, TbankApiError, SessionExpired,
-                     PaymentConfirmationRequired, ms_for_period, vertical)
+                     PaymentConfirmationRequired, ms_for_period, vertical,
+                     pack_ref, poll_until_ready, unpack_ref)
 from .endpoints import VERTICALS, APP_VERSION
 from .observability import redact_text, redact_reflected_secrets, _redact_value
 
@@ -131,6 +133,21 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "flight_history": ("История авиапоисков", READ),
     "shop_search": ("Поиск товаров в маркетплейсе", READ),
     "shop_cart": ("Корзины маркетплейса", READ),
+    # travel booking. train_book holds seats without charging, so it is WRITE —
+    # the same class as cinema_book, whose money arrives in a separate call.
+    "train_seats": ("Места в поезде", READ),
+    "train_book": ("Бронирование мест в поезде", WRITE),
+    "train_pay": ("Оплата ЖД-брони", MONEY),
+    "train_refund": ("Возврат ЖД-билета", WRITE),
+    "flight_offer": ("Тариф, багаж и правила перелёта", READ),
+    "flight_seats": ("Места в самолёте", READ),
+    # There is no hold step for flights: this one call books AND charges.
+    "flight_book": ("Оформление и оплата авиабилета", MONEY),
+    "hotel_search": ("Поиск отелей", READ),
+    "hotel_info": ("Карточка отеля, отзывы и тарифы", READ),
+    "trips": ("Поездки", READ),
+    "travel_payment_options": ("Чем платить за поездку", READ),
+    "travel_ticket_file": ("Билет или маршрутная квитанция в файл", WRITE),
     # messenger
     "messenger_conversations": ("Чаты", READ),
     "messenger_messages": ("История чата", READ),
@@ -589,6 +606,17 @@ def _require():
             _session = _with_persist(fresh)
             _session_mtime = disk
     if not _session or not _session.mobile_sessionid:
+        # A corrupt/unreadable session file is not «you never logged in» — the fix
+        # is the same (re-login), but the diagnosis must be honest so the user does
+        # not hunt for a login they already did. `_load_session` returns None for
+        # both «no file» and «file present but unreadable»; the file's existence
+        # tells them apart.
+        if os.path.exists(_SESSION_FILE) and _session is None:
+            raise TbankApiError(
+                "SESSION_UNREADABLE",
+                f"файл сессии есть, но не читается ({_SESSION_FILE}) — вероятно "
+                f"повреждён. Выполни login(phone)+confirm_otp(otp), это перезапишет "
+                f"его. (Если ты только что логинился — сессия могла быть затёрта.)")
         raise TbankApiError("NO_SESSION",
             "Сначала вызови login(phone).")
     return _session
@@ -722,8 +750,13 @@ def _json_trim(data, limit: int = 5000) -> str:
 
 
 def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: str = "",
-              order_note: str = "") -> str:
+              order_note: str = "", tail: str = "") -> str:
     """Render a list of rows with an honest header.
+
+    `tail` is the next step, printed after the rows. A listing that hands out ids
+    for another tool has to name that tool in its OUTPUT: the docstring is read
+    when the agent picks the tool, but the answer is what it is holding when it
+    decides what to do next.
 
     list_operations used to print `for o in ops[:50]` with no count and no limit
     argument: a 30-day request returning 229 operations showed the newest 50 — four
@@ -744,7 +777,7 @@ def _rows_out(rows, render, *, limit: int, total: int, header: str, more_hint: s
         # Now the default is silence, and each caller states its own order.
         head += (f" ({order_note}). " if order_note else " ")
         head += more_hint or f"Передай limit={total}, чтобы увидеть все."
-    return "\n".join([head] + [render(r) for r in shown])
+    return "\n".join([head] + [render(r) for r in shown] + ([tail] if tail else []))
 
 
 # The bank is a Moscow bank. Every millisecond timestamp it sends is an INSTANT,
@@ -786,6 +819,74 @@ def _msk_iso(text, fmt: str = "%Y-%m-%d %H:%M") -> str:
     if dt.tzinfo is None:
         return dt.strftime(fmt)
     return dt.astimezone(MSK).strftime(fmt)
+
+
+def _stars(value) -> int:
+    """A hotel's star count, clamped to what a rating can be.
+
+    Not `int(value or 0)`: the field arrives as a string in some records and as
+    «4.5» in others, and an uncaught ValueError there would drop the entire hotel
+    card over a row of decoration."""
+    try:
+        return max(0, min(5, int(float(value or 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _iso_parts(text) -> datetime | None:
+    """Parse an ISO-8601 instant, or None. No zone conversion — see below."""
+    s = str(text or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _local_hhmm(text) -> str:
+    """HH:MM in the zone the API STATED, not in Moscow.
+
+    Travel times are the traveller's: a flight leaving Vladivostok at 21:45+1000
+    leaves at 21:45, and rendering it through _msk_iso would print 14:45 and be
+    wrong on the boarding pass. So this keeps the offset it was given and only
+    formats it.
+
+    Sliced as `str(t)[11:16]` before, which is the defect no-silent-truncation
+    names: it happens to work on `2026-08-25T21:45:00+0300` and silently produces
+    garbage on any other length — a date with no time, or `…T21:45Z`."""
+    raw = str(text or "").strip()
+    dt = _iso_parts(raw)
+    if dt is None:
+        # Never invent a time from a string we could not parse.
+        return raw
+    if "T" not in raw and " " not in raw:
+        # A date with no time of day. fromisoformat fills in midnight, and
+        # printing «00:00» would state a departure hour nobody sent.
+        return ""
+    return dt.strftime("%H:%M")
+
+
+def _local_date(text) -> str:
+    """YYYY-MM-DD in the zone the API stated. Same reasoning as _local_hhmm."""
+    dt = _iso_parts(text)
+    if dt is None:
+        return str(text or "")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _local_dt(text) -> str:
+    """«YYYY-MM-DD HH:MM» in the zone the API stated — the date-plus-time form of
+    _local_hhmm, for event slots and reservations. A date with no time of day
+    renders without a fabricated «00:00»; an unparseable value is returned as-is
+    rather than silently sliced (the [:16] defect no-silent-truncation names)."""
+    dt = _iso_parts(text)
+    if dt is None:
+        return str(text or "")
+    raw = str(text).strip()
+    if "T" not in raw and " " not in raw:
+        return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _flat(text) -> str:
@@ -880,7 +981,10 @@ def confirm_otp(otp: str) -> str:
 
 @mcp.tool()
 def confirm_password(password: str) -> str:
-    """Отправить пароль аккаунта (первый логин на новом устройстве)."""
+    """НЕ вызывай напрямую из чата: пароль аккаунта не должен проходить через
+    агента. Этот тул существует для login_cli.py, который читает пароль из
+    терминала, невидимого модели. Если банк просит password (первый логин на
+    новом устройстве) — попроси пользователя запустить login_cli.py."""
     global _session
     if not _session: return _err(_NO_SESSION_YET)
     try:
@@ -1094,7 +1198,8 @@ def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000)
     """Универсальный getter. section = subscriptions | subscription_bills |
     credit_schedule | credit_rating |
     statements | invoices | templates | contacts | cards | loans | autopayments |
-    sbp | offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
+    sbp | sbp_me2me | promocodes |
+    offers | gifts | services | bundles | manager | merchant_subs | profile | homes |
     cars | shortcuts | finhealth_total | finhealth_turnover | finhealth_presets |
     finhealth_invest | invest_accounts | invest_offers | invest_yield | pension |
     broker_margin | shared | shared_owned | business_info | appointments |
@@ -1110,7 +1215,10 @@ def get_data(section: str, arg: str = "", days: int = 30, max_chars: int = 5000)
                            paymentFields, которые нужны pay_bill().
     Проверяй ОБА, прежде чем сказать «неоплаченных счетов нет».
 
-    ШЕСТИ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
+    СЕМИ секциям НУЖЕН arg — без него тул не вернёт пустоту, а поднимет ошибку:
+      sbp_me2me  — arg = СВОЙ телефон. Отвечает, из каких банков клиент может
+                   стянуть собственные деньги по СБП. Это НЕ поиск получателя —
+                   для него transfer_sbp_resolve(phone).
       providers  — arg = список id через запятую («fns-rf,gibdd-online-rf»).
                    Перечислить все провайдеры этим эндпоинтом нельзя, только найти
                    известные по id.
@@ -1784,6 +1892,14 @@ def grocery_order_status(order_id: str, app_id: str = "") -> str:
         # There is NO paymentInfo and no top-level sum — reading those made every
         # order look unpaid with an unknown sum. Payment is evidenced by paymentId,
         # and CREATED_DYNAMIC is the NORMAL status of a placed order, not a failure.
+        # An EMPTY order dict means the bank returned nothing recognisable for this
+        # id — «order not found», NOT «found but unpaid». Printing «paid=no payment
+        # id» over it would tell the user their order exists and is unpaid, which is
+        # exactly the reconciliation lie this tool is meant to prevent.
+        if not order.get("id") and not order.get("status"):
+            return (f"Заказ {order_id} не найден на бэкенде (банк не вернул по нему "
+                    f"данных). Это НЕ «создан и не оплачен» — сверься с orders() и "
+                    f"grocery_attempts(); если заказа нет, попытка не прошла.")
         cart = order.get("cart") or {}
         app = order.get("application") or {}
         status = order.get("status") or "?"
@@ -1942,10 +2058,10 @@ def debug_report(runs: int = 0, top: int = 6) -> str:
             out.append(f"- {t['tool']:24} n={t['n']:<4} err={t['err']:<3} "
                        f"p50={t['p50_ms']}ms p95={t['p95_ms']}ms ~{t['avg_chars']} симв.")
             for head, n in t["answers"]:
-                out.append(f"      {n:>3}× {head[:110]}")
+                out.append(f"      {n:>3}× {_cut(head, 110)}")
         if rep["repeats"]:
             out += ["", "ПОВТОРЫ (тот же тул, те же аргументы, подряд):"]
-            out += [f"- {r['tool']} ×{r['times']} — {r['head'][:90]}"
+            out += [f"- {r['tool']} ×{r['times']} — {_cut(r['head'], 90)}"
                     for r in rep["repeats"]]
         if rep["transitions"]:
             out += ["", "ПЕРЕХОДЫ:"]
@@ -2004,7 +2120,7 @@ def messenger_conversations(archived: bool = False, offset: int = 0) -> str:
 
 @mcp.tool()
 def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
-                       max_chars: int = 400) -> str:
+                       max_chars: int = 400, before_id: str = "") -> str:
     """История чата, старые сверху.
 
     Банк отдаёт одну страницу истории; параметры листают её ЛОКАЛЬНО:
@@ -2013,10 +2129,14 @@ def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
                   Отсчёт с КОНЦА страницы — не то же самое, что offset у
                   messenger_conversations(), где отсчёт с начала списка чатов;
       max_chars — кап текста одного сообщения (0 = целиком). Обрезка всегда
-                  помечена и называет полную длину."""
+                  помечена и называет полную длину;
+      before_id — курсор банка: id сообщения, СТАРЕЕ которого догрузить
+                  ПРЕДЫДУЩУЮ страницу. offset/limit листают внутри одной
+                  страницы; before_id перелистывает на другую. Когда вывод
+                  дошёл до края страницы, он сам называет нужный before_id."""
     try:
         s = _require(); s.ensure_fresh()
-        msgs = s.messenger_messages(conversation_id)
+        msgs = s.messenger_messages(conversation_id, message_id=before_id)
         # oldest→newest, and keep the author and time: a bare list of 60-char text
         # fragments loses who said what, which is most of the meaning in a chat.
         msgs = sorted((m for m in msgs if isinstance(m, dict)),
@@ -2028,10 +2148,17 @@ def messenger_messages(conversation_id: str, limit: int = 20, offset: int = 0,
         window = msgs[start:end]
         head = (f"Чат {conversation_id}: {len(msgs)} сообщений на странице банка, "
                 f"показано {len(window)} (старые выше).")
+        oldest_id = str((msgs[0] or {}).get("id") or "")
         if start > 0:
-            head += f" Старее: offset={offset + len(window)}; limit=0 — вся страница."
-        elif offset > 0:
-            head += " Это самые старые сообщения, которые отдал банк."
+            # More OLDER messages remain on THIS fetched page: local offset reaches them.
+            head += f" Старее на этой странице: offset={offset + len(window)}; limit=0 — вся страница."
+        elif oldest_id:
+            # The window already includes the oldest message the bank returned for
+            # this cursor. Older history is a SEPARATE bank page — local offset
+            # cannot reach it; only the `before_id` cursor can. Saying «это самые
+            # старые» here was a dead end that hid the rest of the chat.
+            head += (f" Это край страницы банка. Догрузить более старые: "
+                     f"before_id=\"{oldest_id}\".")
         if not window:
             return head
         out = [head]
@@ -2237,11 +2364,16 @@ def messenger_file(conversation_id: str, file_id: str,
 
         name_note = ""
         if save_to:
-            path = os.path.realpath(os.path.expanduser(save_to))
+            # abspath, NOT realpath: realpath resolves a symlink in the final
+            # component too, so O_NOFOLLOW below would guard the RESOLVED
+            # target instead of the symlink — defeating it. abspath only
+            # normalises «..» textually, leaving the final component for
+            # O_NOFOLLOW to refuse.
+            path = os.path.abspath(os.path.expanduser(save_to))
         else:
             leaf, name_note = _attachment_leaf(file_name, file_id)
             path = os.path.join(_CHAT_FILES_DIR, leaf)
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (
             os.O_TRUNC if overwrite else os.O_EXCL)
         try:
@@ -2726,8 +2858,17 @@ def payment_qr(qr: str) -> str:
             lines.append(f"Сумма из QR: {_money(amount, 'RUB')}")
 
         if provider and provider != "transfer-legal":
-            lines.append(f"Это не перевод по реквизитам. Поля провайдера: "
-                         f"payment_providers(provider_id=\"{provider}\"), "
+            # pay_bill needs the field VALUES, not just the provider id. They were
+            # parsed from the QR (and gap-filled from the provider's defaultValue
+            # above) into `fields` — but the tool only printed them as human prose
+            # under «Реквизиты», leaving the agent to reconstruct the dict by hand.
+            # Hand over the machine-ready dict so the pay_bill call can be built,
+            # and still point at payment_providers for any field the QR did not fill.
+            lines.append("Это не перевод по реквизитам, а платёж провайдеру.")
+            lines.append(f"Поля из QR (передай как fields в pay_bill): "
+                         f"{json.dumps(fields, ensure_ascii=False)}")
+            lines.append(f"Проверь обязательные/недостающие поля: "
+                         f"payment_providers(provider_id=\"{provider}\"); "
                          f"оплата — pay_bill(\"{provider}\", fields, amount).")
             return "\n".join(lines)
 
@@ -3461,7 +3602,7 @@ def invest_operations(broker_account_id: str, operation_type: str = "", limit: i
         def render(o):
             # `payment`, not `amount`: the field never existed under that name, so
             # every row printed «?» for the one number that matters.
-            return (f"- [{str(o.get('date', ''))[:16]}] "
+            return (f"- [{_msk_iso(o.get('date', ''))}] "
                     f"{_money(o.get('payment') or o.get('paymentRub'))} "
                     f"| {o.get('type', '')} | {_cut(o.get('description', ''), 40)} "
                     f"| {o.get('status', '')}")
@@ -3766,10 +3907,17 @@ def documents(kind: str = "", include_others: bool = False) -> str:
     try:
         s = _require(); s.ensure_client_session()
         docs = s.identity_documents()
+        brief_failed = False
         try:
             own_bd = ((s.identity_brief().get("birthDate") or {}) or {}).get("value")
         except Exception:
+            # The owner's birthDate is what separates their documents from a
+            # relative's. If that lookup FAILS, own_bd is None and the filter below
+            # (`own_bd is None or …`) passes EVERYTHING — silently showing a
+            # relative's passport. Remember the failure so the answer can say the
+            # filter could not run, instead of leaking it as if it were the client's.
             own_bd = None
+            brief_failed = True
         want = kind.lower().strip()
 
         def _norm_doc_num(v):
@@ -3819,7 +3967,12 @@ def documents(kind: str = "", include_others: bool = False) -> str:
                 rest = [f"    {k} = {v}" for k, v in sorted(f.items())
                         if k not in hide]
                 out.append("\n".join([head] + rest))
-        return "\n".join(out) or f"Документов не найдено (kind={kind!r})."
+        body = "\n".join(out) or f"Документов не найдено (kind={kind!r})."
+        if brief_failed and not include_others:
+            body = ("⚠️ Не удалось определить владельца (запрос даты рождения не "
+                    "прошёл) — документы родственников НЕ отфильтрованы, среди "
+                    "показанных могут быть чужие.\n" + body)
+        return body
     except Exception as e:
         return _err_session(e)
 
@@ -3883,7 +4036,8 @@ def orders(kind: str = "", limit: int = 10) -> str:
 def order_details(order_id: str) -> str:
     """Детали одного заказа (места, зал, код брони, состав корзины).
     Работает для развлекательных заказов (кино/концерты); для продуктов —
-    grocery_order_status, для поездок деталей в этом API нет, только orders()."""
+    grocery_order_status, для поездок — travel_order_details(order_id)
+    (вагон, места, маршрут, отель)."""
     try:
         s = _require(); s.ensure_fresh()
         d = s.order_details(order_id)
@@ -3891,14 +4045,14 @@ def order_details(order_id: str) -> str:
         ev, cart = d.get("eventInfo") or {}, d.get("cartInfo") or {}
         f = info.get("fields") or {}
         out = [f"Заказ {info.get('orderId', order_id)} | {info.get('status','?')} "
-               f"| создан {str(info.get('created',''))[:16]}"]
+               f"| создан {_msk_iso(info.get('created',''))}"]
         if ev:
             out.append(f"Событие: {ev.get('eventName','?')} ({', '.join(ev.get('genres') or [])})")
         if obj:
             geo = obj.get("geo") or {}
             out.append(f"Место: {obj.get('objectName','?')}, {geo.get('address','')}")
         if info.get("reserveDate"):
-            out.append(f"Сеанс: {str(info['reserveDate'])[:16]}, {f.get('hallName','')}")
+            out.append(f"Сеанс: {_local_dt(info['reserveDate'])}, {f.get('hallName','')}")
         if f.get("reservationCode"):
             out.append(f"Код брони: {f['reservationCode']}")
         for el in (cart.get("cartElement") or []):
@@ -3912,27 +4066,184 @@ def order_details(order_id: str) -> str:
         return _err(e)
 
 
-# Эти две вертикали пока не подключены — но не потому, что банк отказывает.
-# Захват captures-gorod.xml показывает рабочие пути к обеим; им нужен отдельный
-# cookie jar, и это ещё не сделано. Формулировки ниже говорят «пока нет», а не
-# «невозможно»: прошлая версия утверждала второе и оказалась неправа.
-_TRAVEL_BLOCKED = {
-    "avia_ticket": ("маршрут, места и пассажиров отдаёт www.tbank.ru/api/travel/flight/order, "
-                    "и он требует веб-сессию поверх мобильной. Мост к ней в захвате есть "
-                    "(session/webview/get_by_token отдаёт портальную сессию), но в MCP он "
-                    "ещё не реализован"),
-    "trains_ticket": ("вагон, места и пассажиров отдаёт trains.t-bank-app.ru/api/orders/{id}, "
-                      "и он авторизуется по cookie, которую ставит сам хост в ответ на "
-                      "запрос с Bearer. Отдельная сессия для этого хоста в MCP ещё не "
-                      "заведена"),
-}
+def _rail_order_lines(s, order_id: str) -> list[str]:
+    """Car, places and per-ticket registration status for a rail order.
+
+    The ticket ids printed here are the ones train_refund() takes — they exist
+    nowhere else, so an order card that omitted them would leave «верни один
+    билет из двух» unanswerable."""
+    try:
+        order = s.train_order(order_id) or {}
+    except TbankApiError as e:
+        return [f"Детали на ЖД-хосте не отдались: {e}"]
+    if not order:
+        return ["Заказ не найден на ЖД-хосте."]
+    try:
+        blanks = {str(b.get("ticketId")): b for b in s.train_blank_status(order_id)}
+    except TbankApiError:
+        blanks = {}
+    out = []
+    price = (order.get("purchasePrice") or {}).get("totalPrice") or {}
+    if price.get("price") is not None:
+        out.append(f"Итого {_money(price.get('price'), 'RUB')}"
+                   f" (сбор {_money((order.get('purchasePrice') or {}).get('serviceFeePrice'), 'RUB')})")
+    for way in (order.get("ways") or []):
+        for seg in (way.get("segments") or []):
+            o, d = seg.get("origin") or {}, seg.get("destination") or {}
+            out.append(f"№ {seg.get('trainNumber', '?')} "
+                       f"{o.get('stationName', '?')} → {d.get('stationName', '?')} | "
+                       f"{_msk_iso(seg.get('departureDateTime'), '%d.%m %H:%M')} → "
+                       f"{_msk_iso(seg.get('arrivalDateTime'), '%d.%m %H:%M')}")
+            for item in (seg.get("orderItems") or []):
+                car = item.get("carNumber") or "?"
+                for ticket in (item.get("tickets") or []):
+                    tid = str(ticket.get("id") or "")
+                    status = (blanks.get(tid) or {}).get("erStatus") or \
+                        ticket.get("externalBlankStatus") or ""
+                    places = []
+                    for p in (ticket.get("passengers") or []):
+                        for pl in (p.get("places") or []):
+                            places.append(str(pl.get("placeNumber") or "").lstrip("0"))
+                    out.append(f"- вагон {car}, место {', '.join(places) or '?'} | "
+                               f"{_money(( ticket.get('ticketPrice') or {}).get('price'), 'RUB')}"
+                               + (f" | {_ER_STATUS.get(status, status)}" if status else "")
+                               + f" | ticket_id={tid}")
+    if any((blanks.get(t) or {}).get("isRefundPossible") for t in blanks):
+        out.append(f"Вернуть: train_refund(\"{order_id}\") — покажет расчёт, "
+                   f"вернёт только с confirm=True.")
+    out.append(f"Бланк в файл: travel_ticket_file(\"{order_id}\").")
+    return out
+
+
+# Electronic-registration states, in words. «Returned» is the one that matters
+# most: it means the ticket is already refunded, not that something failed.
+_ER_STATUS = {"ElectronicRegistrationPresent": "электронная регистрация есть",
+              "ElectronicRegistrationAbsent": "без электронной регистрации",
+              "Returned": "возвращён", "Refunded": "возвращён"}
+
+
+def _avia_order_lines(s, order_id: str, fields: dict) -> list[str]:
+    """Route and documents for a flight order."""
+    out = []
+    if fields.get("eventName"):
+        out.append(str(fields["eventName"]))
+    try:
+        docs = s.flight_documents(order_id)
+    except TbankApiError as e:
+        return out + [f"Документы не отдались: {e}"]
+    for d in docs:
+        c = d.get("contents") or {}
+        out.append(f"- {c.get('document_name') or d.get('document_type')}"
+                   + (f" | бронь {c['booking_number']}" if c.get("booking_number") else ""))
+    out.append(f"Квитанции в файл: travel_ticket_file(\"{order_id}\"); "
+               f"маршрут целиком — trips().")
+    return out
+
+
+@mcp.tool()
+def travel_ticket_file(order_id: str, save_to: str = "", overwrite: bool = False) -> str:
+    """Сохранить билет в файл: ЖД-бланк или маршрутные квитанции по перелёту.
+    По умолчанию — в ~/.local/share/tbank-mcp/receipts/.
+
+    order_id — из orders("путешествия"), train_book() или flight_book(). Тул сам
+    определяет вертикаль: у ЖД это один PDF-бланк на заказ, у авиа — по квитанции
+    на пассажира плюс общая; сохраняются все.
+
+    Файлы создаются с правами 0600: в билете паспортные данные пассажиров.
+    Существующий файл не перезаписывается — для замены overwrite=True."""
+    try:
+        s = _require(); s.ensure_fresh()
+        order = next((o for o in s.orders()
+                      if str(o.get("orderId")) == str(order_id)), None)
+        kind = (order or {}).get("objectType") or ""
+        saved, problems = [], []
+        # When the order is not in orders() the vertical is unknown, and it cannot
+        # be guessed from the id: rail and flight orders are BOTH uuids. So the
+        # unknown case simply tries flights and then rail, and says what each
+        # answered — rather than picking one on a shape that means nothing.
+        if kind in ("avia_ticket", ""):
+            try:
+                docs = s.flight_documents(order_id)
+            except TbankApiError as e:
+                docs = []
+                problems.append(f"авиа: {e}")
+            for d in docs:
+                c = d.get("contents") or {}
+                doc_id = str(c.get("document_id") or "")
+                if not doc_id:
+                    continue
+                name = str(c.get("document_name") or f"{doc_id}.pdf")
+                pdf = s.flight_document(doc_id, order_id)
+                ok, note = _save_pdf(pdf, save_to, name, doc_id, overwrite)
+                (saved if ok else problems).append(note)
+                if save_to:
+                    break        # one explicit path cannot hold several documents
+        if not saved and kind != "avia_ticket":
+            try:
+                pdf = s.train_blank(order_id)
+                ok, note = _save_pdf(pdf, save_to, f"train-{order_id}.pdf",
+                                     order_id, overwrite)
+                (saved if ok else problems).append(note)
+            except TbankApiError as e:
+                problems.append(f"ЖД: {e}")
+        if not saved:
+            return ("Билет скачать не удалось: " + "; ".join(problems)
+                    if problems else
+                    f"По заказу {order_id} банк не отдал ни одного документа.")
+        return "\n".join(saved + ([f"Не сохранено: {'; '.join(problems)}"] if problems else []))
+    except Exception as e:
+        return _err(e)
+
+
+def _save_pdf(pdf: bytes, save_to: str, name: str, doc_id: str,
+              overwrite: bool) -> tuple[bool, str]:
+    """Write PDF bytes 0600, refusing to clobber.
+
+    The leaf goes through _attachment_leaf, the same function messenger_file uses,
+    rather than a local `re.sub(...)[:120]`. That slice is the bug that helper
+    exists for: it counts CHARACTERS against a limit measured in bytes, it cuts the
+    extension off a long name («…pdf» → «…pd»), and two documents whose names
+    differ only past the cut land on ONE path — here that is «квитанция пассажира
+    А» overwriting «квитанция пассажира Б». _attachment_leaf bounds the stem in
+    bytes, keeps the suffix, and when it has to shorten, appends a tag derived from
+    the WHOLE document id so uniqueness survives — and says that it did.
+
+    The O_EXCL|O_NOFOLLOW guard mirrors payment_receipt: the «save_to pointed at
+    session.json» audit applies to any tool that takes a path from a caller."""
+    if not (pdf or b"").startswith(b"%PDF"):
+        return False, f"ответ не PDF ({len(pdf or b'')} байт)"
+    note = ""
+    if save_to:
+        # abspath, NOT realpath: realpath resolves a symlink in the final
+        # component too, so O_NOFOLLOW below would guard the RESOLVED
+        # target instead of the symlink — defeating it. abspath only
+        # normalises «..» textually, leaving the final component for
+        # O_NOFOLLOW to refuse.
+        path = os.path.abspath(os.path.expanduser(save_to))
+    else:
+        leaf, note = _attachment_leaf(name, doc_id)
+        path = os.path.join(_RECEIPTS_DIR, leaf)
+    os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (
+        os.O_TRUNC if overwrite else os.O_EXCL)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        return False, f"файл уже существует: {path} (overwrite=True — заменить)"
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(pdf)
+    os.chmod(path, 0o600)
+    return True, (f"Сохранено: {path} ({len(pdf)} байт, права 0600)"
+                  + (f"\n  {note}" if note else ""))
+
 
 @mcp.tool()
 def travel_order_details(order_id: str) -> str:
-    """Детали поездки по orderId из orders("путешествия").
+    """Детали поездки по orderId из orders("путешествия") — отель, поезд, самолёт.
 
-    Полная карточка есть только для ОТЕЛЕЙ: даты, отель, номер, питание, гости.
-    Для авиа и ж/д API отдаёт только сводку из orders() — почему, тул объяснит."""
+    Для ЖД показывает вагон, места и статус электронной регистрации; для авиа —
+    маршрут и документы; для отеля — даты, номер, питание, гостей.
+    Билет или маршрутную квитанцию в файл — travel_ticket_file(order_id)."""
     try:
         s = _require(); s.ensure_fresh()
         order = next((o for o in s.orders()
@@ -3943,11 +4254,10 @@ def travel_order_details(order_id: str) -> str:
         f = order.get("fields") or {}
         head = (f"Заказ {order_id} | {kind} | {order.get('status','?')} "
                 f"| {order.get('amount','?')} ₽ | оформлен {str(order.get('created',''))[:10]}")
-        if kind in _TRAVEL_BLOCKED:
-            what = f.get("eventName") or f.get("hotelName") or ""
-            when = str(f.get("endDate") or "")[:16]
-            return (f"{head}\n{what}" + (f"\nЗавершение: {when}" if when else "")
-                    + f"\n\nДеталей больше нет: {_TRAVEL_BLOCKED[kind]}.")
+        if kind == "trains_ticket":
+            return "\n".join([head] + _rail_order_lines(s, order_id))
+        if kind == "avia_ticket":
+            return "\n".join([head] + _avia_order_lines(s, order_id, f))
         if kind != "hotelBooking":
             return head + f"\nДетальной карточки для типа {kind} в этом API нет."
         b = s.hotel_booking(order_id)
@@ -4262,7 +4572,9 @@ def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
     Москвы, выглядит правдоподобно и бессмысленно. С object_id город не нужен —
     площадка его уже задаёт.
     Отдаёт objectId площадки и slotId каждого сеанса — оба нужны для
-    cinema_seats() и cinema_book(), поодиночке бесполезны."""
+    cinema_seats() и cinema_book(), поодиночке бесполезны. В режиме репертуара
+    (object_id без event_id) к каждому фильму печатается ещё и eventId — он тоже
+    нужен для cinema_seats()/cinema_book(), ведь фильм в каждой строке свой."""
     try:
         s = _require(); s.ensure_fresh()
         venues = s.cinema_schedule(event_id, date, city=city,
@@ -4308,7 +4620,12 @@ def cinema_schedule(event_id: str = "", date: str = "", cinema: str = "",
                     if not lines:
                         lines.append(f"{name} — {geo.get('address','')}"
                                      f" | objectId={info.get('objectId','?')}")
-                    lines.append(f"  {ev.get('eventName') or '?'}")
+                    # Repertoire mode: each event is a DIFFERENT film, so its eventId
+                    # is not the caller's argument (there is none) and must be printed
+                    # — cinema_seats()/cinema_book() need eventId+slotId+objectId, and
+                    # without the eventId the whole listing was a dead end.
+                    lines.append(f"  {ev.get('eventName') or '?'}"
+                                 f" | eventId={ev.get('eventId') or ev.get('id') or '?'}")
                 else:
                     lines.append(f"{name} — {geo.get('address','')}"
                                  + (f"  [{km:.1f} км]" if km else "")
@@ -4512,7 +4829,7 @@ def concert_schedule(event_id: str, kind: str = "concert",
                                  else f"от {(lo or hi):.0f} ₽")
                     else:
                         money = "цена по секторам"
-                    out.append(f"    {str(sl.get('startDateTime',''))[:16]} | {money} "
+                    out.append(f"    {_local_dt(sl.get('startDateTime',''))} | {money} "
                                f"| slotId={sl.get('slotId','?')}")
         if len(shown_venues) < total:
             out.insert(0, f"{total} площадок всего, показано {len(shown_venues)}. "
@@ -4531,8 +4848,7 @@ def train_search(origin: str, destination: str, date: str, adults: int = 1,
     проверить пару можно train_calendar(origin, destination): она скажет, какие
     даты вообще в продаже, и на неверной паре ответит пусто.
 
-    Купить билет через MCP нельзя: оплата уходит в webview, который headless не
-    закрывается. Это поиск и сравнение."""
+    Дальше: train_seats(train_id) — вагоны и места, оттуда train_book()."""
     try:
         s = _require(); s.ensure_fresh()
         ways, _ = s.train_search(origin, destination, date, adults=adults,
@@ -4544,8 +4860,16 @@ def train_search(origin: str, destination: str, date: str, adults: int = 1,
         def render(w):
             seg = (w.get("segments") or [{}])[0]
             o, d = seg.get("origin") or {}, seg.get("destination") or {}
-            dep = str(seg.get("departureDateTime") or "")[11:16]
-            arr = str(seg.get("arrivalDateTime") or "")[11:16]
+            # NOT [11:16]: «06:05→23:34» reads as a same-day 17-hour trip when the
+            # real journey is 39.5 h — arrival is the NEXT day and in the station's
+            # own zone (+05:00), not Moscow's. Show the date when it differs, in the
+            # local zone the API stated (a train time is where the train is).
+            dep_t = _local_hhmm(seg.get("departureDateTime"))
+            arr_t = _local_hhmm(seg.get("arrivalDateTime"))
+            dep_d = _local_date(seg.get("departureDateTime"))
+            arr_d = _local_date(seg.get("arrivalDateTime"))
+            dep = dep_t
+            arr = arr_t + (f" {arr_d}" if arr_d and arr_d != dep_d else "")
             # The price is nested under refundablePrice.price, and the seat count
             # under places.total — neither is a flat field on the car group.
             def price_of(c):
@@ -4563,12 +4887,687 @@ def train_search(origin: str, destination: str, date: str, adults: int = 1,
             return (f"- {dep}→{arr} | № {seg.get('displayTrainNumber', '?')} "
                     f"{_cut(seg.get('brandName') or seg.get('description') or '', 20)} | "
                     f"{_cut(o.get('stationName', ''), 22)} → "
-                    f"{_cut(d.get('stationName', ''), 22)} | {money}")
+                    f"{_cut(d.get('stationName', ''), 22)} | {money}"
+                    f"\n  train_id={_train_ref(origin, destination, date, seg)}")
 
         return _rows_out(ways, render, limit=limit, total=len(ways),
                          header=f"Поезда {origin}→{destination} на {date}",
                          order_note="как отдал банк",
-                         more_hint=f"Передай limit={len(ways)}.")
+                         more_hint=f"Передай limit={len(ways)}.",
+                         tail="Места и вагоны — train_seats(train_id).")
+    except Exception as e:
+        return _err(e)
+
+
+def _train_ref(origin: str, destination: str, date: str, seg: dict) -> str:
+    """The handle that carries a chosen train to the next call.
+
+    It holds only what is needed to FIND this train again — the search pair, the
+    date, the train number and its departure — not the train's data. Everything
+    the ordering call needs (the segment block, carSearchId, prices, which places
+    are still free) is re-read at the moment it is used, because all of it goes
+    stale: a seat sold three minutes ago must fail loudly, not be booked from a
+    snapshot the agent is still holding."""
+    return pack_ref("train", {"so": str(origin), "sd": str(destination),
+                              "date": date, "n": str(seg.get("number") or ""),
+                              "dep": str(seg.get("departureDateTime") or "")})
+
+
+def _resolve_train(s, train_id: str) -> tuple[dict, str]:
+    """A train handle back into (its live search segment, trainSearchId).
+
+    Re-runs the search rather than trusting a snapshot — see _train_ref."""
+    ref = unpack_ref("train", train_id)
+    ways, search_id = s.train_search(ref["so"], ref["sd"], ref["date"])
+    for w in ways:
+        for seg in (w.get("segments") or []):
+            if (str(seg.get("number")) == ref["n"]
+                    and str(seg.get("departureDateTime")) == ref["dep"]):
+                return seg, search_id
+    raise TbankApiError(
+        "TRAIN_GONE",
+        f"поезд № {ref['n']} на {ref['date']} больше не в выдаче — "
+        f"повтори train_search({ref['so']}, {ref['sd']}, \"{ref['date']}\")")
+
+
+# The order body labels each place group by its LAYOUT, and the car listing spells
+# the same thing as a plural enumeration. Mapped explicitly for the shapes seen in
+# the capture; anything else falls back to the singular lowercase form rather than
+# failing, so an unusual car can still be ordered.
+_PLACE_GROUP_TYPES = {"compartments": "compartment", "seats": "seat",
+                      "places": "place", "sections": "section"}
+
+# Waits on someone else's asynchronous job, all through poll_until_ready. Every
+# number is MEASURED off the captured flows rather than picked:
+#   refund      NotStarted → Succeed took ~6 s over three polls ~3 s apart;
+#   flight pay  Working → Ok took ~50 s, polled every 5 s (ten polls).
+# The ceilings are several times the observed time on purpose: passing one means
+# «the outcome is UNKNOWN», which is the expensive answer, so it must not be
+# reached by an operation that was merely slow.
+_REFUND_PENDING = ("", "NotStarted", "InProgress")
+_REFUND_TIMEOUT_MS = 60_000
+_REFUND_INTERVAL_MS = 2_000
+_AVIA_PAY_TIMEOUT_MS = 180_000
+_AVIA_PAY_INTERVAL_MS = 5_000
+
+
+def _place_group_type(enumeration: str) -> str:
+    key = str(enumeration or "").lower()
+    return _PLACE_GROUP_TYPES.get(key, key[:-1] if key.endswith("s") else key)
+
+
+def _own_passenger(s) -> dict:
+    """The account holder as a passenger, from the documents the bank already has.
+
+    There is no separate «passengers» store to read: identity_documents() is the
+    same prefill endpoint the travel checkout itself uses, so the passport here is
+    the one the booking would have been prefilled with in the app. The Latin
+    spellings ride along in the same record (firstNameEn/lastNameEn), which is why
+    flight booking does not have to transliterate anything.
+
+    The passport NUMBER the rail and flight APIs want is serial+number joined —
+    they are two fields in storage and one field on a ticket."""
+    docs = s.identity_documents() or {}
+    entries = docs.get("RusNationalID") or []
+    if not entries:
+        raise TbankApiError(
+            "NO_PASSPORT",
+            "в банке нет паспорта РФ — посмотри documents() и укажи пассажира явно")
+    brief = {}
+    try:
+        brief = s.identity_brief() or {}
+    except TbankApiError:
+        pass
+
+    def val(node, *path):
+        cur = node
+        for key in path:
+            cur = (cur or {}).get(key) or {}
+        return str(cur.get("value") or "") if isinstance(cur, dict) else ""
+
+    # The store also holds RELATIVES' passports the client once entered. documents()
+    # filters them out by birthDate against the account holder; the money path did
+    # NOT, so `passengers="me"` could put a relative's passport on the ticket. Same
+    # filter here: keep only entries whose person.birthDate matches the holder's.
+    own_bd = val({"v": brief}, "v", "birthDate")
+    if own_bd:
+        mine = [e for e in entries
+                if val(e, "value", "person", "birthDate") == own_bd]
+        if not mine:
+            raise TbankApiError(
+                "PASSENGER_AMBIGUOUS",
+                "в банке нет паспорта, совпадающего с владельцем счёта по дате "
+                "рождения — укажи пассажира явно (documents() покажет, что есть)")
+        entries = mine
+    # Among the owner's own entries the copy with a number wins.
+    best = max(entries, key=lambda e: len(val(e, "value", "number")))
+    v = best.get("value") or {}
+    number = (val(best, "value", "serial") + val(best, "value", "number")).strip()
+    if not number:
+        raise TbankApiError(
+            "NO_PASSPORT",
+            "паспорт в банке без номера — укажи пассажира явно")
+    sex = (val(best, "value", "person", "sexCode")
+           or val({"v": brief}, "v", "sexCode") or "male").lower()
+    person = v.get("person") or {}
+
+    def p(field):
+        node = person.get(field) or {}
+        return str(node.get("value") or "") if isinstance(node, dict) else ""
+
+    return {"first": p("firstName"), "last": p("lastName"), "middle": p("middleName"),
+            "firstEn": p("firstNameEn"), "lastEn": p("lastNameEn"),
+            "middleEn": p("middleNameEn"),
+            "birthDate": p("birthDate") or val({"v": brief}, "v", "birthDate"),
+            "number": number, "sex": sex}
+
+
+def _age_years(birth_date: str, on=None) -> int | None:
+    """Full years old on `on` (default today), or None if birthDate is unparseable.
+
+    Uses the real clock, not a frozen date — «is this person a minor» is a fact
+    about now, so the guard below is time-relative by design, not a dated literal."""
+    try:
+        b = datetime.strptime(str(birth_date)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    today = on or datetime.now(MSK).date()
+    return today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+
+
+# Under-18 is refused on the booking path: it hardcodes passengerType «Adult»,
+# «RussianPassport» and the full-fare discount, and NO capture shows a child
+# booking, so its shape and fare are unverified. Charging an adult full fare for a
+# child, or sending an adult document type, is worse than refusing.
+_MIN_PASSENGER_AGE = 18
+
+
+def _reject_minor(person: dict, who: str) -> None:
+    age = _age_years(person.get("birthDate") or "")
+    if age is not None and age < _MIN_PASSENGER_AGE:
+        raise TbankApiError(
+            "PASSENGER_MINOR",
+            f"{who}: пассажиру {age} лет — детская бронь через MCP не поддержана "
+            f"(тариф и документ ребёнка не проверены). Оформи детский билет в "
+            f"приложении.")
+
+
+def _passengers(s, spec: str) -> list[dict]:
+    """Passengers for a booking: "me" (the default) or explicit JSON.
+
+    Explicit form — a JSON list of
+    {"first","last","middle","birthDate":"YYYY-MM-DD","number","sex":"male|female"},
+    optionally with Latin "firstEn"/"lastEn" for flights. Co-passengers are typed
+    in because the bank stores documents for ONE contact; relatives' documents do
+    live in the same store, but they are not labelled as travel companions and
+    picking one silently would put a stranger's passport on a ticket."""
+    spec = (spec or "me").strip()
+    if spec.lower() in ("me", "я", "self", ""):
+        me = _own_passenger(s)
+        _reject_minor(me, "владелец счёта")
+        return [me]
+    try:
+        raw = json.loads(spec)
+    except json.JSONDecodeError as e:
+        raise TbankApiError(
+            "BAD_PASSENGERS",
+            f"passengers — либо \"me\", либо JSON-список пассажиров ({e.msg})")
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise TbankApiError("BAD_PASSENGERS", "passengers: пустой список")
+    out = []
+    for i, item in enumerate(raw, 1):
+        if not isinstance(item, dict):
+            raise TbankApiError("BAD_PASSENGERS", f"пассажир {i}: ожидался объект")
+        if str(item.get("me") or "").lower() in ("1", "true", "yes"):
+            me = _own_passenger(s)
+            _reject_minor(me, f"пассажир {i} (владелец счёта)")
+            out.append(me)
+            continue
+        missing = [k for k in ("first", "last", "birthDate", "number")
+                   if not str(item.get(k) or "").strip()]
+        if missing:
+            raise TbankApiError(
+                "BAD_PASSENGERS",
+                f"пассажир {i}: не хватает {', '.join(missing)}")
+        _reject_minor(item, f"пассажир {i}")
+        out.append({"first": item["first"], "last": item["last"],
+                    "middle": item.get("middle") or "",
+                    "firstEn": item.get("firstEn") or "",
+                    "lastEn": item.get("lastEn") or "",
+                    "middleEn": item.get("middleEn") or "",
+                    "birthDate": item["birthDate"], "number": str(item["number"]),
+                    "sex": str(item.get("sex") or "male").lower(),
+                    "bonus_card": item.get("bonus_card")})
+    return out
+
+
+def _rail_sex(sex: str) -> str:
+    """Rail spells it Male/Female; the flight API spells the same value male/female."""
+    return "Female" if str(sex).lower().startswith("f") else "Male"
+
+
+@mcp.tool()
+def train_seats(train_id: str, car_type: str = "", max_price: float = 0,
+                limit: int = 40) -> str:
+    """Вагоны и свободные места в поезде. train_id — из train_search().
+
+    car_type — фильтр по типу («плац», «купе», «сид»), max_price — верхняя граница
+    цены места. Места печатаются как «вагон/место» — именно в таком виде их ждёт
+    train_book(train_id, seats="03/10,03/12").
+
+    Цены и наличие читаются заново на каждый вызов: место могли занять минуту
+    назад."""
+    try:
+        s = _require(); s.ensure_fresh()
+        seg, search_id = _resolve_train(s, train_id)
+        data = s.train_cars(
+            (seg.get("origin") or {}).get("stationCode") or "",
+            (seg.get("destination") or {}).get("stationCode") or "",
+            str(seg.get("number") or ""), str(seg.get("departureDateTime") or ""),
+            search_id)
+        cars = [c for c in (data.get("cars") or []) if isinstance(c, dict)]
+        want = car_type.lower().strip()
+        rows = []
+        for car in cars:
+            label = f"{car.get('typeName') or car.get('type') or '?'}"
+            if want and want not in label.lower() and want not in str(car.get("type", "")).lower():
+                continue
+            for group in (car.get("places") or []):
+                for place in (group.get("places") or []):
+                    try:
+                        price = float((place.get("refundablePrice") or {}).get("price") or 0)
+                    except (TypeError, ValueError):
+                        price = 0.0
+                    if max_price and price > max_price:
+                        continue
+                    rows.append({"car": str(car.get("number") or ""), "label": label,
+                                 "carrier": car.get("carrierDisplayName") or "",
+                                 "place": str(place.get("number") or ""),
+                                 "type": place.get("placeType") or "",
+                                 "cls": place.get("serviceClass") or "",
+                                 "price": price})
+        if not rows:
+            return ("Свободных мест по этим условиям нет"
+                    + (f" (фильтр: {car_type or ''} {max_price or ''})".rstrip() if want or max_price else "")
+                    + ". Попробуй без фильтров или другой поезд.")
+        rows.sort(key=lambda r: (r["price"], r["car"], r["place"]))
+        o = (seg.get("origin") or {}).get("stationName", "")
+        d = (seg.get("destination") or {}).get("stationName", "")
+        return _rows_out(
+            rows,
+            lambda r: (f"- {r['car']}/{r['place']} | {r['label']} {r['cls']} "
+                       f"| {_PLACE_TYPES.get(r['type'], r['type'])} | {r['price']:.0f} ₽"),
+            limit=limit, total=len(rows),
+            header=(f"Поезд № {seg.get('displayTrainNumber', '?')} "
+                    f"{_cut(o, 20)} → {_cut(d, 20)}, места"),
+            order_note="дешёвые сверху",
+            tail=("Забронировать: train_book(train_id, seats=\"вагон/место,…\") — "
+                  "вагон и место через дробь, несколько мест через запятую."))
+    except Exception as e:
+        return _err(e)
+
+
+# Rail place types as the API names them, in the words a ticket uses. The two
+# «HigherLevelOfNoise» variants are the seats by the toilet/vestibule end — the
+# API says so and a passenger wants to know, so it is not dropped in translation.
+# An unmapped value prints RAW rather than being hidden: a place type nobody
+# recognises is exactly what someone needs to see before paying for it.
+_PLACE_TYPES = {"Upper": "верхнее", "Lower": "нижнее",
+                "SideUpper": "боковое верхнее", "SideLower": "боковое нижнее",
+                "SideUpperWithHigherLevelOfNoise": "боковое верхнее, шумное",
+                "SideLowerWithHigherLevelOfNoise": "боковое нижнее, шумное",
+                "LastCompartmentUpper": "верхнее у туалета",
+                "LastCompartmentLower": "нижнее у туалета",
+                "Sedentary": "сидячее", "NoValue": ""}
+
+
+def _parse_seats(seats: str) -> list[tuple[str, str]]:
+    """"03/10, 03/12" → [("03","10"), ("03","12")], preserving order.
+
+    Order matters: passenger i is seated in seat i, so a reordering here would
+    quietly put the wrong person in the wrong berth."""
+    out = []
+    for chunk in str(seats or "").replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        car, sep, place = chunk.partition("/")
+        if not sep or not car.strip() or not place.strip():
+            raise TbankApiError(
+                "BAD_SEATS",
+                f"место «{chunk}» не в формате вагон/место (например 03/10)")
+        out.append((car.strip(), place.strip()))
+    if not out:
+        raise TbankApiError("BAD_SEATS", "не указано ни одного места (например \"03/10\")")
+    return out
+
+
+def _find_places(cars: list, wanted: list[tuple[str, str]]) -> list[dict]:
+    """Match requested car/place pairs against the LIVE car listing.
+
+    A place that is no longer in the listing has been taken. Saying so by name
+    beats letting the order call fail with a code nobody can act on."""
+    index = {}
+    for car in cars:
+        if not isinstance(car, dict):
+            continue
+        for group in (car.get("places") or []):
+            for place in (group.get("places") or []):
+                key = (str(car.get("number") or "").lstrip("0"),
+                       str(place.get("number") or "").lstrip("0"))
+                index[key] = {"car": car, "group": group, "place": place}
+    found, missing = [], []
+    for car_no, place_no in wanted:
+        hit = index.get((car_no.lstrip("0"), place_no.lstrip("0")))
+        if hit is None:
+            missing.append(f"{car_no}/{place_no}")
+        else:
+            found.append(hit)
+    if missing:
+        raise TbankApiError(
+            "SEAT_TAKEN",
+            f"мест уже нет в продаже: {', '.join(missing)} — "
+            f"обнови train_seats(train_id) и выбери другие")
+    return found
+
+
+def _rail_ways(seg: dict, car_search_id: str, hits: list[dict],
+               passengers: list[dict]) -> list:
+    """The `ways` block of an order.
+
+    segmentId is generated HERE. It appears in no response anywhere in the
+    captures — the front invents one per segment to label the order's parts, so
+    there is nothing to look up and nothing to keep.
+
+    Places are grouped by car because the API groups them that way: one
+    placeGroup per car, carrying the passengers seated in it."""
+    by_car: dict[str, dict] = {}
+    for hit, person in zip(hits, passengers):
+        car, group, place = hit["car"], hit["group"], hit["place"]
+        car_no = str(car.get("number") or "")
+        grp = by_car.setdefault(car_no, {
+            "type": _place_group_type(group.get("enumeration") or ""),
+            "carType": car.get("type") or "",
+            "carNumber": car_no,
+            "gender": group.get("gender") or "NoValue",
+            "serviceClass": place.get("serviceClass") or "",
+            "bookFullCompartmentType": "None",
+            "passengers": []})
+        grp["passengers"].append({
+            "type": "single",
+            "documentWithCustomerIndex": {
+                "orderCustomerIndex": len(grp["passengers"]),
+                "document": {
+                    "type": "RussianPassport",
+                    "name": {"first": person["first"], "last": person["last"],
+                             "middle": person.get("middle") or ""},
+                    "number": person["number"],
+                    "birthDate": person["birthDate"],
+                    "sex": _rail_sex(person.get("sex"))}},
+            "passengerType": "Adult",
+            "preferredDiscount": "Full",
+            "loyalty": [],
+            "places": [{"placeNumber": str(place.get("number") or ""),
+                        "placeType": place.get("placeType") or "",
+                        "withBedding": None,
+                        "isRefundable": True}]})
+    segment = {
+        "segmentId": str(uuid.uuid4()),
+        "trainNumber": str(seg.get("number") or ""),
+        "trainName": seg.get("name") or "",
+        "departureDateTime": seg.get("departureDateTime"),
+        "arrivalDateTime": seg.get("arrivalDateTime"),
+        "origin": (seg.get("origin") or {}).get("stationCode") or "",
+        "destination": (seg.get("destination") or {}).get("stationCode") or "",
+        "railwayDepartureDateTime": seg.get("railwayDepartureDateTime"),
+        "trainsIsBranded": bool(seg.get("isBranded")),
+        "trainHasTwoStoreyCars": bool(seg.get("hasTwoStoreyCars")),
+        "placeGroups": list(by_car.values()),
+        "carSearchId": car_search_id}
+    return [[segment]]
+
+
+@mcp.tool()
+def train_book(train_id: str, seats: str, passengers: str = "me") -> str:
+    """ЗАБРОНИРОВАТЬ места в поезде. Денег НЕ списывает, но ДЕРЖИТ места ~15 минут.
+
+    train_id — из train_search(); seats — «вагон/место» через запятую, ровно как
+    их печатает train_seats(): seats="03/10,03/12".
+
+    passengers="me" — сам владелец счёта, паспорт берётся из данных банка
+    (documents()). Для нескольких пассажиров — JSON-список:
+    [{"me":true},{"first":"Имя","last":"Фамилия","middle":"Отчество",
+      "birthDate":"1990-01-31","number":"1234567890","sex":"female"}]
+    Число пассажиров должно совпадать с числом мест — кто первый в списке, тот
+    едет на первом месте.
+
+    Детская бронь (пассажир младше 18) через MCP не поддержана — тариф и документ
+    ребёнка не проверены, тул откажет; детский билет оформляется в приложении.
+
+    Оплата — отдельным вызовом train_pay(order_id); до неё деньги не двигаются."""
+    try:
+        from . import journal
+        s = _require(); s.ensure_fresh()
+        wanted = _parse_seats(seats)
+        people = _passengers(s, passengers)
+        if len(people) != len(wanted):
+            return (f"Мест {len(wanted)}, а пассажиров {len(people)} — должно быть "
+                    f"поровну. Либо добавь пассажиров, либо убери места.")
+        seg, search_id = _resolve_train(s, train_id)
+        cars = s.train_cars(
+            (seg.get("origin") or {}).get("stationCode") or "",
+            (seg.get("destination") or {}).get("stationCode") or "",
+            str(seg.get("number") or ""), str(seg.get("departureDateTime") or ""),
+            search_id)
+        hits = _find_places(cars.get("cars") or [], wanted)
+        car_search_id = str(cars.get("carSearchId") or "")
+        if not car_search_id:
+            return ("Банк не вернул carSearchId — без него бронь не принимается. "
+                    "Повтори train_seats(train_id).")
+        ways = _rail_ways(seg, car_search_id, hits, people)
+        contact = {}
+        try:
+            contact = s.train_contact_info() or {}
+        except TbankApiError:
+            pass
+
+        # Same guard as grocery: order/create is a POST with no idempotency key we
+        # control, so a timeout leaves an order that MAY exist. The attempt is
+        # recorded before the POST and the retry is blocked after it.
+        key = journal.cart_hash_of([{"id": f"{c}/{p}", "count": 1} for c, p in wanted]
+                                   + [{"id": train_id, "count": 1}])
+        blocked, last = journal.is_retry_blocked(key)
+        if blocked:
+            return (f"Такая бронь уже отправлялась (attempt {last.get('attempt_id')}, "
+                    f"статус {last.get('status')}). Повтор заблокирован — проверь "
+                    f"trips() или заказ в приложении, чтобы не забронировать дважды.")
+        attempt = journal.new_attempt("rail", str(seg.get("number") or ""), key, 0)
+        journal.record(attempt, "order/create", "order_posting")
+        try:
+            order = s.train_order_create(
+                ways, contact.get("phone") or "", contact.get("email") or "")
+        except Exception as e:
+            journal.record(attempt, "order/create", "unknown",
+                           error=f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}")
+            raise
+        order_id = str(order.get("orderId") or "")
+        if not order_id:
+            journal.record(attempt, "order/create", "unknown",
+                           error="ответ без orderId")
+            return ("Банк не вернул orderId — бронь могла создаться. Проверь "
+                    "trips() и приложение, прежде чем бронировать снова.")
+        amount = order.get("price")
+        journal.record(attempt, "order/create", "order_posted",
+                       order_id=order_id, amount=amount)
+        seat_list = ", ".join(f"{c}/{p}" for c, p in wanted)
+        until = _msk_iso(order.get("reservedUntil"), "%H:%M") if order.get("reservedUntil") else ""
+        lines = [f"Забронировано: поезд № {seg.get('displayTrainNumber', '?')}, "
+                 f"места {seat_list}, пассажиров {len(people)}",
+                 f"Заказ {order_id} | к оплате {_money(amount, 'RUB')}"]
+        if order.get("servicePrice"):
+            lines.append(f"  в том числе сервисный сбор {_money(order['servicePrice'], 'RUB')}")
+        if until:
+            lines.append(f"Места держатся до {until} МСК — после этого бронь пропадёт.")
+        lines.append(f"Оплатить: train_pay(\"{order_id}\") — сначала без карты, "
+                     f"чтобы увидеть, чем можно платить.")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def train_pay(order_id: str, card_id: str = "", force: bool = False,
+                    ctx: Context = None) -> str:
+    """ОПЛАТИТЬ бронь поезда. РЕАЛЬНЫЕ ДЕНЬГИ. Подтверждение — кнопка: тул сам
+    покажет «Оплатить/Отмена» с суммой заказа. НЕ спрашивай «да/нет» текстом —
+    покажи места и сумму из train_book(), согласие даёт кнопка. Клиент без
+    элиситации получает отказ, деньги при этом не двигаются.
+
+    БЕЗ card_id ничего не оплачивает: возвращает список КАРТ, которыми можно
+    заплатить (счета показаны для справки — оплата со счёта только в приложении,
+    этот тул принимает card_id). Выбери карту вместе с пользователем и вызови ещё
+    раз с её card_id.
+
+    Сумму тул берёт из самого заказа, а не из аргумента, — её нельзя разойтись
+    с тем, что держит банк.
+
+    force=True — повторить оплату, чей исход не подтверждён, и только после
+    проверки в приложении, что деньги не ушли."""
+    try:
+        s = _require(); s.ensure_fresh()
+        order = s.train_order(order_id) or {}
+        amount = order.get("price")
+        if amount is None:
+            return (f"Заказ {order_id} не найден на ЖД-хосте. Проверь id из "
+                    f"train_book() или посмотри trips().")
+        status = str((s.train_order_status(order_id) or {}).get("status") or "")
+        if status.lower() in ("paid", "completed"):
+            return f"Заказ {order_id} уже оплачен (статус {status}). Билет — trips()."
+    except Exception as e:
+        return _err(e)
+
+    if card_id:
+        refusal = _button_required(ctx, amount)
+        if refusal is not None:
+            return refusal
+        gate = await _money_gate(
+            ctx, f"Оплатить ЖД-заказ {order_id}: {_money(amount, 'RUB')}?")
+        if gate is not None:
+            return gate
+    return await asyncio.to_thread(_do_train_pay, order_id, card_id, amount, force)
+
+
+def _do_train_pay(order_id: str, card_id: str, amount, force: bool = False) -> str:
+    """orders/pay → tpay bridge. Without a card this stops at the method list:
+    orders/pay only OPENS a payment session, it does not charge, so listing is
+    free and the charge is the caller's explicit second call."""
+    try:
+        from . import journal
+        s = _require()
+        pay = s.train_order_pay(order_id) or {}
+        url = str(pay.get("paymentUrl") or "")
+        if not url:
+            return (f"Банк не дал ссылку оплаты для заказа {order_id}: "
+                    f"{_json_out(pay, 300)}")
+        if not card_id:
+            methods = s.tpay_pay(url, dry_run=True)
+            return _render_pay_methods(order_id, amount, methods)
+        # The same duplicate guard transfers and ticket payments get: the gateway
+        # has no idempotency key we control, so a timed-out retry could charge
+        # twice. An unconfirmed previous attempt blocks the next one.
+        key = _transfer_key(amount, order_id, "rail", "tpay")
+        blocked, prev = _transfer_blocked(key)
+        if blocked and not force:
+            return (f"ПОВТОР ЗАБЛОКИРОВАН: оплата заказа {order_id} "
+                    f"({_money(amount, 'RUB')}) уже запускалась и её исход НЕ "
+                    f"подтверждён (статус «{(prev or {}).get('status', '?')}»). "
+                    f"Деньги могли уйти. Проверь trips() и приложение; если оплаты "
+                    f"нет — повтори с force=True.")
+        attempt = journal.new_attempt("rail", order_id, key, amount)
+        # "posting", not "order_posting": _TRANSFER_BLOCKING is the set the guard
+        # above reads, and it deliberately excludes "paid" — paying twice on
+        # purpose is allowed, repeating an UNCONFIRMED charge is not.
+        journal.record(attempt, "tpay", "posting", order_id=order_id)
+        try:
+            result = s.tpay_pay(url, card_id=card_id)
+        except Exception as e:
+            journal.record(attempt, "tpay", "unknown", order_id=order_id,
+                           error=f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}")
+            return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — деньги могли "
+                    f"списаться. Проверь trips() и приложение, и только если оплаты "
+                    f"нет — train_pay(\"{order_id}\", card_id=…, force=True).")
+        if result.get("paid"):
+            journal.record(attempt, "tpay", "paid", order_id=order_id, amount=amount)
+            return (f"Оплачено: заказ {order_id}, {_money(amount, 'RUB')}.\n"
+                    f"Билет и бланк — travel_ticket_file(\"{order_id}\"), "
+                    f"поездка — trips().")
+        journal.record(attempt, "tpay", "unknown", order_id=order_id,
+                       payment_status=str(result.get("result") or ""))
+        return (f"Оплата заказа {order_id} НЕ подтверждена: "
+                f"{result.get('result') or 'нет ответа'} "
+                f"(статус {result.get('status') or '?'}). Деньги могли уйти — "
+                f"проверь приложение и trips(), прежде чем платить снова.")
+    except Exception as e:
+        return _err(e)
+
+
+def _render_pay_methods(order_id: str, amount, methods: dict) -> str:
+    accounts = methods.get("accounts") or []
+    cards = methods.get("cards") or []
+    if not accounts and not cards:
+        return (f"Заказ {order_id} на {_money(amount, 'RUB')}: банк не показал ни "
+                f"одной карты или счёта для оплаты. Открой оплату в приложении.")
+    lines = [f"Заказ {order_id} к оплате: "
+             f"{_money(methods.get('amount') if methods.get('amount') is not None else amount, 'RUB')}"
+             + (f" | {methods['brand']}" if methods.get("brand") else ""),
+             "Ничего не списано — это список способов оплаты."]
+    for c in cards:
+        lines.append(f"- карта {c.get('maskedCardNumber') or '?'} "
+                     f"| card_id={c.get('cardId')}")
+    # Accounts come back in the same /account response, but tpay_pay charges a
+    # CARD — there is no card_id to hand an account, and paying from one is not in
+    # any capture. Showing them as a selectable «способ оплаты» sent the agent
+    # looking for an argument that does not exist; they are listed for information
+    # only, with the app named as the way to actually use them.
+    for a in accounts:
+        lines.append(f"- счёт {a.get('accountName') or a.get('accountId')} "
+                     f"({a.get('accountId')}) | {_money(a.get('accountBalance'), 'RUB')} "
+                     f"— оплата со счёта только в приложении, здесь нужна карта")
+    if cards:
+        lines.append(f"Оплатить: train_pay(\"{order_id}\", card_id=\"<id карты>\") — "
+                     f"сумму подтвердит кнопка.")
+    else:
+        lines.append(f"Карт для оплаты заказа {order_id} банк не показал — "
+                     f"со счёта плати в приложении.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def train_refund(order_id: str, ticket_ids: str = "", confirm: bool = False) -> str:
+    """ВОЗВРАТ ЖД-билета. Необратим: место уходит обратно в продажу.
+
+    Без confirm=True ничего не возвращает — показывает расчёт: сколько вернут за
+    каждый билет и сколько удержат сборами. Покажи этот расчёт пользователю и
+    только потом вызывай с confirm=True.
+
+    ticket_ids — если пусто, возвращаются ВСЕ возвратные билеты заказа."""
+    try:
+        s = _require(); s.ensure_fresh()
+        blanks = s.train_blank_status(order_id)
+        refundable = [str(b.get("ticketId")) for b in blanks
+                      if b.get("isRefundable") is not False and b.get("isRefundPossible")]
+        chosen = [t.strip() for t in ticket_ids.replace(";", ",").split(",") if t.strip()]
+        if chosen:
+            unknown = [t for t in chosen if t not in refundable]
+            if unknown:
+                return (f"Эти билеты вернуть нельзя: {', '.join(unknown)}. "
+                        f"Возвратные сейчас: {', '.join(refundable) or 'нет'}.")
+        else:
+            chosen = refundable
+        if not chosen:
+            statuses = ", ".join(f"{b.get('ticketId')}={b.get('erStatus')}" for b in blanks)
+            return (f"В заказе {order_id} нечего возвращать"
+                    + (f" (статусы: {statuses})" if statuses else "") + ".")
+        calc = s.train_refund_calc(order_id, chosen)
+        infos = calc.get("ticketRefundInfos") or []
+        total = sum(float(i.get("refundAmount") or 0) for i in infos)
+        fees = sum(float(i.get("providerFee") or 0) + float(i.get("serviceFee") or 0)
+                   for i in infos)
+        lines = [f"Возврат по заказу {order_id}: билетов {len(chosen)}, "
+                 f"вернётся {_money(total, 'RUB')}, удержат {_money(fees, 'RUB')}"]
+        for i in infos:
+            lines.append(f"- {i.get('TicketId') or i.get('ticketId')}: "
+                         f"{_money(i.get('refundAmount'), 'RUB')} "
+                         f"(сбор {_money(float(i.get('providerFee') or 0) + float(i.get('serviceFee') or 0), 'RUB')})")
+        if not confirm:
+            lines.append(f"Ничего не возвращено. Показать это пользователю и, если "
+                         f"согласен, вызвать train_refund(\"{order_id}\", confirm=True).")
+            return "\n".join(lines)
+        op = s.train_refund(order_id, chosen)
+        operation_id = str(op.get("operationId") or "")
+        if not operation_id:
+            return "\n".join(lines + [
+                "Банк не вернул operationId — возврат мог начаться. Проверь "
+                "travel_order_details() и приложение, второй раз не запускай.",
+                f"Ответ банка: {_json_out(op)}"])
+        state, waited = poll_until_ready(
+            lambda: s.train_refund_status(operation_id) or {},
+            lambda st: str(st.get("refundStatus") or "") not in _REFUND_PENDING,
+            timeout_ms=_REFUND_TIMEOUT_MS, interval_ms=_REFUND_INTERVAL_MS)
+        if state is None:
+            return "\n".join(lines + [
+                f"Возврат запущен ({operation_id}), но за {waited // 1000} с банк "
+                f"не сообщил исход. Это НЕ отказ — проверь заказ позже через "
+                f"travel_order_details(\"{order_id}\"); повторный возврат не запускай."])
+        status = str(state.get("refundStatus") or "?")
+        if status == "Succeed":
+            return "\n".join(lines + [f"Возврат выполнен ({operation_id}). "
+                                      f"Деньги придут по правилам перевозчика."])
+        return "\n".join(lines + [
+            f"Возврат запущен ({operation_id}), статус {status}. Это не отказ — "
+            f"проверь заказ в приложении позже; повторный возврат не запускай."])
     except Exception as e:
         return _err(e)
 
@@ -4608,8 +5607,11 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
     дочитывает весь поток: это десятки секунд и тысячи предложений, почти все —
     от партнёров, которые уводят на свой сайт.
 
-    Купить билет через MCP нельзя: подтверждённого шага бронирования и оплаты
-    нет. Это поиск и сравнение, покупка — в приложении.
+    Оформление и оплата — flight_book(offer_id, fare, passengers): один шаг,
+    он же бронь, он же оплата. ⚠️ Этот путь экспериментальный и ни разу не
+    выполнялся — запрос уходит без подписи, которую шлёт приложение, и шлюз
+    может его отвергнуть («ИСХОД НЕИЗВЕСТЕН»). Поиск, тарифы и места (этот тул,
+    flight_offer, flight_seats) — полноценные; для надёжной покупки — приложение.
 
     Технический нюанс: заголовок X-Travel-Context='mb', который делает этот
     эндпоинт доступным по мобильной сессии, не встречался в пассивном перехвате
@@ -4646,8 +5648,15 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
             car = (segs[0].get("carriers") or {}).get("marketing") or ""
             hop = f", {len(segs) - 1} пересадка" if len(segs) > 1 else " прямой"
             dur = f.get("duration") or 0
+            # Both times, each in its own airport's local zone (a flight time is
+            # where the plane is), and the arrival DATE when the flight lands on a
+            # different day — an overnight flight showed only a departure clock and
+            # read as a short hop.
+            dep_t, arr_t = _local_hhmm(dep.get("time")), _local_hhmm(arr.get("time"))
+            dep_d, arr_d = _local_date(dep.get("time")), _local_date(arr.get("time"))
+            arr_str = arr_t + (f" {arr_d}" if arr_d and arr_d != dep_d else "")
             return (f"{names.get(car, car)} {dep.get('airport', '')}→{arr.get('airport', '')}"
-                    f" {str(dep.get('time') or '')[11:16]}"
+                    f" {dep_t}→{arr_str}"
                     + (f" ({dur // 60}ч{dur % 60:02d}м{hop})" if dur else hop))
 
         def render(o):
@@ -4661,7 +5670,11 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
                     + (f" | offerId={o.get('offerId')}" if o.get("offerId") else ""))
 
         head = (f"Рейсы {from_code}→{to_code} на {date}"
-                + (" (бронируемые в банке)" if only_bookable else ""))
+                + (" (бронируемые в банке)" if only_bookable else "")
+                # Each row carries an offerId; name the tool that turns it into
+                # fares so the listing points somewhere instead of dead-ending.
+                + "\nДальше по offerId: flight_offer(offer_id) — тарифы, багаж, "
+                  "правила возврата.")
         tail = "" if res["complete"] else (
             f"\n⚠️ Поток оборван на {res['batches']} батчах — это НЕ вся выдача. "
             "Подними max_batches, если нужно всё.")
@@ -4703,6 +5716,772 @@ def flight_history() -> str:
 
         return _rows_out(rows, render, limit=0, total=len(rows),
                          header="История авиапоисков")
+    except Exception as e:
+        return _err(e)
+
+
+# ── FLIGHT BOOKING ──────────────────────────────────────────
+
+def _client_contact(s) -> dict:
+    """The client's own phone and e-mail, for the contact block on a booking.
+
+    Read from the rail host, which is the only endpoint in the captures that
+    returns BOTH in one call. It is the same client and the same contact whichever
+    vertical asks, so a flight booking uses it too rather than shipping a second
+    lookup; if rail is unreachable the profile still supplies the e-mail."""
+    try:
+        info = s.train_contact_info() or {}
+        if info.get("phone") or info.get("email"):
+            return {"phone": str(info.get("phone") or ""),
+                    "email": str(info.get("email") or "")}
+    except Exception:
+        pass
+    try:
+        profile = s.get_data("profile") or {}
+    except Exception:
+        return {"phone": "", "email": ""}
+    found = {"phone": "", "email": ""}
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, str):
+                    if k.lower() == "email" and not found["email"]:
+                        found["email"] = v
+                    elif "phone" in k.lower() and not found["phone"] and v.startswith("+"):
+                        found["phone"] = v
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(profile)
+    return found
+
+
+def _fares(s, offer_id: str) -> tuple[dict, list]:
+    """(preliminary payload, fare options cheapest-first).
+
+    One search offer expands into a family of fares here — same flight, different
+    baggage and refund rules — so «the offer» is not one price. Sorted by price so
+    that fare=1 always means the cheapest, whatever order the bank replies in."""
+    payload = s.flight_preliminary(offer_id) or {}
+    offers = [o for o in (payload.get("offers") or []) if isinstance(o, dict)]
+
+    def price_of(o):
+        try:
+            return float((o.get("price") or {}).get("amount") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    offers.sort(key=price_of)
+    return payload, offers
+
+
+def _fare_price(offer: dict) -> float:
+    try:
+        return float((offer.get("price") or {}).get("amount") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _leg_line(flight: dict) -> str:
+    segs = flight.get("flightSegments") or []
+    if not segs:
+        return "—"
+    first, last = segs[0], segs[-1]
+    dep, arr = first.get("departure") or {}, last.get("arrival") or {}
+    carrier = ((first.get("carriers") or {}).get("marketing") or {}).get("name") or ""
+    stops = len(segs) - 1
+    dur = flight.get("duration") or 0
+    return (f"{_cut(carrier, 18)} "
+            f"{(dep.get('airport') or {}).get('code', '?')}"
+            f"{' ' + _local_hhmm(dep.get('time'))}"
+            f" → {(arr.get('airport') or {}).get('code', '?')}"
+            f" {_local_hhmm(arr.get('time'))}"
+            + (f" | {dur // 60}ч{dur % 60:02d}м" if dur else "")
+            + (" | прямой" if not stops else f" | пересадок {stops}"))
+
+
+@mcp.tool()
+def flight_offer(offer_id: str, fare: int = 0) -> str:
+    """Тарифы, багаж и правила возврата по выбранному рейсу.
+    offer_id — из flight_search().
+
+    Один рейс из выдачи разворачивается в несколько тарифов: та же дата и тот же
+    борт, но разный багаж и разные правила возврата. Тул показывает их по
+    возрастанию цены и нумерует — этот номер (fare=1, 2, …) уходит в flight_book().
+    fare=N — показать багаж и правила только по одному тарифу.
+
+    Цена читается заново: та, что была в поиске, могла устареть."""
+    try:
+        s = _require(); s.ensure_fresh()
+        payload, offers = _fares(s, offer_id)
+        if not offers:
+            return (f"По offer_id={offer_id} тарифов нет — предложение устарело. "
+                    f"Повтори flight_search().")
+        legs = [_leg_line(f) for f in (payload.get("flights") or [])]
+        head = ["Рейс: " + "; ".join(legs) if legs else "Рейс:",
+                f"Тарифов: {len(offers)}"]
+        chosen = None
+        if fare:
+            if not 1 <= fare <= len(offers):
+                return f"Тариф {fare} не существует: их {len(offers)}."
+            chosen = offers[fare - 1]
+        for i, o in enumerate(offers, 1):
+            per = (o.get("pricePerPax") or {}).get("adult") or {}
+            head.append(
+                f"{i}) {_money(_fare_price(o), 'RUB')}"
+                + (f" | за взрослого {_money(per.get('amount'), 'RUB')}" if per else "")
+                + (f" | сбор {_money((o.get('serviceFee') or {}).get('amount'), 'RUB')}"
+                   if o.get("serviceFee") else ""))
+        target = chosen or offers[0]
+        uuid_ = str(target.get("uuid") or "")
+        idx = (fare or 1)
+        try:
+            bag = s.flight_baggage(uuid_) or {}
+            head.append(f"Багаж (тариф {idx}): " + (_baggage_line(bag) or "не указан"))
+        except TbankApiError as e:
+            head.append(f"Багаж (тариф {idx}): не отдался ({e})")
+        try:
+            rules = s.flight_fare_rules(uuid_) or {}
+            head.append(f"Правила (тариф {idx}): " + (_fare_rules_line(rules) or "не указаны"))
+        except TbankApiError as e:
+            head.append(f"Правила (тариф {idx}): не отдались ({e})")
+        head.append(f"Места в салоне: flight_seats(\"{offer_id}\", fare={idx}).")
+        head.append(f"Купить: flight_book(\"{offer_id}\", fare={idx}) — это сразу "
+                    f"и бронь, и оплата, сумму подтвердит кнопка.")
+        return "\n".join(head)
+    except Exception as e:
+        return _err(e)
+
+
+def _baggage_line(payload: dict) -> str:
+    bits = []
+    for f in (payload.get("flights") or []):
+        for b in (f.get("baggage") or []):
+            prices = [str(_money((i.get("price") or {}).get("amount"), "RUB"))
+                      for i in (b.get("items") or [])]
+            bits.append(f"{b.get('type') or '?'}"
+                        + (f" — {', '.join(prices)}" if prices else ""))
+    return "; ".join(bits)
+
+
+def _fare_rules_line(payload: dict) -> str:
+    """Every fare rule, not the first few.
+
+    These are the terms under which a ticket can be handed back, so a cut that
+    said nothing would hide exactly the clause someone needed. There are a handful
+    per fare — the captured offer had one — so the whole list fits; if a carrier
+    ever sends many, the count still says how many there are."""
+    names = [str(r.get("fareName") or r.get("fareBasis") or "")
+             for r in (payload.get("fareRules") or [])]
+    names = [n for n in names if n]
+    return "; ".join(names)
+
+
+@mcp.tool()
+def flight_seats(offer_id: str, fare: int = 1, max_price: float = 0,
+                 limit: int = 30) -> str:
+    """Карта мест в салоне с ценами. offer_id — из flight_search(),
+    fare — номер тарифа из flight_offer().
+
+    Места платные и НЕобязательные: без них билет всё равно оформляется, ряд
+    выдадут при регистрации. Выбранные места передаются в
+    flight_book(..., seats="13A,13B") — по одному на пассажира, в том же порядке."""
+    try:
+        s = _require(); s.ensure_fresh()
+        _, offers = _fares(s, offer_id)
+        if not offers:
+            return f"По offer_id={offer_id} тарифов нет — повтори flight_search()."
+        if not 1 <= fare <= len(offers):
+            return f"Тариф {fare} не существует: их {len(offers)}."
+        data = s.flight_seatmaps(str(offers[fare - 1].get("uuid") or "")) or {}
+        rows = []
+        for flight in (data.get("flights") or []):
+            for seg in (flight.get("segments") or []):
+                for row in (seg.get("rows") or []):
+                    for letter, seat in (row.get("seats") or {}).items():
+                        if not isinstance(seat, dict) or not seat.get("available"):
+                            continue
+                        try:
+                            price = float((seat.get("price") or {}).get("amount") or 0)
+                        except (TypeError, ValueError):
+                            price = 0.0
+                        if max_price and price > max_price:
+                            continue
+                        rows.append({"seat": f"{row.get('number')}{letter}",
+                                     "price": price,
+                                     "extra": ", ".join(seat.get("additional") or [])})
+        if not rows:
+            return ("Свободных мест по этим условиям нет — это нормально: "
+                    "место выдадут при регистрации. Можно покупать без него.")
+        rows.sort(key=lambda r: (r["price"], r["seat"]))
+        return _rows_out(
+            rows,
+            lambda r: f"- {r['seat']} | {r['price']:.0f} ₽" + (f" | {r['extra']}" if r["extra"] else ""),
+            limit=limit, total=len(rows),
+            header=f"Места (тариф {fare}), минимум {_money(data.get('minPrice'), 'RUB')}",
+            order_note="дешёвые сверху",
+            tail=f"Выбрать: flight_book(\"{offer_id}\", fare={fare}, seats=\"13A,13B\").")
+    except Exception as e:
+        return _err(e)
+
+
+def _person_block(p: dict) -> dict:
+    """One passenger in the flight booking's shape.
+
+    Latin names are what the ticket carries, and they do not have to be
+    transliterated here: the bank stores firstNameEn/lastNameEn alongside the
+    Cyrillic ones, so the value on the ticket is the bank's own spelling. When a
+    caller typed a passenger in without them, their Cyrillic name is sent as-is
+    rather than guessed at — a wrong transliteration is a boarding refusal."""
+    # bonus_card is null for a passenger without an airline programme and an
+    # object for one with it — the capture carries both variants in the same
+    # booking, so «always null» would quietly stop the miles from being credited.
+    card = p.get("bonus_card")
+    if isinstance(card, dict) and card.get("number"):
+        card = {"carrier_code": str(card.get("carrier_code") or "").upper(),
+                "number": str(card["number"])}
+    else:
+        card = None
+    return {"infant": None,
+            "birthdate": p["birthDate"],
+            "name": (p.get("firstEn") or p["first"]).upper(),
+            "surname": (p.get("lastEn") or p["last"]).upper(),
+            "sex": "female" if str(p.get("sex", "")).lower().startswith("f") else "male",
+            "travel_document": {"number": p["number"], "exp_date": None},
+            "passenger_type": "adult",
+            "nationality": "RUS",
+            "bonus_card": card,
+            "middle_name": (p.get("middleEn") or p.get("middle") or "").upper()}
+
+
+def _itinerary_segments(payload: dict) -> list[dict]:
+    """Every flight segment of the itinerary, flattened in order."""
+    out = []
+    for flight in (payload.get("flights") or []):
+        out.extend(s for s in (flight.get("flightSegments") or [])
+                   if isinstance(s, dict))
+    return out
+
+
+def _seat_blocks(seat_specs: list, people: list, seatmaps: dict,
+                 payload: dict) -> tuple[list, float]:
+    """(seats block, their total price). Seat i belongs to passenger i.
+
+    Each seat names the FLIGHT it is on — carrier, number and date — not just the
+    row and letter, because one booking can cover several legs and a bare row
+    would be ambiguous across them.
+
+    A connection is refused rather than half-seated: one seat per passenger can
+    only describe one leg, and silently seating everyone on the first leg while
+    charging for «seats» would be a lie about what was bought."""
+    segments = _itinerary_segments(payload)
+    if len(segments) != 1:
+        raise TbankApiError(
+            "SEATS_MULTILEG",
+            f"в маршруте перелётов {len(segments) or '?'} — выбор мест через MCP "
+            f"поддержан только для прямого рейса; купи без seats, место дадут "
+            f"при регистрации")
+    seg = segments[0]
+    carriers = seg.get("carriers") or {}
+    leg = {"operatingCarrier": (carriers.get("operating") or {}).get("code") or "",
+           "marketingCarrier": (carriers.get("marketing") or {}).get("code") or "",
+           "number": seg.get("number"),
+           "date": _local_date((seg.get("departure") or {}).get("time"))}
+    index = {}
+    for flight in (seatmaps.get("flights") or []):
+        for s in (flight.get("segments") or []):
+            for row in (s.get("rows") or []):
+                for letter, seat in (row.get("seats") or {}).items():
+                    if isinstance(seat, dict):
+                        index[f"{row.get('number')}{letter}".upper()] = (seat, row, letter)
+    blocks, total = [], 0.0
+    for spec, person in zip(seat_specs, people):
+        hit = index.get(spec.upper())
+        if hit is None:
+            raise TbankApiError(
+                "SEAT_TAKEN",
+                f"место {spec} недоступно — посмотри flight_seats() заново")
+        seat, row, letter = hit
+        if not seat.get("available"):
+            raise TbankApiError("SEAT_TAKEN", f"место {spec} уже занято")
+        # The amount goes into the body EXACTLY as the seat map gave it: the map
+        # sends whole roubles as an int, and coercing to float would change the
+        # JSON type of a price the gateway compares against its own.
+        raw = (seat.get("price") or {}).get("amount")
+        total += float(raw or 0)
+        blocks.append({
+            "passenger": {"firstName": (person.get("firstEn") or person["first"]).upper(),
+                          "lastName": (person.get("lastEn") or person["last"]).upper(),
+                          "documentNumber": person["number"]},
+            "flights": [{"row": row.get("number"), "letter": letter,
+                         "price": {"amount": raw, "currency": "RUB"}, **leg}]})
+    return blocks, total
+
+
+@mcp.tool()
+async def flight_book(offer_id: str, fare: int = 1, passengers: str = "me",
+                      seats: str = "", account_id: str = "", force: bool = False,
+                      ctx: Context = None) -> str:
+    """КУПИТЬ авиабилет. РЕАЛЬНЫЕ ДЕНЬГИ. Это ОДИН шаг: у авиа нет отдельной брони,
+    вызов сразу оформляет и списывает. Подтверждение — кнопка: тул сам покажет
+    «Оплатить/Отмена» с итоговой суммой. НЕ спрашивай «да/нет» текстом — покажи
+    тариф, багаж и правила из flight_offer(), согласие даёт кнопка. Клиент без
+    элиситации получает отказ, деньги при этом не двигаются.
+
+    ⚠️ ЭТОТ ПУТЬ НИ РАЗУ НЕ ВЫПОЛНЯЛСЯ И НЕ ПРОВЕРЕН НА ПОДПИСИ. В захвате запрос
+    оплаты несёт X-Api-Signature (HMAC по схеме, которую не удалось воспроизвести
+    из захвата — нужен реверс приложения), а также X-Detach-Key/X-Detach-Timeout,
+    которых MCP не шлёт. Если шлюз проверяет подпись, вызов вернёт «ИСХОД
+    НЕИЗВЕСТЕН» на запрос, который не мог пройти. Предупреди пользователя, что
+    оплата авиабилета через MCP экспериментальная; надёжный путь — приложение.
+
+    offer_id — из flight_search(), fare — номер тарифа из flight_offer().
+    passengers="me" — владелец счёта (паспорт и латиница из данных банка); для
+    нескольких — JSON-список, как у train_book(). Детская бронь (младше 18) не
+    поддержана — тул откажет, детский билет оформляется в приложении.
+    seats — необязательно, «13A,13B» по одному на пассажира в том же порядке;
+    без них место выдадут при регистрации.
+
+    Сумму тул считает сам (тариф + места) и кладёт на кнопку свою цифру, а не ту,
+    что назвал агент: цена тарифа могла измениться с момента поиска.
+
+    Возврата авиабилета через MCP нет — в API банка такой операции не нашлось.
+
+    force=True — повторить покупку, чей исход не подтверждён, и только после
+    проверки в trips() и приложении, что билет не выписан."""
+    try:
+        s = _require(); s.ensure_fresh()
+        people = _passengers(s, passengers)
+        seat_specs = [x.strip() for x in seats.replace(";", ",").split(",") if x.strip()]
+        if seat_specs and len(seat_specs) != len(people):
+            return (f"Мест {len(seat_specs)}, а пассажиров {len(people)} — "
+                    f"должно быть поровну, либо не указывай места вовсе.")
+        payload, offers = _fares(s, offer_id)
+        if not offers:
+            return (f"По offer_id={offer_id} тарифов нет — предложение устарело. "
+                    f"Повтори flight_search().")
+        if not 1 <= fare <= len(offers):
+            return f"Тариф {fare} не существует: их {len(offers)}."
+        chosen = offers[fare - 1]
+        offer_uuid = str(chosen.get("uuid") or "")
+        amount = _fare_price(chosen)
+        seat_blocks, seat_sum, checkin_price = [], 0.0, 0.0
+        if seat_specs:
+            seat_blocks, seat_sum = _seat_blocks(
+                seat_specs, people, s.flight_seatmaps(offer_uuid) or {}, payload)
+            # Seats are sold through the check-in service, so choosing them adds
+            # its price on top — a third number, not a rounding of the first two.
+            try:
+                checkin = s.flight_checkin_calc(offer_uuid) or {}
+                # Kept as the API's own number, not coerced: it sends whole
+                # roubles as an int and the body must carry the same JSON type.
+                checkin_price = (checkin.get("price") or {}).get("amount") or 0
+            except TbankApiError as e:
+                return (f"Места выбраны, но услуга регистрации недоступна ({e}) — "
+                        f"купи без seats, место дадут при регистрации.")
+        total = round(amount + seat_sum + float(checkin_price), 2)
+        if _payable_amount(total) is None:
+            return (f"Банк вернул неплатёжную сумму по тарифу {fare}: {total!r}. "
+                    f"Оплату не запускаю — посмотри flight_offer(\"{offer_id}\").")
+    except Exception as e:
+        return _err(e)
+
+    refusal = _button_required(ctx, total)
+    if refusal is not None:
+        return refusal
+    account_id, src_refusal = await _resolve_source(ctx, account_id)
+    if src_refusal is not None:
+        return src_refusal
+    legs = "; ".join(_leg_line(f) for f in (payload.get("flights") or [])) or "рейс"
+    who = ", ".join(f"{p['last']} {p['first']}" for p in people)
+    extra = ""
+    if seat_sum or checkin_price:
+        extra = (f" (тариф {_money(amount, 'RUB')}"
+                 + (f", места {_money(seat_sum, 'RUB')}" if seat_sum else "")
+                 + (f", регистрация {_money(checkin_price, 'RUB')}" if checkin_price else "")
+                 + ")")
+    gate = await _money_gate(
+        ctx, f"Купить билет: {legs}\n{who}\n{_money(total, 'RUB')}{extra}?")
+    if gate is not None:
+        return gate
+    return await asyncio.to_thread(_do_flight_book, offer_uuid, people, seat_blocks,
+                                   checkin_price, seat_sum, total, account_id, legs,
+                                   force)
+
+
+# The 3-D Secure / device block the checkout sends with every payment. Copied from
+# the capture field for field: the two `timezone` values really do disagree in
+# type and sign (a string "+180" at the top level, a number -180 here), and a
+# payment gateway is the last place to tidy up someone else's spelling.
+_FLIGHT_PAY_INFO = {
+    "timezone": -180, "language": "ru", "javaEnabled": False,
+    "javaScriptEnabled": True, "colorDepth": 24,
+    "notificationUrl": ("https://www.tbank.ru/travel/flights/checkout/3dsecure/end/"
+                        "?failUrl=%2Ftravel%2Fflights%2Fcheckout%2Fcomplete%2F"
+                        "&appId=mtravelwebview"),
+    "deviceScreenHeight": 912, "deviceScreenWidth": 420,
+    "appName": "travelavia", "origin": "web,ib5,platform",
+}
+
+
+def _do_flight_book(offer_uuid, people, seat_blocks, checkin_price, seat_sum,
+                    total, account_id, legs, force: bool = False) -> str:
+    """Journal + the one POST that books and charges, then poll for the PNR."""
+    try:
+        from . import journal
+        s = _require()
+        contact = _client_contact(s)
+        body = {
+            "pay_request": {"moneyAmount": total, "currency": "RUB",
+                            "attachCard": False, "account": account_id},
+            "timezone": "+180", "screen_resolution": "420x912",
+            "device_platform": "iOS",
+            "contact_info": {"email": contact.get("email") or "",
+                             "phone": contact.get("phone") or ""},
+            "booking": {"persons": [_person_block(p) for p in people],
+                        "offer_uuid": offer_uuid},
+            "payAdditionalInfo": dict(_FLIGHT_PAY_INFO),
+        }
+        if seat_blocks:
+            # Seats and check-in travel together in the capture: paid seats are
+            # sold as part of the check-in service. Booking WITHOUT seats omits
+            # both keys — that variant is not in any capture, so it is the shape
+            # to check first if a seatless booking is ever rejected.
+            body["seats"] = seat_blocks
+            body["checkin"] = {
+                "price": {"amount": checkin_price, "currency": "RUB"},
+                "seatStrategies": ["skip"], "placements": [],
+                "summaryText": "Регистрация на рейс",
+                "summaryTextWithoutSeats": "Регистрация на рейс"}
+
+        # Booking and charging are ONE call here, so a timed-out retry does not
+        # just double-charge — it books a second ticket. Same guard as ticket_pay.
+        key = _transfer_key(total, offer_uuid, "avia", account_id)
+        blocked, prev = _transfer_blocked(key)
+        if blocked and not force:
+            return (f"ПОВТОР ЗАБЛОКИРОВАН: покупка этого билета "
+                    f"({_money(total, 'RUB')}) уже запускалась и её исход НЕ "
+                    f"подтверждён (статус «{(prev or {}).get('status', '?')}»). "
+                    f"Деньги могли уйти, а билет — выписаться. Проверь trips() и "
+                    f"приложение; если брони нет — повтори с force=True.")
+        attempt = journal.new_attempt("avia", offer_uuid, key, total)
+        journal.record(attempt, "travel_pay", "posting")
+        try:
+            started = s.flight_pay(body)
+        except Exception as e:
+            journal.record(attempt, "travel_pay", "unknown",
+                           error=f"{type(e).__name__}: {_cut(redact_text(str(e)), 120)}")
+            return (f"ИСХОД НЕИЗВЕСТЕН: {_err(e)}\nЗапрос ушёл — билет мог "
+                    f"выписаться, а деньги списаться. Проверь trips() и приложение, "
+                    f"и только если брони нет — flight_book(…, force=True).")
+        order_id = str(started.get("detachKey") or "")
+        if str(started.get("status") or "").lower() == "error":
+            journal.record(attempt, "travel_pay", "failed",
+                           error=_cut(json.dumps(started.get("payload") or {},
+                                                 ensure_ascii=False), 160))
+            return (f"Банк отклонил оплату: "
+                    f"{(started.get('payload') or {}).get('message') or started.get('status')}")
+        # Still "posting", now with the order id: the charge is in flight until
+        # the poll resolves it, and a status outside _TRANSFER_BLOCKING here would
+        # let a crash mid-poll be followed by a second booking.
+        journal.record(attempt, "travel_pay", "posting", order_id=order_id)
+
+        # The booking runs asynchronously: status stays "Working" while the airline
+        # is contacted, and the PNR only exists once it flips to Ok.
+        result, waited = poll_until_ready(
+            s.flight_pay_result,
+            lambda r: str(r.get("status") or "").lower() not in ("", "working"),
+            timeout_ms=_AVIA_PAY_TIMEOUT_MS, interval_ms=_AVIA_PAY_INTERVAL_MS)
+        if result is None:
+            journal.record(attempt, "travel_pay", "unknown", order_id=order_id,
+                           payment_status=f"no-answer-{waited // 1000}s")
+            return (f"ИСХОД НЕИЗВЕСТЕН: банк не сообщил результат за "
+                    f"{waited // 1000} с (заказ {order_id or 'неизвестен'}). Билет "
+                    f"мог выписаться, а деньги списаться — проверь trips() и "
+                    f"приложение, прежде чем покупать снова.")
+        state = str(result.get("status") or "")
+        info = ((result.get("payload") or {}).get("bookingInfo") or {})
+        pnr = str(info.get("bookingNumber") or "")
+        order_id = str(info.get("orderNumber") or order_id)
+        if state == "Ok" and pnr:
+            journal.record(attempt, "travel_pay", "paid", order_id=order_id,
+                           amount=total)
+            return (f"Куплено: {legs}\nПассажиров {len(people)}, "
+                    f"{_money(total, 'RUB')}"
+                    + (f" (места {_money(seat_sum, 'RUB')})" if seat_sum else "")
+                    + f"\nБронь {pnr} | заказ {order_id}\n"
+                    f"Маршрутные квитанции — travel_ticket_file(\"{order_id}\"), "
+                    f"поездка — trips().")
+        journal.record(attempt, "travel_pay", "unknown", order_id=order_id,
+                       payment_status=state or "no-status")
+        return (f"Оплата НЕ подтверждена (статус {state or 'нет ответа'}, "
+                f"заказ {order_id or 'неизвестен'}). Деньги могли уйти — проверь "
+                f"trips() и приложение, прежде чем покупать снова.")
+    except Exception as e:
+        return _err(e)
+
+
+# ── HOTELS (search only) ────────────────────────────────────
+
+@mcp.tool()
+def hotel_search(query: str, checkin: str, checkout: str, adults: int = 2,
+                 children: str = "", limit: int = 15) -> str:
+    """Поиск отелей. query — город, регион или название отеля («Сочи»,
+    «Красная Поляна»); checkin/checkout — YYYY-MM-DD; children — возрасты детей
+    через запятую («5,12»).
+
+    Забронировать отель через MCP НЕЛЬЗЯ — только найти и сравнить. Тарифы и
+    условия отмены по конкретному отелю — hotel_info(hotel_id, checkin, checkout).
+    """
+    try:
+        s = _require(); s.ensure_fresh()
+        ages = [int(a) for a in children.replace(" ", "").split(",") if a.strip().isdigit()]
+        hits = s.hotel_autocomplete(query) or {}
+        locations = hits.get("locations") or []
+        direct = hits.get("hotels") or []
+        if not locations and not direct:
+            return (f"По запросу «{query}» банк не нашёл ни города, ни отеля. "
+                    f"Попробуй короче — например только название города.")
+        if not locations:
+            return _rows_out(
+                direct,
+                lambda h: f"- {h.get('name')} | {_cut(h.get('signature') or '', 60)}"
+                          f" | hotel_id={h.get('id')}",
+                limit=limit, total=len(direct),
+                header=f"«{query}» — это не город, а отель; подходящих",
+                order_note="как отдал банк",
+                tail=f"Тарифы: hotel_info(hotel_id, \"{checkin}\", \"{checkout}\").")
+        # Autocomplete returns several places for one word — «Сочи» is a city, an
+        # airport and a district. Searching the first WITHOUT saying so makes a
+        # wrong guess indistinguishable from the only answer, so the alternatives
+        # are named and the tail says how to search them instead.
+        loc = locations[0]
+        others = [f"{o.get('name')} ({(o.get('type') or {}).get('name') or '?'})"
+                  for o in locations[1:]]
+        data = s.hotel_search(loc.get("id"), checkin, checkout, adults, ages) or {}
+        details = [d for d in (data.get("hotelDetails") or []) if isinstance(d, dict)]
+        if not details:
+            return (f"Свободных отелей в «{loc.get('name')}» на {checkin}–{checkout} "
+                    f"не нашлось.")
+        # The card only carries the id, so the names come from one static-info call
+        # rather than one call per hotel.
+        shown = details[:limit] if limit > 0 else details
+        names_failed = False
+        try:
+            names = s.hotel_static_info([d.get("hotelId") for d in shown])
+        except (TbankApiError, ValueError, TypeError):
+            # Names/stars come from this batch call. If it fails, the listing shows
+            # bare «отель {id}» — that must be flagged, not passed off as complete.
+            names = {}
+            names_failed = True
+
+        def render(d):
+            hid = str(d.get("hotelId"))
+            offer = d.get("offerDetails") or {}
+            info = names.get(hid) or {}
+            stars = "★" * _stars(info.get("starRating"))
+            cb = (offer.get("cashbackInfo") or {}).get("cashbackAmount")
+            return (f"- {_cut(info.get('hotelName') or f'отель {hid}', 34)} {stars}"
+                    f" | {_money((offer.get('price') or {}).get('amount'), 'RUB')}"
+                    + ("" if (offer.get("price") or {}).get("isFinalPrice") else " (не итог)")
+                    + (f" | кэшбэк {_money(cb, 'RUB')}" if cb else "")
+                    + f" | hotel_id={hid}")
+
+        tail = f"Тарифы и отзывы: hotel_info(hotel_id, \"{checkin}\", \"{checkout}\")."
+        if names_failed:
+            tail = ("⚠️ Названия и звёзды не загрузились (запрос не прошёл) — "
+                    "показаны только id и цены.\n" + tail)
+        if others:
+            tail = (f"Искал по «{loc.get('name')}». Банк предложил ещё: "
+                    f"{', '.join(others)} — если нужен другой, спроси точнее.\n" + tail)
+        if not data.get("isLoadingCompleted"):
+            # Same honesty as an aborted flight stream: a partial answer that reads
+            # as complete is how «дешевле нет» gets said about a list still loading.
+            tail = ("⚠️ Банк ещё догружал выдачу — это НЕ весь список; повтори "
+                    "вызов через несколько секунд.\n" + tail)
+        return _rows_out(details, render, limit=limit, total=len(details),
+                         header=f"Отели: {loc.get('name')}, {checkin}–{checkout}, "
+                                f"гостей {adults}" + (f"+{len(ages)} дет." if ages else ""),
+                         order_note="как отдал банк", tail=tail)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def hotel_info(hotel_id: str, checkin: str = "", checkout: str = "",
+               adults: int = 2, children: str = "", limit: int = 10) -> str:
+    """Карточка отеля: адрес, время заезда, отзывы. С датами — ещё и тарифы:
+    цена, питание, до какого числа бесплатная отмена.
+
+    hotel_id — из hotel_search(). Забронировать через MCP нельзя: в API банка нет
+    вызова, который принимал бы bookHash. Дальше — приложение или сайт."""
+    try:
+        s = _require(); s.ensure_fresh()
+        card = s.hotel_card(hotel_id) or {}
+        if not card:
+            return f"Отель {hotel_id} не найден. Список — hotel_search()."
+        area = card.get("areaLocation") or {}
+        stars = "★" * _stars(card.get("starRating"))
+        out = [f"{card.get('hotelName') or hotel_id} {stars}".strip(),
+               f"{area.get('destinationName') or ''}, {area.get('countryName') or ''}"
+               f" | {card.get('address') or ''}".strip(" |"),
+               f"Заезд с {card.get('checkInTime', '?')}, выезд до {card.get('checkOutTime', '?')}"]
+        reviews = s.hotel_reviews(hotel_id)
+        if reviews.get("summary"):
+            out.append(f"Отзывы: {reviews['summary']}")
+        ratings = (reviews.get("ratings") or {}).get("ratings") or []
+        if ratings:
+            # All of them: these are per-aspect scores (чистота, завтрак, персонал)
+            # and a silent «first six» would hide whichever one the reader came for.
+            out.append("Оценки: " + ", ".join(
+                f"{r.get('name')} {r.get('value')}" for r in ratings))
+        if not (checkin and checkout):
+            out.append(f"Тарифы: hotel_info(\"{hotel_id}\", \"YYYY-MM-DD\", \"YYYY-MM-DD\").")
+            return "\n".join(out)
+        ages = [int(a) for a in children.replace(" ", "").split(",") if a.strip().isdigit()]
+        rates = (s.hotel_rates(hotel_id, checkin, checkout, adults, ages) or {}).get("rates") or []
+        if not rates:
+            out.append(f"На {checkin}–{checkout} свободных тарифов нет.")
+            return "\n".join(out)
+
+        def render(r):
+            free = r.get("cancellationPolicyRules") or {}
+            until = _local_date(free.get("freeCancellationUntil"))
+            cb = r.get("cashback") or {}
+            return (f"- {_money((r.get('paymentPrice') or {}).get('amount'), 'RUB')}"
+                    f" | {r.get('mealName') or 'без питания'}"
+                    + (f" | отмена бесплатно до {until}" if until else " | невозвратный")
+                    + (f" | кэшбэк {_money(cb.get('amount'), cb.get('currency') or '')}" if cb.get("amount") else "")
+                    + (f" | номеров {r['availableRoomsCount']}" if r.get("availableRoomsCount") else ""))
+
+        rates.sort(key=lambda r: float((r.get("paymentPrice") or {}).get("amount") or 0))
+        out.append(_rows_out(
+            rates, render, limit=limit, total=len(rates),
+            header=f"Тарифы {checkin}–{checkout}", order_note="дешёвые сверху",
+            tail="Забронировать через MCP нельзя — оформление только в приложении."))
+        return "\n".join(out)
+    except Exception as e:
+        return _err(e)
+
+
+# ── TRIPS, AND WHAT A TRIP COSTS ────────────────────────────
+
+@mcp.tool()
+def trips(trip_id: str = "") -> str:
+    """Поездки — самолёты, поезда и отели одной лентой.
+
+    Без аргумента — список; с trip_id — карточка поездки: маршрут, статус,
+    страховка. Это НЕ то же самое, что orders(): там заказы всех вертикалей
+    вместе с продуктами и кино, здесь только поездки."""
+    try:
+        s = _require(); s.ensure_fresh()
+        if trip_id:
+            data = s.trip(trip_id) or {}
+            trip = data.get("trip") or {}
+            if not trip:
+                return f"Поездка {trip_id} не найдена. Список — trips()."
+            out = [f"{trip.get('id') or trip_id} | {trip.get('status') or '?'} | "
+                   f"{_local_date(trip.get('startDateTime'))} → "
+                   f"{_local_date(trip.get('endDateTime'))}"]
+            cur = trip.get("currentState") or {}
+            if cur.get("title"):
+                out.append(f"{cur['title']} — {cur.get('subtitle') or ''}".strip(" —"))
+            for p in (data.get("products") or []):
+                out.append(f"- {p.get('type') or '?'} | {p.get('status') or ''} | "
+                           f"{_cut(p.get('middleText') or '', 60)}"
+                           + (f" | заказ {p['orderId']}" if p.get("orderId") else ""))
+            try:
+                ins = (s.trip_insurance(trip_id) or {}).get("tripInsurance") or {}
+                for i in (ins.get("insurances") or []):
+                    out.append(f"- страховка: {_cut(i.get('title') or i.get('name') or '', 60)}")
+            except TbankApiError:
+                # A failed insurance request must not read as «not insured».
+                out.append("- страховка: не удалось проверить (запрос не прошёл)")
+            return "\n".join(out)
+        rows = s.trips()
+        if not rows:
+            return "Поездок нет."
+
+        def render(t):
+            trip = t.get("trip") or {}
+            title = ((trip.get("currentState") or {}).get("title")
+                     or trip.get("title") or "поездка")
+            return (f"- {_cut(title, 44)} | {trip.get('status') or '?'} | "
+                    f"{_local_date(trip.get('startDateTime'))}"
+                    + (f" | trip_id={trip['id']}" if trip.get("id") else ""))
+
+        return _rows_out(rows, render, limit=0, total=len(rows), header="Поездки",
+                         tail="Детали: trips(trip_id).")
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def travel_payment_options(amount: float, account_id: str = "") -> str:
+    """Чем платить за поездку и сколько это стоит на самом деле: доступные счета,
+    сколько бонусов можно списать, сколько кэшбэка вернётся, какие есть рассрочки.
+
+    amount — сумма покупки (из flight_offer() или train_book()). Ничего не платит
+    и ничего не меняет."""
+    try:
+        # checkout/accounts VALIDATES the sessionid, and its CLIENT window is ~11
+        # minutes against the Bearer's two hours. Measured: the same call answered
+        # 200 right after a re-mint and 403 with an empty body once the window had
+        # closed — a failure that reads as random unless the level is guaranteed.
+        s = _require(); s.ensure_client_session()
+        if _payable_amount(amount) is None:
+            return f"Сумма должна быть положительным числом, получено {amount!r}."
+        accounts = s.travel_accounts()
+        if not accounts:
+            return "Банк не вернул ни одного счёта для оплаты поездок."
+        chosen = next((a for a in accounts if str(a.get("id")) == str(account_id)),
+                      accounts[0])
+        out = [f"Покупка на {_money(amount, 'RUB')} — чем платить:"]
+        for a in accounts:
+            money = a.get("moneyAmount") or {}
+            mark = "→ " if a is chosen else "  "
+            out.append(f"{mark}{a.get('id')} · {a.get('name')} · {_money(money)}")
+        try:
+            # serviceType=AVIA_PAYMENT is the ONLY value in any capture — no rail
+            # example exists, so the rail bonus limit cannot be verified. This is a
+            # read-only estimate (no money moves), so it is shown with that caveat
+            # rather than sent with a GUESSED rail serviceType, which would be the
+            # exact «invented request shape» this repo's bugs come from.
+            bonuses = s.travel_usable_bonuses(str(chosen.get("id")), float(amount))
+            cap = bonuses.get("bonusForOperationCompensation") or {}
+            if cap.get("bonusAmountUsable"):
+                out.append(f"Бонусами можно закрыть до "
+                           f"{_money(cap.get('moneyEquivalent'), 'RUB')} "
+                           f"({cap.get('bonusAmountUsable')} бонусов; оценка "
+                           f"по авиатарифу — для поезда может отличаться)")
+        except TbankApiError:
+            # A failed request is NOT «no bonuses». Say the estimate is missing so
+            # the agent does not tell the user there is nothing to burn.
+            out.append("Бонусы: не удалось узнать (запрос не прошёл)")
+        try:
+            predict = s.travel_predict_bonuses(float(amount), chosen)
+            if predict.get("bonusSumRub"):
+                out.append(f"Кэшбэк по «{predict.get('loyaltyName') or ''}»: "
+                           f"{_money(predict.get('bonusSumRub'), 'RUB')} "
+                           f"({predict.get('cashbackPercent')}%)")
+        except TbankApiError:
+            out.append("Кэшбэк: не удалось рассчитать (запрос не прошёл)")
+        try:
+            if s.travel_loan_allowance():
+                # Every plan. The question this tool answers is «which is cheaper»,
+                # and the cheapest total is not reliably among the first few — in
+                # the captured answer it was the THIRD of four.
+                for plan in s.travel_installment(float(amount)):
+                    out.append(f"Рассрочка {plan.get('period')} мес: "
+                               f"{_money(plan.get('monthlyPayment'), 'RUB')}/мес, "
+                               f"итого {_money(plan.get('totalPrice'), 'RUB')}")
+        except TbankApiError:
+            # «Рассрочки нет» and «не смог проверить рассрочку» are different
+            # answers — the second must not read as the first.
+            out.append("Рассрочка: не удалось проверить (запрос не прошёл)")
+        return "\n".join(out)
     except Exception as e:
         return _err(e)
 
@@ -4869,7 +6648,7 @@ def afisha_catalog(kind: str = "movie", city: str = "", date_from: str = "",
             f = e.get("fields") or {}
             rating = (f.get("rating") or {}).get("value")
             slots = e.get("slots") or []
-            when = str((slots[0] or {}).get("startDateTime") or "")[:16] if slots else ""
+            when = _local_dt((slots[0] or {}).get("startDateTime")) if slots else ""
             return (f"- {_cut(e.get('eventName', '?'), 46)}"
                     + (f" [{f.get('ageRestriction')}]" if f.get("ageRestriction") else "")
                     + (f" | ★{rating}" if rating else "")
@@ -4882,6 +6661,14 @@ def afisha_catalog(kind: str = "movie", city: str = "", date_from: str = "",
                 f"{date_from or date_to}..{date_to or date_from})")
         if query:
             head += f", совпадений с «{query}»"
+        # Every row carries an eventId and nothing said what to do with it. Kino
+        # sessions are a separate call; concerts/theatre go through the concert
+        # schedule. Name the next tool so the listing is not a dead end.
+        _is_movie = str(kind).lower() in ("movie", "кино", "фильм")
+        head += ("\nДальше по eventId: "
+                 + ("cinema_schedule(event_id, date) — сеансы кино."
+                    if _is_movie else
+                    "concert_schedule(event_id) — слоты и места."))
         # The scan is capped at `pages`, and the cap has to be visible: the header
         # used to state the bank's TRUE total while the rows came from the first
         # pages×count records, and the hint named a limit that could never render
@@ -4984,7 +6771,7 @@ def place_schedule(object_id: str, limit: int = 20, page: int = 1,
             # 13:00 and a 19:00 slot in one row) — showing only times[0] would
             # silently drop a real showtime, not just omit the clock.
             times = e.get("times") or []
-            clocks = [str(t.get("startTime"))[11:16] for t in times
+            clocks = [_local_hhmm(t.get("startTime")) for t in times
                       if isinstance(t, dict) and t.get("startTime")]
             when = f"{date} {', '.join(clocks)}" if clocks else (date or "")
             pr = ev.get("prices") or {}
@@ -5087,7 +6874,7 @@ def cinema_book(event_id: str, slot_id: str, object_id: str, seats: str,
         fee = sum(float(c.get("serviceFee") or 0) for c in cart)
         out = [f"ЗАБРОНИРОВАНО (не оплачено): заказ {order['orderId']}",
                f"{order.get('eventName','?')} | {order.get('objectName','')} "
-               f"| {str(order.get('dateTime',''))[:16]}"]
+               f"| {_local_dt(order.get('dateTime',''))}"]
         for c in cart:
             pos = ((c.get("fields") or {}).get("seatPos") or {})
             where = (f"ряд {pos.get('row')}, место {pos.get('number')}" if pos
@@ -5159,9 +6946,24 @@ def _ticket_pay_prepare(order_id, amount, nfs_payment_token, account_id):
                     "без него не примет заказ, а order_details() этот токен не возвращает.")
         # Cross-check against the order the bank actually holds: paying an amount
         # that disagrees with the order is how a payment gets stuck half-applied.
+        #
+        # A MISSING cartInfo.amount is not a pass — it is «I could not verify the
+        # sum». The old `if booked and …` silently skipped the check when the bank
+        # sent no amount, letting an arbitrary sum through unverified. If there is
+        # nothing to compare against, refuse: the whole point here is that the
+        # charged amount came from the agent, not from the order.
         info = s.order_details(order_id)
         booked = (info.get("cartInfo") or {}).get("amount")
-        if booked and abs(float(booked) - float(amount)) > 0.01:
+        try:
+            booked_val = float(booked) if booked not in (None, "") else None
+        except (TypeError, ValueError):
+            booked_val = None
+        if booked_val is None:
+            return (f"Не удалось сверить сумму: заказ {order_id} не вернул своей "
+                    f"суммы (cartInfo.amount). Оплату на {amount} ₽ не запускаю — "
+                    f"проверь order_details({order_id!r}); платить сумму, которую "
+                    f"нельзя сверить с заказом, нельзя.")
+        if abs(booked_val - float(amount)) > 0.01:
             return (f"Сумма не сходится: передано {amount} ₽, а в заказе {order_id} "
                     f"{booked} ₽. Оплату не запускаю — сверься с order_details().")
         account = account_id or s._source_account()
@@ -5213,7 +7015,8 @@ def _ticket_pay_execute(order_id, amount, nfs_payment_token, prep, force):
         journal.record(attempt, "pay", "paid" if pid else "unknown", payment_id=pid)
         return (f"ОПЛАЧЕНО: заказ {order_id}, {amount} ₽ со счёта {account}. "
                 f"paymentId={res.get('paymentId','?')}\n"
-                f"Код брони и места — order_details(\"{order_id}\").")
+                f"Код брони и места — order_details(\"{order_id}\"); сам билет "
+                f"(QR/код входа) — ticket_qr(\"{order_id}\").")
     except Exception as e:
         return _err(e)
 
@@ -5368,10 +7171,15 @@ def payment_receipt(payment_id: str, save_to: str = "", overwrite: bool = False)
         # entirely from a payment id the tool itself prints, and mode 0664 from the
         # umask — while every other artifact this repo writes is 0600.
         if save_to:
-            path = os.path.realpath(os.path.expanduser(save_to))
+            # abspath, NOT realpath: realpath resolves a symlink in the final
+            # component too, so O_NOFOLLOW below would guard the RESOLVED
+            # target instead of the symlink — defeating it. abspath only
+            # normalises «..» textually, leaving the final component for
+            # O_NOFOLLOW to refuse.
+            path = os.path.abspath(os.path.expanduser(save_to))
         else:
             path = os.path.join(_RECEIPTS_DIR, f"receipt-{payment_id}.pdf")
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
 
         # O_EXCL, not a bare open(..., "wb"). `save_to` reached open() unchecked, so
         # the tool silently truncated ANY file the user can write — verified by an
@@ -5403,8 +7211,17 @@ _FLOWS_PATH = os.path.join(os.path.dirname(__file__), "..", "docs", "FLOWS.md")
 _FLOW_KEYWORDS = {
     "bootstrap": "логин вход авторизация otp смс пароль пин первый login",
     "marketplace": "маркетплейс шопинг товар товары купить магазин продавец корзина",
-    "flights": "самолёт самолет авиа авиабилет перелёт перелет рейс аэропорт",
-    "rail": "поезд поезда ржд купе плацкарт сапсан вокзал станция",
+    # «билет» lives in three lexicons on purpose. It is the word people actually
+    # use for all of them, so each vertical carries it and the SECOND word decides:
+    # «билет на поезд» scores rail twice, «билет в кино» scores tickets twice.
+    "flights": "самолёт самолет авиа авиабилет перелёт перелет рейс аэропорт "
+               "тариф багаж пересадка иата билет билеты купить",
+    "rail": "поезд поезда ржд купе плацкарт сапсан вокзал станция вагон "
+            "полка билет билеты купить возврат вернуть сдать",
+    "hotels": "отель отели гостиница гостиницы номер заезд выезд ночь ночей "
+              "проживание",
+    "trips": "поездка поездки путешествие путешествия маршрут страховка бонусы "
+             "кэшбэк рассрочка",
     "session": "сессия токен refresh keepalive expired протух",
     "read accounts": "счета счёт баланс операции покупки траты расходы категории",
     "grocery cart": "продукты еда корзина магазин вкусвилл лента самокат азбука доставка",
@@ -5417,7 +7234,11 @@ _FLOW_KEYWORDS = {
     "invest": "инвест инвестиции инвестиция акции облигации портфель брокер бумаги доходность",
     "credit": "кредит кредиты долг задолженность график платежей рейтинг выписка",
     "cards": "карта карты реквизиты лимиты cvv пин документы паспорт снилс инн права",
-    "orders": "заказы заказ история покупок отель поездка путешествия авиа поезд",
+    # The vertical words (поезд/авиа/отель/поездка) deliberately do NOT live here.
+    # They did, and «поезд» then scored one point for BOTH this section and the
+    # rail one, so «как купить билет на поезд» could be answered with the order
+    # history. Ask about a vertical, get the vertical; ask about заказы, get this.
+    "orders": "заказы заказ история покупок оформленные",
     "nutrition": "кбжу калории белки жиры углеводы питание состав диета",
     "tickets": "билет билеты кино фильм сеанс концерт афиша театр места бронь",
     "global search": "поиск найти искать search",
@@ -5441,7 +7262,8 @@ def flows(topic: str = "") -> str:
     """Гид по флоу: порядок вызовов для конкретной задачи.
 
     topic — что тебе нужно, своими словами: «продукты», «перевод», «билеты»,
-    «карты», «заказы», «кбжу», «инвест», «кредит», «чат», «поиск», «логин».
+    «карты», «заказы», «кбжу», «инвест», «кредит», «чат», «поиск», «логин»,
+    «поезд», «самолёт», «отель», «поездки», «маркетплейс».
     Без аргумента — список тем и общие правила (там же про тулы с реальными
     деньгами). Отдаёт только подходящие разделы, а не весь файл."""
     sections = _flow_sections()
