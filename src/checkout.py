@@ -145,6 +145,7 @@ def _delivery_error_text(deliv: dict, code: str, err: str, blame: str, tries: in
 # three more places to get the wall-clock deadline wrong. Re-exported so the
 # existing callers and tests keep importing it from here.
 from .client import poll_until_ready as _poll_until_ready  # noqa: E402
+from .client import cart_quantity_conflicts, format_cart_conflicts  # noqa: E402
 
 
 # Per-request ceiling for every in-page fetch. Playwright's page.evaluate has NO
@@ -343,6 +344,18 @@ def checkout(session, app_id: str = "", point_id: str = "",
                     "web cart is empty while its API is healthy — the mobile cart did "
                     "not sync to web. Check grocery_cart(app_id, point_id) shows items "
                     "for the SAME store, then retry; no order was created.")
+
+            # Stock preflight on the WEB cart, before /deliveries: the mobile-side guards
+            # run on their own read, so a cart that changed since (or a direct client
+            # call) could still arrive over the shelf. Blocking here spares the 3×4 s
+            # delivery-retry burn and, more importantly, never posts an order for a cart
+            # the store will reject with a generic code=211. The web cart carries the same
+            # countAvailable; if it does not, the detector no-ops and the mobile guards
+            # remain the safety net.
+            web_conflicts = cart_quantity_conflicts(goods)
+            if web_conflicts:
+                raise CheckoutError(format_cart_conflicts(web_conflicts)
+                    + " deliveries НЕ вызывался, заказ НЕ создан, деньги НЕ списаны.")
 
             # 3. POST deliveries (appId + pointId) → CHECK status. Fire-and-forget
             # was the old bug: a delivery failure silently led to a stale sum + bad order.

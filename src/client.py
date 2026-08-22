@@ -551,6 +551,100 @@ def _reject_unkeyed(items: Any) -> None:
             + " id товара берётся из grocery_search / grocery_rank.")
 
 
+def _to_decimal(value: Any):
+    """A cart count / stock number as a Decimal, or None if it is not a finite number.
+
+    None here means «unknown», never «zero»: a line whose availability the payload does
+    not carry must not be turned into a false out-of-stock. bool is rejected explicitly —
+    it is an int subclass, and True/False are never a real count."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = decimal.Decimal(str(value))
+    except (decimal.InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _fmt_count(amount) -> str:
+    """A Decimal count the way the app shows it: 3, not 3.0; 0.57 kept."""
+    return str(int(amount)) if amount == amount.to_integral_value() else str(amount.normalize())
+
+
+def cart_quantity_conflicts(goods: Any) -> list[dict]:
+    """Cart lines whose requested count exceeds the live stock the SAME payload reports.
+
+    The store keeps a requested ``count`` above ``countAvailable`` and silently drops the
+    surplus from ``goodsSum`` with no warning; handing such a cart to checkout is what the
+    store answered with a generic ``code=211`` — twelve useless delivery retries before
+    anyone compared stock. This detects the cart's OWN invariant (requested vs the
+    ``countAvailable`` the cart already carries), it is NOT a mapping of 211 to
+    out-of-stock: the code contract is unknown, this one is not.
+
+    Returns ``[{id, name, requested, available, missing}]`` per over-stock line, in the
+    order given, with the numbers as Decimals. NEVER mutates and never clamps — reducing a
+    count to the shelf is the user's call, not this function's. A line whose
+    ``countAvailable`` is absent or non-numeric is skipped as unknown (older carts and the
+    test fixtures carry no such field). Compared as Decimal because weight goods carry a
+    fractional count (0.57 kg), where float subtraction drifts."""
+    conflicts: list[dict] = []
+    if not isinstance(goods, list):
+        return conflicts
+    for g in goods:
+        if not isinstance(g, dict):
+            continue
+        requested = _to_decimal(g.get("count"))
+        available = _to_decimal(g.get("countAvailable"))
+        if requested is None or available is None:
+            continue
+        if requested > available:
+            conflicts.append({
+                "id": str(g.get("id", "") or ""),
+                "name": g.get("name") or "",
+                "requested": requested,
+                "available": available,
+                "missing": requested - available,
+            })
+    return conflicts
+
+
+def format_cart_conflicts(conflicts: list[dict]) -> str:
+    """The CART_QUANTITY_CONFLICT block, shared by the cart view and the checkout guards
+    so the wording never drifts. Names every offending SKU and states nothing was posted;
+    it must not be truncated — a cut list hides exactly the SKU the user has to fix."""
+    lines = ["⚠ CART_QUANTITY_CONFLICT — запрошено больше, чем в наличии:"]
+    for c in conflicts:
+        lines.append(
+            f"- id={c['id']} | {c['name'] or '?'} | запрошено={_fmt_count(c['requested'])}"
+            f" | в наличии={_fmt_count(c['available'])} | не хватает={_fmt_count(c['missing'])}")
+    lines.append("Измени количество до наличия или выбери замену; "
+                 "количество автоматически не уменьшаю.")
+    return "\n".join(lines)
+
+
+def _overstock_in_write(write_goods: list[dict], current_goods: list[dict]) -> list[dict]:
+    """Conflicts for a FULL-REPLACE cart write: the FINAL count per id (after the
+    relative/absolute merge) against the ``countAvailable`` the current cart reports for
+    that id. Ids not already in the cart carry no live stock here, so they pass — the
+    post-write read-back and the checkout preflight catch those. Same shape as
+    cart_quantity_conflicts()."""
+    live = {}
+    for g in current_goods:
+        if isinstance(g, dict):
+            gid = str(g.get("id", "") or "")
+            if gid:
+                live[gid] = g
+    enriched = []
+    for g in write_goods:
+        cur = live.get(str(g.get("id", "") or ""))
+        if cur is None:
+            continue
+        enriched.append({"id": g.get("id"), "count": g.get("count"),
+                         "countAvailable": cur.get("countAvailable"),
+                         "name": cur.get("name")})
+    return cart_quantity_conflicts(enriched)
+
+
 def _next_step_hint(resp: dict) -> str:
     """What the caller must do next, from the `step` the bank names in an
     /auth/step response. Shared by login() and confirm_step() — the latter used to
@@ -3582,6 +3676,14 @@ class MobileSession:
                 order.append(gid)
             merged[gid] = merged.get(gid, 0) + _count_of(it)
         goods = [{"id": gid, "count": _count_out(merged[gid])} for gid in order]
+        # Stock preflight BEFORE any POST: a line whose final count is over the shelf
+        # (countAvailable) is what the store answers with a generic code=211 at delivery,
+        # never naming the SKU. Refuse here, named — do not clamp (that would hide the
+        # deviation from what the user asked). Ids not yet in the cart carry no live stock
+        # here and pass; the read-back and the checkout preflight catch those.
+        conflicts = _overstock_in_write(goods, self._goods_of(cart))
+        if conflicts:
+            raise TbankApiError("CART_QUANTITY_CONFLICT", format_cart_conflicts(conflicts))
         return self._grocery_cart_write(goods, app_id, delivery)
 
     def _grocery_cart_write(self, goods: list[dict], app_id: str, delivery: dict) -> dict:
@@ -3675,6 +3777,12 @@ class MobileSession:
         for gid, count in wanted.items():
             if gid not in seen and count > 0:
                 goods.append({"id": gid, "count": _count_out(count)})
+        # Stock preflight BEFORE any POST — see grocery_add_to_cart. An absolute set that
+        # names a count above the shelf is refused, not clamped: silent clamp would break
+        # this setter's contract and hide the deviation from the user's request.
+        conflicts = _overstock_in_write(goods, self._goods_of(cart))
+        if conflicts:
+            raise TbankApiError("CART_QUANTITY_CONFLICT", format_cart_conflicts(conflicts))
         return self._grocery_cart_write(goods, app_id, delivery)
 
     @staticmethod

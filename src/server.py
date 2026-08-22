@@ -24,7 +24,8 @@ from pydantic import BaseModel
 from . import client, trace
 from .client import (MobileSession, TbankApiError, SessionExpired,
                      PaymentConfirmationRequired, ms_for_period, vertical,
-                     pack_ref, poll_until_ready, unpack_ref)
+                     pack_ref, poll_until_ready, unpack_ref,
+                     cart_quantity_conflicts, format_cart_conflicts)
 from .endpoints import VERTICALS, APP_VERSION
 from .observability import redact_text, redact_reflected_secrets, _redact_value
 
@@ -1407,7 +1408,11 @@ def grocery_plan_order(ingredients: str, app_id: str = "", point_id: str = "") -
 def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str:
     """Добавить товары в корзину. items = JSON [{id, count}, ...].
     app_id/point_id — из grocery_stores() (обязательны). Запомни их — тот же
-    магазин нужен для grocery_cart и grocery_checkout."""
+    магазин нужен для grocery_cart и grocery_checkout.
+
+    Строку, у которой итоговое количество выше остатка (countAvailable), тул
+    отклоняет с CART_QUANTITY_CONFLICT и НЕ пишет корзину — количество сам не
+    уменьшает. Реши расхождение (меньше или замена) и повтори."""
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
@@ -1440,6 +1445,13 @@ def grocery_add_to_cart(items: str, app_id: str = "", point_id: str = "") -> str
             held = f"добавлено {len(wanted)} позиций"
         return (f"[store appId={app_id} pointId={point_id}] OK: goodsSum={pl['goodsSum']}"
                 f" ({held}){reset}")
+    except TbankApiError as e:
+        # The stock preflight refuses the write named; render its block in FULL — _err
+        # cuts a message to 300 chars, which would drop exactly the SKU list to fix.
+        if getattr(e, "result_code", "") == "CART_QUANTITY_CONFLICT":
+            return (f"[store appId={app_id} pointId={point_id}]\n{e.message}\n"
+                    f"Товары НЕ добавлены — deliveries не вызывался, заказ не создан.")
+        return _err(e)
     except Exception as e:
         return _err(e)
 
@@ -1457,7 +1469,11 @@ def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
 
     Отдельного эндпоинта удаления у банка нет: корзина всегда перезаписывается
     целиком, поэтому тул сам дочитывает текущий состав и шлёт полный список.
-    Возвращает содержимое корзины ПОСЛЕ изменения — сверь его с ожидаемым."""
+    Возвращает содержимое корзины ПОСЛЕ изменения — сверь его с ожидаемым.
+
+    Количество выше остатка (countAvailable) тул НЕ принимает: отвечает
+    CART_QUANTITY_CONFLICT с перечнем SKU и не пишет корзину. Молчаливого
+    clamp'а до остатка нет — уменьшить или заменить решает пользователь."""
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
@@ -1489,16 +1505,34 @@ def grocery_set_cart(items: str = "[]", app_id: str = "", point_id: str = "",
                      "две сразу. Если там что-то лежало, оно потеряно.")
         # Full name, not cut — see grocery_search for why: brand/fat%/variant
         # live at the end of a grocery name, and id/count are already uncut.
+        # The write itself refuses an over-stock line, but a brand-new addition has no
+        # live stock at write time and a race can slip one past — so the read-back still
+        # checks and names it rather than reporting a clean success over a doomed cart.
+        conflicts = cart_quantity_conflicts(goods) if goods_known else []
+        conflict_ids = {c["id"] for c in conflicts}
         rows = ([f"- {g.get('name','?')} ×{g.get('count','?')} | id={g.get('id','?')}"
+                 + (f"  ⚠ в наличии {g.get('countAvailable')}"
+                    if str(g.get('id', '') or '') in conflict_ids else "")
                 for g in goods] if goods_known else [])
-        return "\n".join([head] + rows)
+        tail = ("\n" + format_cart_conflicts(conflicts)) if conflicts else ""
+        return "\n".join([head] + rows) + tail
+    except TbankApiError as e:
+        # See grocery_add_to_cart: render the CART_QUANTITY_CONFLICT block in full.
+        if getattr(e, "result_code", "") == "CART_QUANTITY_CONFLICT":
+            return (f"[store appId={app_id} pointId={point_id}]\n{e.message}\n"
+                    f"Ничего НЕ изменено — deliveries не вызывался, заказ не создан.")
+        return _err(e)
     except Exception as e:
         return _err(e)
 
 @mcp.tool()
 def grocery_cart(app_id: str = "", point_id: str = "") -> str:
     """Содержимое корзины. app_id/point_id — из grocery_stores() (обязательны) и
-    должны совпадать с теми, что использовались в grocery_add_to_cart."""
+    должны совпадать с теми, что использовались в grocery_add_to_cart.
+
+    По каждой строке печатает «в наличии N» (остаток countAvailable), а если
+    запрошено больше остатка — блок CART_QUANTITY_CONFLICT с перечнем SKU и,
+    вместо подсказки на checkout, инструкцию сначала устранить расхождение."""
     try:
         s = _require(); s.ensure_fresh()
         app_id, point_id = _store(app_id, point_id)
@@ -1517,15 +1551,34 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ appId={resp_app} ≠ запрошенный {app_id}\n"
         elif resp_point and resp_point != str(point_id):
             mismatch = f"  ⚠ CART_CONTEXT_MISMATCH: ответ pointId={resp_point} ≠ запрошенный {point_id}\n"
-        # id first: grocery_set_cart addresses goods BY ID, and this is the only tool
-        # that lists what is in the cart. Without it the agent could read the cart and
-        # still have no way to change one line of it.
-        # Full name, not cut — same reason as grocery_search.
-        body = "\n".join(
-            f"- id={g.get('id','?')} | {g.get('name') or ''} "
-            f"| x{g.get('count', 1)} | {(g.get('price') or {}).get('value', '?')}₽ "
-            f"| {g.get('weight', '') or g.get('quant', '') or '-'}"
-            for g in goods) or "Корзина пуста"
+        # Stock preflight on the cart's OWN countAvailable: the store keeps a requested
+        # count above the shelf and drops the surplus from goodsSum silently, so the cart
+        # «looks» fine while checkout is doomed. Surface it here, above the lines, before
+        # the agent ever calls checkout.
+        conflicts = cart_quantity_conflicts(goods)
+        conflict_ids = {c["id"] for c in conflicts}
+        if conflicts:
+            mismatch += format_cart_conflicts(conflicts) + "\n"
+
+        def _avail(x):
+            try:
+                f = float(x)
+            except (TypeError, ValueError):
+                return x
+            return int(f) if f.is_integer() else f
+
+        def _cart_line(g):
+            # id first: grocery_set_cart addresses goods BY ID, and this is the only tool
+            # that lists what is in the cart. Full name, not cut — as in grocery_search.
+            line = (f"- id={g.get('id','?')} | {g.get('name') or ''} "
+                    f"| x{g.get('count', 1)} | {(g.get('price') or {}).get('value', '?')}₽ "
+                    f"| {g.get('weight', '') or g.get('quant', '') or '-'}")
+            avail = g.get("countAvailable")
+            if avail is not None:                       # older carts omit it — stay silent
+                short = "  ⚠ не хватает" if str(g.get("id", "") or "") in conflict_ids else ""
+                line += f" | в наличии {_avail(avail)}{short}"
+            return line
+        body = "\n".join(_cart_line(g) for g in goods) or "Корзина пуста"
         # The total is in the same payload and grocery_checkout demands it as
         # expected_sum «ВСЕГДА» — without it here the agent had to hand-sum the
         # lines, and had no way to check the store's minimum order at all.
@@ -1554,18 +1607,31 @@ def grocery_cart(app_id: str = "", point_id: str = "") -> str:
                 if gap > 0:
                     label = ("бесплатная доставка" if step_price == 0
                              else f"доставка {float(step_price):.0f} ₽")
-                    totals += f"\n{label} от {step_from:.0f} ₽ — добрать {gap:.0f} ₽"
+                    # This is the NEXT tariff step, not the current fee — labelled so, and
+                    # with the reminder that the real delivery is only known from the quote.
+                    # Reading it as «current» is how goodsSum+8 was typed as the total.
+                    totals += (f"\nСледующий тариф: {label} при сумме товаров от "
+                               f"{step_from:.0f} ₽ (добрать {gap:.0f} ₽). "
+                               f"Текущая финальная доставка — только из checkout dry_run.")
             # Point at the quote rather than at this number. Weight goods (бананы 0.8,
             # виноград 0.54) are repriced by the backend during delivery, so this total
             # is not what gets charged — and expected_sum is compared to the kopeck.
             # Naming the next call here is what stops the sum being re-typed from the
             # screen, which is how 3700.63 became 3700 and cost two checkout rounds.
-            totals += (f"\n→ дальше: grocery_checkout(app_id={app_id}, "
-                       f"point_id={point_id}) — он сам узнает финальную сумму "
-                       f"(весовые товары пересчитываются при оформлении доставки) "
-                       f"и переспросит её у пользователя кнопкой. Хочешь назвать "
-                       f"итог и слот заранее — сначала тот же вызов с "
-                       f"dry_run=True.\n")
+            if conflicts:
+                # A cart over the shelf will not check out — the store rejects it with a
+                # generic code=211. Do NOT invite checkout; the next step is to fix stock.
+                totals += ("\n→ сначала устрани расхождение по остатку (см. "
+                           "CART_QUANTITY_CONFLICT выше): уменьши количество до «в "
+                           "наличии» или выбери замену через grocery_set_cart. Checkout "
+                           "на такой корзине магазин отклонит.\n")
+            else:
+                totals += (f"\n→ дальше: grocery_checkout(app_id={app_id}, "
+                           f"point_id={point_id}) — он сам узнает финальную сумму "
+                           f"(весовые товары пересчитываются при оформлении доставки) "
+                           f"и переспросит её у пользователя кнопкой. Хочешь назвать "
+                           f"итог и слот заранее — сначала тот же вызов с "
+                           f"dry_run=True.\n")
         return f"[store appId={app_id} pointId={point_id}]\n{mismatch}{totals}{body}"
     except Exception as e:
         return _err(e)
@@ -1576,6 +1642,11 @@ async def grocery_checkout(app_id: str = "", point_id: str = "", force: bool = F
                            dry_run: bool = False, ctx: Context = None) -> str:
     """Полный чекаут: доставка → заказ → оплата. РЕАЛЬНЫЕ ДЕНЬГИ.
     app_id/point_id — из grocery_stores() (обязательны, тот же магазин что в корзине).
+
+    Если корзина просит больше остатка (count > countAvailable), тул останавливается
+    ДО доставки: отвечает CART_QUANTITY_CONFLICT с перечнем SKU, заказ не создаётся и
+    деньги не двигаются. Это проверка по инварианту корзины, а не расшифровка кода
+    магазина. Уменьши до «в наличии» или замени (с согласия пользователя) и повтори.
 
     Подтверждение — кнопка, не текст: тул сам делает предпросмотр (только бэкенд
     знает, во что пересчитаются весовые товары), показывает пользователю кнопки
@@ -1693,6 +1764,16 @@ def _format_quote(app_id: str, point_id: str, q: dict) -> str:
     return "\n".join(lines)
 
 
+def _grocery_conflict_refusal(app_id: str, point_id: str, conflicts: list) -> str:
+    """The checkout refusal when the cart requests more than the shelf holds. Blocks on
+    the cart's OWN invariant BEFORE delivery — no 3×4 s delivery-retry burn, no button, no
+    order — and names every SKU. Never maps the store's code=211: the cause here is ours."""
+    return (f"[store appId={app_id} pointId={point_id}]\n"
+            + format_cart_conflicts(conflicts)
+            + "\nПроверка по остатку самой корзины (не по коду магазина): "
+              "deliveries НЕ вызывался, заказ НЕ создан, деньги НЕ списаны.")
+
+
 def _grocery_quote_sum(app_id: str, point_id: str, account_id: str):
     """Dry-run the checkout to learn the bank's final sum for the gate. Returns
     (sum, quote_text) or a refusal string. Mirrors _do_grocery_checkout's dry-run
@@ -1710,6 +1791,9 @@ def _grocery_quote_sum(app_id: str, point_id: str, account_id: str):
         if not goods:
             return (f"[store appId={app_id} pointId={point_id}] Корзина пуста — "
                     "не из чего оформлять заказ.")
+        conflicts = cart_quantity_conflicts(goods)
+        if conflicts:
+            return _grocery_conflict_refusal(app_id, point_id, conflicts)
         amount = cart.get("goodsSum", 0) or cart.get("sum", 0) or 0
         trace_id = _uuid.uuid4().hex[:12]
         obs.emit("checkout_quote_start", attempt_id=trace_id, app_id=app_id,
@@ -1744,6 +1828,11 @@ def _do_grocery_checkout(app_id: str, point_id: str, force: bool,
         goods = cart.get("goods", []) if isinstance(cart, dict) else []
         if not goods:
             return f"[store appId={app_id} pointId={point_id}] Корзина пуста — не из чего оформлять заказ."
+        # Re-check on the FRESH cart read: this also catches stock that dropped between the
+        # quote/button and now — the fix must hold after the money button, not only before.
+        conflicts = cart_quantity_conflicts(goods)
+        if conflicts:
+            return _grocery_conflict_refusal(app_id, point_id, conflicts)
         amount = cart.get("goodsSum", 0) or cart.get("sum", 0) or 0
         chash = journal.cart_hash_of(goods)
         # 2. block-check: a blocking prior attempt for THIS cart → no auto-retry (#10)
