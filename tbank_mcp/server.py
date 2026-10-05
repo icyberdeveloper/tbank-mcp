@@ -5809,9 +5809,15 @@ def train_calendar(origin: str, destination: str, limit: int = 30) -> str:
 def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
                   children: int = 0, infants: int = 0,
                   only_bookable: bool = True, limit: int = 15,
-                  max_batches: int = 8) -> str:
+                  max_batches: int = 8, direct_only: bool = False,
+                  max_price: float = 0) -> str:
     """Поиск авиабилетов. from_code/to_code — коды IATA (MOW, LED, SVO),
     date — YYYY-MM-DD.
+
+    direct_only=True оставляет только рейсы без пересадок, max_price — потолок
+    цены за всё предложение. Оба отсекают ДО limit, поэтому limit=15 с
+    direct_only покажет 15 прямых, а не 15 самых дешёвых стыковок. Без этого
+    прямой рейс на ближней дате лежит на сотой строке выдачи.
 
     Резолвера «название города → код» у банка нет. Коды вместе с названиями
     отдаёт flight_history() — оттуда их и бери, а не угадывай.
@@ -5851,6 +5857,41 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
                 return 0.0
 
         offers = sorted(offers, key=lambda o: money(o) or 1e12)
+
+        # The stream may be cut short, and offer indices point into the
+        # concatenation of ALL batches — so an offer can reference a flight that
+        # was never fetched. Such an offer is not known to be direct, and a
+        # missing leg must not read as "zero stops": require every reference to
+        # resolve and every resolved leg to hold exactly one segment.
+        def is_direct(o):
+            idx = o.get("flights") or []
+            if not idx or any(not (0 <= i < len(flights)) for i in idx):
+                return False
+            return all(len(flights[i].get("flightSegments") or []) == 1 for i in idx)
+
+        # The cut-short warning belongs on EVERY path that shows a short list,
+        # including the one where filters emptied it — that is exactly when
+        # "nothing matched" could be a truncation artefact.
+        stream_tail = "" if res["complete"] else (
+            f"\n⚠️ Поток оборван на {res['batches']} батчах — это НЕ вся выдача. "
+            "Подними max_batches, если нужно всё.")
+
+        # Both filters run BEFORE limit: the row cap is a slice of the list, so
+        # filtering after it would still show whatever the cap caught first.
+        kept = len(offers)
+        if direct_only:
+            offers = [o for o in offers if is_direct(o)]
+        if max_price:
+            offers = [o for o in offers if money(o) <= max_price]
+        dropped = kept - len(offers)
+        if not offers:
+            crit = ", ".join(c for c in (
+                "без пересадок" if direct_only else "",
+                f"не дороже {max_price:.0f} ₽" if max_price else "") if c)
+            return (f"Среди загруженных предложений {from_code}→{to_code} на {date} "
+                    f"под условие ({crit}) не подошло ни одного: отсеяны все "
+                    f"{kept}.") + stream_tail
+
         names = ((res.get("info") or {}).get("carrierNames") or {})
 
         def leg(i):
@@ -5885,16 +5926,19 @@ def flight_search(from_code: str, to_code: str, date: str, adults: int = 1,
 
         head = (f"Рейсы {from_code}→{to_code} на {date}"
                 + (" (бронируемые в банке)" if only_bookable else "")
+                # Say what the filters threw away: a short list otherwise reads
+                # as "the bank has nothing", not "the filter cut it".
+                + (f" | фильтр: {'без пересадок' if direct_only else ''}"
+                   f"{', ' if direct_only and max_price else ''}"
+                   f"{f'до {max_price:.0f} ₽' if max_price else ''}"
+                   f" — отсеяно {dropped} из {kept}" if dropped else "")
                 # Each row carries an offerId; name the tool that turns it into
                 # fares so the listing points somewhere instead of dead-ending.
                 + "\nДальше по offerId: flight_offer(offer_id) — тарифы, багаж, "
                   "правила возврата.")
-        tail = "" if res["complete"] else (
-            f"\n⚠️ Поток оборван на {res['batches']} батчах — это НЕ вся выдача. "
-            "Подними max_batches, если нужно всё.")
         return _rows_out(offers, render, limit=limit, total=len(offers),
                          header=head, order_note="дешёвые сверху",
-                         more_hint=f"Передай limit={len(offers)}.") + tail
+                         more_hint=f"Передай limit={len(offers)}.") + stream_tail
     except Exception as e:
         return _err(e)
 

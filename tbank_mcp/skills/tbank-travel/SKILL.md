@@ -33,7 +33,7 @@ description: |
 | `train_book(train_id, seats, passengers)` | Бронь; держит места ~15 минут | нет |
 | `train_pay(order_id, card_id)` | Оплата брони через T-Pay | **ДА** |
 | `train_refund(order_id, ticket_ids, confirm)` | Расчёт возврата, а с `confirm=True` — сам возврат | возвращает |
-| `flight_search(from_code, to_code, date, …)` | Поиск рейсов; печатает `offerId` | нет |
+| `flight_search(from_code, to_code, date, direct_only, max_price, …)` | Поиск рейсов; печатает `offerId` | нет |
 | `flight_offer(offer_id, fare)` | Тарифы по рейсу, багаж, правила возврата | нет |
 | `flight_seats(offer_id, fare, max_price, limit)` | Карта мест с ценами (места платные) | нет |
 | `flight_book(offer_id, fare, passengers, seats, account_id)` | Оформляет И оплачивает — одним вызовом | **ДА** |
@@ -71,7 +71,10 @@ description: |
    не подставляй по памяти.
 2. `flight_search(from_code, to_code, date)` → предложения; каждое несёт
    `offerId`. `only_bookable=True` (по умолчанию) — только то, что банк продаёт
-   сам.
+   сам. Выдача отсортирована по цене, поэтому прямой рейс на ближней дате
+   уходит далеко вниз: нужен прямой — ставь `direct_only=True`, а не поднимай
+   `limit`. `max_price` отсекает по цене всего предложения; оба фильтра
+   работают до `limit`.
 3. `flight_offer(offer_id)` → **тарифы**. Один рейс из выдачи — это семья
    тарифов: тот же борт, разный багаж и разные правила возврата. Покажи их
    пользователю: цену, багаж, возвратность. Здесь же цена пересчитывается.
