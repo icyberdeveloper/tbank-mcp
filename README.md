@@ -209,6 +209,15 @@ before anything is sent (`grocery_checkout` refuses there at any threshold; its
 Claude Code (≥ 2.1.76) render it; Claude Desktop does not. See
 `TBANK_CONFIRM_ABOVE` under Security.
 
+### Use through an OpenAI Secure MCP Tunnel
+
+The existing stdio server can run behind OpenAI's `tunnel-client`, including on a
+GCP Compute Engine VM. No HTTP adapter or public MCP port is needed. See
+[Secure MCP Tunnel setup](docs/SECURE_MCP_TUNNEL.md) for deployment prerequisites,
+private access, validation, and the limitations of payment confirmations and
+server-local files. Transport support alone does not guarantee that every tool
+works in a particular hosted client.
+
 ## Tools
 
 Each tool's docstring is the reference — this table is only a map of the surface.
