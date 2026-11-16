@@ -1,0 +1,40 @@
+services:
+  bank:
+    build:
+      context: .
+      target: tunnel
+      args:
+        INSTALL_CHROMIUM: "${INSTALL_CHROMIUM:-1}"
+    image: tbank-mcp:tunnel
+    environment:
+      CONTROL_PLANE_TUNNEL_ID: "${CONTROL_PLANE_TUNNEL_ID:?Set the OpenAI tunnel ID in .env}"
+      MCP_COMMAND: tbank-mcp
+      MCP_STDIO_FAILURE_POLICY: exit
+      HEALTH_LISTEN_ADDR: 127.0.0.1:8080
+    command: ["--control-plane.api-key=file:/run/secrets/openai_runtime_key"]
+    secrets:
+      - openai_runtime_key
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: 256mb
+    volumes:
+      - bank-data:/home/tbank/.local/share/tbank-mcp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # stdio only. No ports, HTTP MCP listener, or Docker socket.
+
+secrets:
+  openai_runtime_key:
+    file: ./secrets/openai_runtime_key
+
+volumes:
+  bank-data:
+    name: tbank-mcp-data

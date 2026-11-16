@@ -15,3 +15,12 @@ bin/
 session.json
 captures*.xml
 *.har
+
+.env
+.env.*
+*.xml
+*.apk
+.pytest_cache/
+.github/
+
+secrets/

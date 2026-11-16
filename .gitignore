@@ -52,3 +52,10 @@ build/
 # tbank_mcp/ca/roots/ holds public root certificates, committed on purpose and
 # pinned by SHA-256 in tbank_mcp/tls.py — without them 13 of the 18 bank hosts
 # fail to verify. Never ignore them.
+
+# Deployment credentials
+.env
+.env.*
+!.env.example
+
+secrets/
