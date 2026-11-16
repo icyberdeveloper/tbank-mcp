@@ -3,8 +3,6 @@ services:
     build:
       context: .
       target: tunnel
-      args:
-        INSTALL_CHROMIUM: "${INSTALL_CHROMIUM:-1}"
     image: tbank-mcp:tunnel
     environment:
       CONTROL_PLANE_TUNNEL_ID: "${CONTROL_PLANE_TUNNEL_ID:?Set the OpenAI tunnel ID in .env}"

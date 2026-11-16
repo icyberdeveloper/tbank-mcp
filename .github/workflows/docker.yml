@@ -8,21 +8,22 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        chromium: ["0", "1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - run: pip install . packaging
-      - run: docker build --target tunnel --build-arg INSTALL_CHROMIUM=${{ matrix.chromium }} -t tbank-mcp:tunnel .
+      - run: docker build --target tunnel -t tbank-mcp:tunnel .
       - name: Verify runtime binary and container user
         run: |
           docker run --rm --entrypoint tunnel-client-runtime tbank-mcp:tunnel --version
           docker run --rm --entrypoint sh tbank-mcp:tunnel -c 'test "$(id -u)" = 10001'
+      - name: Launch bundled Chromium as the container user
+        run: >-
+          docker run --rm --init --shm-size=256m --cap-drop=ALL
+          --security-opt=no-new-privileges:true --entrypoint python tbank-mcp:tunnel
+          -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); page=b.new_page(); page.set_content("<title>offline</title>"); assert page.title()=="offline"; b.close(); p.stop()'
       - name: Discover tools through container stdio
         run: python tests/docker_smoke.py
   tests:

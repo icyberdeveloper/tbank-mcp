@@ -8,19 +8,16 @@ WORKDIR /app
 # Allowlist: captures, sessions, .env and local notes never enter the image.
 COPY pyproject.toml README.md LICENSE ./
 COPY tbank_mcp ./tbank_mcp
-ARG INSTALL_CHROMIUM=0
 RUN pip install --no-cache-dir . \
-    && if [ "$INSTALL_CHROMIUM" = "1" ]; then \
-         apt-get update \
-         && apt-get install -y --no-install-recommends libatomic1 \
-         && python -m playwright install --with-deps chromium \
-         && rm -rf /var/lib/apt/lists/*; \
-       fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 tbank \
     && mkdir -p /home/tbank/.local/share/tbank-mcp \
     && chown -R tbank:tbank /home/tbank
 USER tbank
-# stdio remains the default; Compose selects the HTTP entry point.
+# stdio remains the default; Compose selects the OpenAI tunnel runtime.
 ENTRYPOINT ["tbank-mcp"]
 
 # The runtime flavor contains no Cloudflare companion. It owns the MCP child.

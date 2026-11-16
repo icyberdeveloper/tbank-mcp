@@ -59,9 +59,8 @@ The login writes `session.json` inside the volume with mode 0600. The same volum
 holds the regenerated CA bundle, diagnostics and downloaded files. It survives
 container replacement. The image contains the public pinned bank CA roots.
 
-Chromium and its OS dependencies are installed by default in Compose for grocery
-checkout. Set `INSTALL_CHROMIUM=0` in `.env` before building for a smaller image;
-grocery checkout then needs a rebuild with Chromium enabled.
+Chromium and its OS dependencies are always included in the image for grocery
+checkout.
 
 ## 3. Start and connect ChatGPT
 
@@ -107,8 +106,9 @@ that volume deletes the saved session; `docker compose down` preserves it.
 
 ## Build validation
 
-The Docker workflow builds both browser variants and tests real container stdio
-initialization, tool discovery and an offline flows call. It does not log in or
+The Docker workflow builds the image, launches bundled Chromium as the container
+user, and tests real container stdio initialization, tool discovery and an offline
+flows call. It does not log in or
 call the bank. To repeat it locally after building:
 
 ```bash
@@ -116,6 +116,6 @@ pip install .
 python tests/docker_smoke.py
 ```
 
-The ordinary `docker build -t tbank-mcp .` still produces the stdio image without
-the tunnel. `docker build --target tunnel -t tbank-mcp:tunnel .` builds the tunnel
-variant; Compose also enables Chromium unless configured otherwise.
+The ordinary `docker build -t tbank-mcp .` still produces the stdio image with Chromium
+and without the tunnel. `docker build --target tunnel -t tbank-mcp:tunnel .` builds the tunnel
+variant used by Compose.
