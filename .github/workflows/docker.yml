@@ -17,7 +17,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install .
-      - run: python tests/run_all.py
       - run: docker build --target tunnel --build-arg INSTALL_CHROMIUM=${{ matrix.chromium }} -t tbank-mcp:tunnel .
       - name: Verify runtime binary and container user
         run: |
@@ -25,3 +24,13 @@ jobs:
           docker run --rm --entrypoint sh tbank-mcp:tunnel -c 'test "$(id -u)" = 10001'
       - name: Discover tools through container stdio
         run: python tests/docker_smoke.py
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install .
+      - run: python -u tests/run_all.py
