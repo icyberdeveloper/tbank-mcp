@@ -9,6 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         chromium: ["0", "1"]
     steps:
@@ -16,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install .
+      - run: pip install . packaging
       - run: docker build --target tunnel --build-arg INSTALL_CHROMIUM=${{ matrix.chromium }} -t tbank-mcp:tunnel .
       - name: Verify runtime binary and container user
         run: |
@@ -32,5 +33,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install .
+      - run: pip install . packaging
       - run: python -u tests/run_all.py

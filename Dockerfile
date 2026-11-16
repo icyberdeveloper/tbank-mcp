@@ -11,7 +11,10 @@ COPY tbank_mcp ./tbank_mcp
 ARG INSTALL_CHROMIUM=0
 RUN pip install --no-cache-dir . \
     && if [ "$INSTALL_CHROMIUM" = "1" ]; then \
-         python -m playwright install --with-deps chromium; \
+         apt-get update \
+         && apt-get install -y --no-install-recommends libatomic1 \
+         && python -m playwright install --with-deps chromium \
+         && rm -rf /var/lib/apt/lists/*; \
        fi \
     && useradd --create-home --uid 10001 tbank \
     && mkdir -p /home/tbank/.local/share/tbank-mcp \
