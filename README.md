@@ -94,9 +94,10 @@ claude mcp add tbank -- ./.venv/bin/python -m tbank_mcp.server
 
 ## Linux VPS with ChatGPT through OpenAI Secure MCP Tunnel
 
-[Deployment guide](docs/VPS.md): Docker Compose runs the OpenAI tunnel runtime
-and this MCP over stdio, with persistent bank login and bundled Chromium.
-No inbound ports or public HTTP MCP endpoint are needed.
+[Deployment guide](docs/VPS.md): download two files and run `bash tbank setup`.
+The wizard downloads a prebuilt image, asks for tunnel credentials and bank login,
+and starts Docker Compose. Chromium is included; no builds or inbound ports on
+the VPS are needed.
 
 ## 🔒 Login — the password never reaches the agent
 

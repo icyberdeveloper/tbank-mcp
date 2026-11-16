@@ -7,6 +7,10 @@ permissions:
   contents: read
 jobs:
   build:
+    needs: tests
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +30,17 @@ jobs:
           -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); page=b.new_page(); page.set_content("<title>offline</title>"); assert page.title()=="offline"; b.close(); p.stop()'
       - name: Discover tools through container stdio
         run: python tests/docker_smoke.py
+      - name: Publish tested image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          docker tag tbank-mcp:tunnel ghcr.io/icyberdeveloper/tbank-mcp:tunnel
+          docker tag tbank-mcp:tunnel ghcr.io/icyberdeveloper/tbank-mcp:sha-${{ github.sha }}
+          docker push ghcr.io/icyberdeveloper/tbank-mcp:sha-${{ github.sha }}
+          docker push ghcr.io/icyberdeveloper/tbank-mcp:tunnel
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -36,3 +51,8 @@ jobs:
           python-version: "3.13"
       - run: pip install . packaging
       - run: python -u tests/run_all.py
+      - name: Validate deployment Compose
+        env:
+          CONTROL_PLANE_TUNNEL_ID: tunnel_synthetic
+          CONTROL_PLANE_API_KEY: sk-synthetic
+        run: docker compose config --quiet

@@ -1,17 +1,13 @@
 services:
   bank:
-    build:
-      context: .
-      target: tunnel
-    image: tbank-mcp:tunnel
+    image: ghcr.io/icyberdeveloper/tbank-mcp:tunnel
+    pull_policy: always
     environment:
       CONTROL_PLANE_TUNNEL_ID: "${CONTROL_PLANE_TUNNEL_ID:?Set the OpenAI tunnel ID in .env}"
+      CONTROL_PLANE_API_KEY: "${CONTROL_PLANE_API_KEY:?Run bash tbank setup first}"
       MCP_COMMAND: tbank-mcp
       MCP_STDIO_FAILURE_POLICY: exit
       HEALTH_LISTEN_ADDR: 127.0.0.1:8080
-    command: ["--control-plane.api-key=file:/run/secrets/openai_runtime_key"]
-    secrets:
-      - openai_runtime_key
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
@@ -28,10 +24,6 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     # stdio only. No ports, HTTP MCP listener, or Docker socket.
-
-secrets:
-  openai_runtime_key:
-    file: ./secrets/openai_runtime_key
 
 volumes:
   bank-data:

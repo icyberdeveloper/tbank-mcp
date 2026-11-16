@@ -22,6 +22,7 @@ ENTRYPOINT ["tbank-mcp"]
 
 # The runtime flavor contains no Cloudflare companion. It owns the MCP child.
 FROM base AS tunnel
+LABEL org.opencontainers.image.source="https://github.com/icyberdeveloper/tbank-mcp"
 COPY --from=tunnel-runtime /usr/bin/tunnel-client-runtime /usr/local/bin/tunnel-client-runtime
 ENTRYPOINT ["tunnel-client-runtime", "run"]
 

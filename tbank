@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# VPS launcher: only Docker and Compose v2 are required; no local Python/build.
+set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+compose() { docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" "$@"; }
+need_docker() {
+  if ! docker compose version >/dev/null 2>&1; then
+    echo 'Нужен Docker с Compose v2: https://docs.docker.com/engine/install/' >&2
+    exit 1
+  fi
+}
+configure() {
+  if [[ -e "$ROOT/.env" ]]; then
+    echo 'Использую существующий .env. Для смены ключа отредактируйте его.'
+    return
+  fi
+  local tunnel_id runtime_key
+  read -rp 'OpenAI Tunnel ID: ' tunnel_id
+  read -rsp 'OpenAI runtime API key (скрыт): ' runtime_key
+  echo
+  if [[ ! "$tunnel_id" =~ ^[A-Za-z0-9_-]+$ || ! "$runtime_key" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
+    echo 'Tunnel ID или ключ пусты либо содержат неподдерживаемые символы.' >&2
+    exit 1
+  fi
+  (umask 077; set -o noclobber
+    printf 'CONTROL_PLANE_TUNNEL_ID=%s\nCONTROL_PLANE_API_KEY=%s\n' "$tunnel_id" "$runtime_key" > "$ROOT/.env")
+  unset runtime_key
+}
+login() {
+  local phone=${1:-}
+  if [[ -z "$phone" ]]; then read -rp 'Телефон Т-Банка (+7…): ' phone; fi
+  if [[ ! "$phone" =~ ^\+7[0-9]{10}$ ]]; then
+    echo 'Нужен телефон в формате +7XXXXXXXXXX.' >&2
+    exit 1
+  fi
+  # Stop the writer before a separate login process changes the shared session.
+  compose stop bank
+  compose run --rm --no-deps --entrypoint tbank-mcp-login bank "$phone"
+  compose up -d
+}
+need_docker
+case "${1:-help}" in
+  setup)
+    configure
+    compose pull
+    login
+    echo 'Готово. Выберите ваш туннель в настройках приложений ChatGPT.'
+    ;;
+  login) login "${2:-}" ;;
+  up) compose up -d ;;
+  stop) compose stop ;;
+  status) compose ps ;;
+  logs) compose logs --tail=100 bank ;;
+  update) compose pull; compose up -d ;;
+  *) echo 'Использование: bash tbank {setup|login [телефон]|up|stop|status|logs|update}' ;;
+esac
