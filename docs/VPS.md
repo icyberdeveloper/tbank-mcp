@@ -1,23 +1,24 @@
-# Запуск на VPS через OpenAI Secure MCP Tunnel
+# Run on a VPS with OpenAI Secure MCP Tunnel
 
-На VPS ничего собирать не нужно: Compose скачивает готовый образ с Chromium.
-Сервер работает через stdio и `openai/tunnel-client`, без открытых портов.
+No builds are needed on the VPS: Compose downloads a prebuilt image with Chromium.
+The server uses stdio and `openai/tunnel-client`, with no published ports.
 
-## 1. Один раз подготовьте доступ
+## 1. Prepare access once
 
-Нужна Linux VPS с установленным **Docker и Compose v2**. Можно выбрать готовый
-Docker-образ ОС в панели хостинга или установить Docker по
-[официальной инструкции](https://docs.docker.com/engine/install/).
-Команды ниже запускайте от пользователя с доступом к Docker.
-Готовый образ предназначен для Linux amd64 (обычные Intel/AMD VPS).
+Use a Linux VPS with **Docker and Compose v2** installed. You can select a Docker
+OS template in your hosting provider's panel or follow the
+[official installation guide](https://docs.docker.com/engine/install/).
+Run the commands below as a user with Docker access.
+The prebuilt image targets Linux amd64 (standard Intel/AMD VPS instances).
 
-В [OpenAI Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels)
-создайте туннель и скопируйте его **Tunnel ID**. Создайте
+Create a tunnel in
+[OpenAI Platform → Tunnels](https://platform.openai.com/settings/organization/tunnels)
+and copy its **Tunnel ID**. Create a
 [runtime API key](https://platform.openai.com/settings/organization/api-keys)
-с правами Tunnels Read + Use. Нужен доступ к Secure MCP Tunnel в вашем аккаунте
-и рабочем пространстве ChatGPT.
+with Tunnels Read + Use permissions. Your account and ChatGPT workspace need
+Secure MCP Tunnel access.
 
-Скачайте только два небольших файла:
+Download just two small files:
 
 ```bash
 mkdir -p ~/tbank && cd ~/tbank
@@ -25,70 +26,68 @@ curl -fsSLO https://raw.githubusercontent.com/icyberdeveloper/tbank-mcp/master/c
 curl -fsSLO https://raw.githubusercontent.com/icyberdeveloper/tbank-mcp/master/tbank
 ```
 
-## 2. Настройте и запустите одной командой
+## 2. Set up and start with one command
 
 ```bash
 bash tbank setup
 ```
 
-Скрипт сам:
+The wizard:
 
-1. Спросит Tunnel ID и ключ OpenAI; ключ вводится скрыто.
-2. Скачает готовый Docker-образ.
-3. Спросит телефон Т-Банка, затем запустит обычный вход по SMS и паролю/PIN.
-4. Сохранит банковскую сессию и запустит контейнер в фоне.
+1. Asks for the Tunnel ID and OpenAI key; key input is hidden.
+2. Downloads the prebuilt Docker image.
+3. Asks for your T-Bank phone number, then starts the regular SMS and password/PIN login.
+4. Saves the bank session and starts the container in the background.
 
-Пароль и SMS вводятся только в вашем терминале, без ChatGPT.
-Ключ OpenAI сохраняется в локальном `.env` с правами 0600; файл не публикуется.
-Банковская сессия сохраняется в Docker volume `tbank-mcp-data` и переживает
-обновления контейнера. Один контейнер обслуживает один банковский аккаунт.
+Enter the password and SMS code only in your own terminal, outside ChatGPT.
+The OpenAI key is saved in a local `.env` file with mode 0600; it is not published.
+The bank session is stored in the `tbank-mcp-data` Docker volume and survives
+container upgrades. One container serves one bank account.
 
-## 3. Подключите ChatGPT
+## 3. Connect ChatGPT
 
-Дождитесь статуса `healthy`:
+Wait for the service to report `healthy`:
 
 ```bash
 bash tbank status
 ```
 
-Выберите созданный туннель в
-[настройках приложений ChatGPT](https://chatgpt.com/#settings/Connectors).
-Если интерфейс вашего workspace отличается, следуйте
-[инструкции OpenAI](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/onboarding.md).
-Контейнер должен оставаться запущенным. Сначала проверьте статус банковской сессии
-и чтение данных. Платежи требуют поддержки подтверждений MCP elicitation клиентом;
-проверки подтверждений остаются включёнными.
+Select your tunnel in
+[ChatGPT app settings](https://chatgpt.com/#settings/Connectors).
+If your workspace's interface differs, follow the
+[OpenAI onboarding guide](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/onboarding.md).
+Keep the container running. First check the bank session status and read access.
+Payments require the client to support MCP elicitation confirmations;
+the existing confirmation checks remain enabled.
 
-## На каждый день
+## Everyday commands
 
 ```bash
-docker compose up -d  # запустить; готовый образ скачается автоматически
-bash tbank login     # повторный вход в банк: скрипт сам остановит и запустит сервер
-bash tbank update    # скачать свежий образ и перезапустить
-bash tbank logs      # посмотреть последние сообщения
-bash tbank stop      # остановить
+docker compose up -d  # Start; the prebuilt image is downloaded automatically
+bash tbank login     # Log in again; the wizard stops and restarts the server
+bash tbank update    # Download the latest image and restart
+bash tbank logs      # Show recent logs
+bash tbank stop      # Stop
 ```
 
-Запускайте команды из `~/tbank`. Не запускайте несколько экземпляров для одной
-сессии и Tunnel ID. `docker compose down` сохраняет сессию; удаление volume
-`tbank-mcp-data` удаляет её. Перед резервной копией volume остановите контейнер.
-Если вызов платежа прервался, сначала проверьте его статус, не повторяйте вслепую.
+Run these commands from `~/tbank`. Do not run multiple instances for the same
+session and Tunnel ID. `docker compose down` preserves the session; deleting the
+`tbank-mcp-data` volume removes it. Stop the container before backing up the volume.
+If a payment call is interrupted, check its status before retrying.
 
-## Для сопровождающего репозитория
+## For repository maintainers
 
-Workflow `Docker` проверяет тесты, собирает образ, запускает Chromium и проверяет
-stdio MCP. После успешного push в `master` он публикует проверенный образ:
+The `Docker` workflow runs the tests, builds the image, launches Chromium, and
+checks stdio MCP. After a successful push to `master`, it publishes the tested image:
 
-- `ghcr.io/icyberdeveloper/tbank-mcp:tunnel` — используется Compose;
-- `ghcr.io/icyberdeveloper/tbank-mcp:sha-<commit>` — конкретная версия.
+- `ghcr.io/icyberdeveloper/tbank-mcp:tunnel` — used by Compose.
+- `ghcr.io/icyberdeveloper/tbank-mcp:sha-<commit>` — a specific version.
 
-Первый образ появится **после слияния этого PR и успешного workflow на master**.
-После первой публикации откройте пакет в GitHub → Packages → tbank-mcp → Package
-settings и один раз установите visibility **Public**, чтобы VPS скачивала образ
-без `docker login`. Это настройка пакета, а не действие на каждой VPS.
-До этого момента инструкция с `master` и готовым образом ещё не работает.
+After the first publication, open GitHub → Packages → tbank-mcp → Package settings
+and set visibility to **Public** once so VPS instances can download the image
+without `docker login`. This is a package setting, not a step on every VPS.
 
-Сборка для разработки остаётся доступна:
+Local development builds are still available:
 
 ```bash
 docker build --target tunnel -t tbank-mcp:tunnel .
@@ -96,5 +95,6 @@ pip install .
 python tests/docker_smoke.py
 ```
 
-Туннель использует OpenAI runtime `v0.0.21` без Cloudflare companion. Live-проверка
-ChatGPT и банка требует ваших Tunnel ID, ключа и входа; CI их не использует.
+The tunnel uses OpenAI runtime `v0.0.21` without the Cloudflare companion.
+Live ChatGPT and bank checks require your Tunnel ID, key, and login; CI does not
+use them.
