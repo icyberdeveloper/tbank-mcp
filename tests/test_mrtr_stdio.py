@@ -19,7 +19,7 @@ async def main():
         command = (["docker", "run", "--rm", "-i", "--entrypoint", "tbank-mcp", "tbank-mcp:tunnel"]
                    if "--docker" in sys.argv else [sys.executable, "-m", "tbank_mcp.server"])
         proc = await asyncio.create_subprocess_exec(*command,
-            cwd=ROOT, env=env, stdin=asyncio.subprocess.PIPE,
+            cwd=ROOT, env=env, limit=4 * 1024 * 1024, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         counter = 0
         async def send(message):
