@@ -30,6 +30,8 @@ jobs:
           -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); page=b.new_page(); page.set_content("<title>offline</title>"); assert page.title()=="offline"; b.close(); p.stop()'
       - name: Discover tools through container stdio
         run: python tests/docker_smoke.py
+      - name: Verify modern and legacy elicitation in the built image
+        run: python tests/test_mrtr_stdio.py --docker
       - name: Publish tested image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:

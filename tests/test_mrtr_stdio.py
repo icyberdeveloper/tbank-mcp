@@ -16,7 +16,9 @@ async def main():
         env = dict(os.environ)
         for key in ('TBANK_TRACE_FILE', 'TBANK_EVENTS', 'TBANK_ATTEMPTS', 'TBANK_CA_BUNDLE'):
             env[key] = str(Path(tmp) / key)
-        proc = await asyncio.create_subprocess_exec(sys.executable, '-m', 'tbank_mcp.server',
+        command = (["docker", "run", "--rm", "-i", "--entrypoint", "tbank-mcp", "tbank-mcp:tunnel"]
+                   if "--docker" in sys.argv else [sys.executable, "-m", "tbank_mcp.server"])
+        proc = await asyncio.create_subprocess_exec(*command,
             cwd=ROOT, env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         counter = 0
@@ -24,7 +26,7 @@ async def main():
             proc.stdin.write((json.dumps(message)+'\n').encode())
             await proc.stdin.drain()
         async def read():
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
             assert line, 'server closed stdout'
             return json.loads(line)
         async def call(method, params):
