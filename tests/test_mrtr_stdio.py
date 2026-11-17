@@ -22,6 +22,7 @@ async def main():
             cwd=ROOT, env=env, limit=4 * 1024 * 1024, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         counter = 0
+        continuation_tokens = []
         async def send(message):
             proc.stdin.write((json.dumps(message)+'\n').encode())
             await proc.stdin.drain()
@@ -54,8 +55,9 @@ async def main():
                 result = await call('tools/call', params)
                 assert 'method' not in result and result['result']['resultType']=='input_required', result
                 required = result['result']
+                continuation_tokens.append(required['requestState'])
                 key = next(iter(required['inputRequests']))
-                params.update(requestState=required['requestState'], inputResponses={key:{'action':action}})
+                params.update(requestState=required['requestState'], inputResponses={key:{'action':action, 'content':{'confirmed':True}}})
                 result = await call('tools/call', params)
                 assert result['result']['resultType']=='complete', result
                 payload = json.loads(result['result']['content'][0]['text'])
@@ -74,12 +76,17 @@ async def main():
                     params = {'name':'elicitation_test', 'arguments':{}, '_meta':core_meta}
                     result = await call('tools/call', params)
                     required = result['result']
+                    continuation_tokens.append(required['requestState'])
                     assert required['resultType']=='input_required', required
                     key = next(iter(required['inputRequests']))
                     form = required['inputRequests'][key]['params']
                     assert '_meta' not in form, form
                     assert form['requestedSchema']['type']=='object', form
-                    params.update(requestState=required['requestState'], inputResponses={key:{'action':action}})
+                    schema = form['requestedSchema']
+                    assert schema['properties']['confirmed']['type']=='boolean', schema
+                    assert schema['required']==['confirmed'], schema
+                    assert 'default' not in schema['properties']['confirmed'], schema
+                    params.update(requestState=required['requestState'], inputResponses={key:{'action':action, 'content':{'confirmed':True}}})
                     result = await call('tools/call', params)
                     payload = json.loads(result['result']['content'][0]['text'])
                     assert payload['transport']=='mrtr' and payload['outcome']==action, payload
@@ -93,7 +100,7 @@ async def main():
             await send({'jsonrpc':'2.0','method':'notifications/initialized'})
             prompt = await call('tools/call', {'name':'elicitation_test','arguments':{}})
             assert prompt['method']=='elicitation/create', prompt
-            await send({'jsonrpc':'2.0','id':prompt['id'],'result':{'action':'accept','content':{}}})
+            await send({'jsonrpc':'2.0','id':prompt['id'],'result':{'action':'accept','content':{'confirmed':True}}})
             result = await read()
             payload = json.loads(result['result']['content'][0]['text'])
             assert payload['transport']=='legacy' and payload['outcome']=='accept', payload
@@ -121,6 +128,13 @@ async def main():
                 proc.kill()
                 await proc.wait()
             err = (await proc.stderr.read()).decode()
+            observations = [json.loads(line) for line in err.splitlines()
+                            if line.startswith('{"event": "elicitation_test_response"')]
+            assert any(o['result_type']=='input_required' and o['schema_field_counts']==[1]
+                       and o['client_form'] and not o['openai_encoding'] for o in observations), observations
+            assert any(o['result_type']=='complete' and o['continuation'] for o in observations), observations
+            assert all('requestState' not in o and 'inputResponses' not in o for o in observations)
+            assert not any(token in err for token in continuation_tokens), 'continuation token leaked to stderr'
             if err:
                 print(err, file=sys.stderr)
 
