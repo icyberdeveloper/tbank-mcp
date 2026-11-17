@@ -2188,7 +2188,9 @@ async def elicitation_test(ctx: Context = None) -> str:
     mode = "mrtr" if conversation is not None else "legacy"
     outcome, _ = await _elicit_or(ctx, "Тест подтверждения: деньги НЕ переводятся. "
                                 "Нажмите подтверждение или отмену.", _TransferGateForm)
-    return json.dumps({"transport": mode, "outcome": outcome}, ensure_ascii=False)
+    return json.dumps({"transport": mode, "outcome": outcome,
+                       "negotiation": elicitation_transport.negotiation_snapshot(ctx)},
+                      ensure_ascii=False)
 
 
 @mcp.tool()
@@ -7673,7 +7675,9 @@ def flows(topic: str = "") -> str:
 _elicitation_round_trips = elicitation_transport.install(mcp)
 
 def main():
-    mcp.run()
+    import anyio
+    from .stdio import run
+    anyio.run(run, mcp, _elicitation_round_trips)
 
 if __name__ == "__main__":
     main()

@@ -230,3 +230,40 @@ def install(mcp):
 
     mcp._mcp_server.request_handlers[types.CallToolRequest] = handler
     return manager
+
+
+def negotiation_snapshot(ctx):
+    """Allowlisted protocol evidence only; never return raw metadata or headers."""
+    def protocol(value):
+        if not isinstance(value, str) or len(value) != 10:
+            return None
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            return None
+
+    def capabilities(value):
+        caps = _object(value)
+        elicit = caps.get("elicitation")
+        elicit = _object(elicit) if isinstance(elicit, (dict, BaseModel)) else None
+        extensions = _object(caps.get("extensions"))
+        return {"elicitation_declared": elicit is not None,
+                "legacy_empty_elicitation": elicit == {},
+                "form": isinstance((elicit or {}).get("form"), dict),
+                "url": isinstance((elicit or {}).get("url"), dict),
+                "openai_form": isinstance(_object(extensions.get(OPENAI)).get("form"), dict)}
+
+    try:
+        request = ctx.request_context
+    except (AttributeError, ValueError):
+        request = None
+    session = getattr(request, "session", None)
+    initialized = getattr(session, "client_params", None)
+    meta = _object(getattr(request, "meta", None))
+    return {"context_present": request is not None,
+            "initialize_present": initialized is not None,
+            "initialize_requested_protocol": protocol(getattr(initialized, "protocolVersion", None)),
+            "initialize_capabilities": capabilities(getattr(initialized, "capabilities", None)),
+            "request_protocol": protocol(meta.get(VERSION)),
+            "request_capabilities_present": isinstance(meta.get(CAPABILITIES), dict),
+            "request_capabilities": capabilities(meta.get(CAPABILITIES))}

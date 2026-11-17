@@ -9,6 +9,12 @@ FastMCP 1.x only checks capabilities from `initialize`. A registered connector c
 therefore support forms while the old payment guard reports them as unavailable.
 Simply forcing that guard to return true would still use the wrong wire protocol.
 
+The stdio entry point in `tbank_mcp/stdio.py` answers `server/discover` and
+accepts self-contained modern requests without `initialize`. This happens before
+the old SDK's request union and legacy initialization guard; otherwise discovery
+fails and an automatic client falls back before it ever sends modern tool calls.
+The original SDK session still handles legacy frames.
+
 The compatibility layer in `tbank_mcp/elicitation.py` adapts modern `tools/call`
 requests. It preserves the existing payment coroutines and confirmation checks:
 
@@ -43,12 +49,20 @@ include `elicitation_test`. Ask it to run that tool. It only displays a harmless
 confirmation form; it never logs in, calls the bank, writes a payment attempt or
 moves money. Confirm and decline separate test calls to check both paths.
 
+After changing protocol support, rescan the connector so its client can negotiate
+again with discovery. An existing legacy connection may continue using its saved
+protocol until it is recreated/refreshed.
+
 Expected result for a registered connector: `transport: "mrtr"` with the action
 chosen in the UI. `unavailable` means the current request did not declare the
 required form capabilities. `error` means the form exchange failed. Direct
-legacy MCP clients report `transport: "legacy"`.
+legacy MCP clients report `transport: "legacy"`. The `negotiation` object reports
+only protocol dates and capability booleans from initialization and the current
+request. Raw metadata, identities, headers, tokens and arbitrary extension values
+are never returned. A legacy/unavailable result is evidence of the negotiated
+path, not proof that every ChatGPT surface lacks form support.
 
-Automated tests cover actual stdio wire messages and fake-bank transfers,
+Automated tests start with discovery and no initialization, then cover actual stdio wire messages and fake-bank transfers,
 including accept/decline/cancel, multiple dialogs, changed arguments, cross-session
 state, expiration and replay. A live ChatGPT test still needs the deployed image;
 a successful offline test alone does not prove host UI behavior.
