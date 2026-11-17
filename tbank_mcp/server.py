@@ -22,6 +22,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
 from pydantic import BaseModel
 from . import client, trace
+from . import elicitation as elicitation_transport
 from .client import (MobileSession, TbankApiError, SessionExpired,
                      PaymentConfirmationRequired, ms_for_period, vertical,
                      pack_ref, poll_until_ready, unpack_ref,
@@ -175,6 +176,7 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     # utility
     "flows": ("Порядок вызовов по теме", READ),
     "diagnostics": ("События последних оплат", READ),
+    "elicitation_test": ("Проверка подтверждения без платежа", READ),
     "debug_report": ("Как использовали этот MCP", READ),
 }
 
@@ -308,6 +310,9 @@ def _elicitation_available(ctx) -> bool:
     """True only when the client declared the elicitation capability. Pre-dialog
     work (recipient resolve, account listing) keys off this so headless callers
     never pay for a dialog that cannot be shown."""
+    conversation = elicitation_transport.CURRENT.get()
+    if conversation is not None:
+        return conversation.capable
     if ctx is None:                        # headless / test / direct call
         return False
     try:
@@ -328,7 +333,11 @@ async def _elicit_or(ctx, message: str, schema):
     if not _elicitation_available(ctx):
         return ELICIT_UNAVAILABLE, None
     try:
-        res = await ctx.elicit(message=message, schema=schema)
+        conversation = elicitation_transport.CURRENT.get()
+        if conversation is not None:
+            res = await conversation.elicit(message, schema)
+        else:
+            res = await ctx.elicit(message=message, schema=schema)
     except Exception:
         # McpError from send_request (client errored out / its form timed out).
         # NOT "unavailable": the user was asked and did not answer — for money
@@ -2165,6 +2174,21 @@ def diagnostics(limit: int = 40) -> str:
         return events_out + ("\n\n" + attempts_out if attempts_out else "")
     except Exception as e:
         return _err(e)
+
+
+@mcp.tool()
+async def elicitation_test(ctx: Context = None) -> str:
+    """Проверить окно подтверждения БЕЗ перевода, логина и обращения к банку.
+
+    Показывает безвредное подтверждение и возвращает accept/decline/cancel/error
+    или unavailable, если клиент не объявил поддержку. Используй для проверки
+    ChatGPT/OpenAI Tunnel после обновления контейнера вместо пробного перевода.
+    """
+    conversation = elicitation_transport.CURRENT.get()
+    mode = "mrtr" if conversation is not None else "legacy"
+    outcome, _ = await _elicit_or(ctx, "Тест подтверждения: деньги НЕ переводятся. "
+                                "Нажмите подтверждение или отмену.", _TransferGateForm)
+    return json.dumps({"transport": mode, "outcome": outcome}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -7644,6 +7668,9 @@ def flows(topic: str = "") -> str:
                 + ". Вызови flows(\"<название>\") для любого из них.")
     return out
 
+
+# Install after FastMCP has registered its ordinary handlers.
+_elicitation_round_trips = elicitation_transport.install(mcp)
 
 def main():
     mcp.run()

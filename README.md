@@ -216,6 +216,9 @@ before anything is sent (`grocery_checkout` refuses there at any threshold; its
 Claude Code (≥ 2.1.76) render it; Claude Desktop does not. See
 `TBANK_CONFIRM_ABOVE` under Security.
 
+For OpenAI Tunnel confirmation troubleshooting and a harmless form test, see
+[Payment confirmations](docs/ELICITATION.md).
+
 ## Tools
 
 Each tool's docstring is the reference — this table is only a map of the surface.
@@ -243,7 +246,7 @@ Russian and so is the person reading the answer.
 | **Messenger** | `messenger_conversations`, `messenger_messages`, `messenger_file`, `messenger_send`, `messenger_unread` |
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_qr`, `transfer_requisites`, `payment_commission`, `pay_bill`, `payment_providers`, `confirm_payment`, `payment_status` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
-| **Utility** | `flows`, `diagnostics`, `debug_report` |
+| **Utility** | `flows`, `diagnostics`, `debug_report`, `elicitation_test` |
 
 `get_data(section)` covers dozens of read sections: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
 
