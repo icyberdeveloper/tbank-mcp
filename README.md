@@ -13,7 +13,7 @@ The buttons register the `tbank-mcp` command — run `pip install tbank-mcp` fir
 
 ## Features
 
-- **90 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+- **91 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
   concert tickets, train and flight booking, hotel search, orders, transfers
   (including payment by bank requisites, from a scanned invoice QR), messenger,
   investments
@@ -406,7 +406,7 @@ present the tests additionally check the fixtures have not drifted from it.
   second pending payment.
 - **Tool annotations.** Every tool declares what it does, in one table —
   `TOOL_KINDS` in `tbank_mcp/server.py` — and a tool missing from it raises at import
-  rather than defaulting to anything. Three kinds: 67 are `readOnlyHint: true` and
+  rather than defaulting to anything. Three kinds: 68 are `readOnlyHint: true` and
   may run without a prompt; 15 write something that costs nothing (a cart, a
   booking, a message, an OTP, a token, a local file) and are marked
   `destructiveHint: false`; 8 debit an account — `transfer`, `transfer_requisites`,

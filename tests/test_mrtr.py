@@ -73,7 +73,6 @@ async def main():
     manager = RoundTrips()
     try:
         for action in ['decline', 'cancel', 'accept']:
-            print('case', action, flush=True)
             result = wire(await manager.handle(request(arguments), OWNER, original))
             assert result['resultType'] == 'input_required', result
             assert not sent
@@ -131,16 +130,23 @@ async def main():
     final = wire(await manager.handle(request(args, **resume_args(gate)), OWNER, original))
     assert len(sent) == 2 and sent[-1]['account'] == '2222222222', final
     await manager.close()
+    # Missing answers re-display the same prompt. Capacity is bounded, and two
+    # simultaneous accepts of one handle still execute the debit only once.
+    manager = RoundTrips(capacity=1)
+    result = wire(await manager.handle(request(arguments), OWNER, original))
+    again = wire(await manager.handle(request(arguments, state=result['requestState'], responses={}), OWNER, original))
+    assert again == result
+    await rejected(manager.handle(request(arguments), OWNER, original))
+    answer = request(arguments, **resume_args(result))
+    before = len(sent)
+    outcomes = await asyncio.gather(manager.handle(answer, OWNER, original),
+                                    manager.handle(answer, OWNER, original), return_exceptions=True)
+    assert sum(isinstance(outcome, McpError) for outcome in outcomes) == 1
+    assert len(sent) == before + 1
+    await manager.close()
     assert CURRENT.get() is None
     print('MRTR: accept/decline/cancel, no preparation replay, capability checks, binding, expiry, replay and pickers OK')
 
 
 if __name__ == '__main__':
-    async def debug_main():
-        try:
-            await main()
-        except BaseException:
-            import traceback
-            traceback.print_exc()
-            raise
-    asyncio.run(debug_main())
+    asyncio.run(main())
