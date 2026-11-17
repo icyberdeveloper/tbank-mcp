@@ -21,6 +21,11 @@ requests. It preserves the existing payment coroutines and confirmation checks:
 - A form is returned in `inputRequests`; OpenAI's extended schema is placed under
   `_meta["openai/elicitation"].requestedSchema` when the host advertises that
   extension together with `elicitation.form`.
+- Standard form support is independent of OpenAI's extended form support. If
+  `elicitation.form` is declared but `openai/elicitation.form` is absent, send a
+  standard MCP form using the real `requestedSchema`. An empty or URL-only OpenAI
+  extension does not disable core forms. Use OpenAI's schema metadata carrier only
+  when both form capabilities are declared.
 - The host retries the same tool and arguments with `requestState` and
   `inputResponses`. Those are protocol fields, not model-visible tool arguments.
 - The original coroutine resumes; recipient resolution, account selection and

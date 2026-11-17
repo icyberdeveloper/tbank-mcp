@@ -52,9 +52,9 @@ def form_capabilities(capabilities):
     form = isinstance(_object(caps.get("elicitation")).get("form"), dict)
     extensions = _object(caps.get("extensions"))
     openai = isinstance(_object(extensions.get(OPENAI)).get("form"), dict)
-    # Plain MCP form elicitation remains valid when OpenAI's extension is absent.
-    # If OpenAI advertises its extension, honor its stricter dual declaration.
-    return form and (OPENAI not in extensions or openai), openai
+    # The extension selects an encoding; it cannot revoke core form support.
+    # Use OpenAI's schema carrier only when both capabilities are declared.
+    return form, form and openai
 
 
 def error(message):

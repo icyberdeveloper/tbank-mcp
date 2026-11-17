@@ -65,6 +65,27 @@ async def main():
                 replay = await call('tools/call', params)
                 assert replay['error']['code']==-32602, replay
 
+            # Match the live host: core form and URL capabilities, no OpenAI form.
+            for settings in ({}, {'url': {}}):
+                core_meta = dict(meta, **{CAPABILITIES: {
+                    'elicitation': {'form': {}, 'url': {}},
+                    'extensions': {OPENAI: settings}}})
+                for action in ('accept', 'decline', 'cancel'):
+                    params = {'name':'elicitation_test', 'arguments':{}, '_meta':core_meta}
+                    result = await call('tools/call', params)
+                    required = result['result']
+                    assert required['resultType']=='input_required', required
+                    key = next(iter(required['inputRequests']))
+                    form = required['inputRequests'][key]['params']
+                    assert '_meta' not in form, form
+                    assert form['requestedSchema']['type']=='object', form
+                    params.update(requestState=required['requestState'], inputResponses={key:{'action':action}})
+                    result = await call('tools/call', params)
+                    payload = json.loads(result['result']['content'][0]['text'])
+                    assert payload['transport']=='mrtr' and payload['outcome']==action, payload
+                    assert payload['negotiation']['request_capabilities']['form'] is True
+                    assert payload['negotiation']['request_capabilities']['openai_form'] is False
+
             # The legacy push path still works for existing direct MCP clients.
             await call('initialize', {'protocolVersion': '2025-11-25',
                 'capabilities': {'elicitation': {'form': {}}},

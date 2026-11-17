@@ -98,12 +98,28 @@ async def main():
 
     # Capability-less and URL-only modern callers never prepare or post a payment.
     for caps in [{}, {'elicitation': {'url': {}}},
-                 {'elicitation': {'form': {}}, 'extensions': {OPENAI: {}}}]:
+                 {'extensions': {OPENAI: {'form': {}}}}]:
         manager = RoundTrips()
         resolved = len(bank.resolved)
         final = wire(await manager.handle(request(arguments, caps=caps), OWNER, original))
         assert 'ПЛАТЁЖ НЕ ВЫПОЛНЕН' in str(final)
         assert len(sent) == 1 and len(bank.resolved) == resolved
+        await manager.close()
+
+    # An unrelated/URL-only OpenAI extension must not veto declared core forms.
+    # This is the live connector's diagnostic combination: form/url true,
+    # openai_form false. Confirming uses core schema; declining still pays nothing.
+    for settings in [{}, {'url': {}}, {'form': None}]:
+        manager = RoundTrips()
+        caps = {'elicitation': {'form': {}, 'url': {}}, 'extensions': {OPENAI: settings}}
+        before = len(sent)
+        result = wire(await manager.handle(request(arguments, caps=caps), OWNER, original))
+        assert result['resultType'] == 'input_required', result
+        prompt = next(iter(result['inputRequests'].values()))['params']
+        assert '_meta' not in prompt and prompt['requestedSchema']['type']=='object', prompt
+        assert len(sent) == before
+        final = wire(await manager.handle(request(arguments, caps=caps, **resume_args(result, 'decline')), OWNER, original))
+        assert final['resultType']=='complete' and len(sent)==before, final
         await manager.close()
 
     # Plain modern MCP uses the actual form schema without the OpenAI extension.
@@ -144,6 +160,20 @@ async def main():
     assert sum(isinstance(outcome, McpError) for outcome in outcomes) == 1
     assert len(sent) == before + 1
     await manager.close()
+    # Core-only acceptance also resumes a real transfer coroutine once, with
+    # the usual duplicate-continuation rejection after the fake bank POST.
+    for settings in ({}, {'url': {}}):
+        manager = RoundTrips()
+        caps = {'elicitation': {'form': {}, 'url': {}}, 'extensions': {OPENAI: settings}}
+        before = len(sent)
+        result = wire(await manager.handle(request(arguments, caps=caps), OWNER, original))
+        assert len(sent)==before
+        reply = request(arguments, caps=caps, **resume_args(result))
+        final = wire(await manager.handle(reply, OWNER, original))
+        assert final['resultType']=='complete' and len(sent)==before+1, final
+        await rejected(manager.handle(reply, OWNER, original))
+        assert len(sent)==before+1
+        await manager.close()
     assert CURRENT.get() is None
     print('MRTR: accept/decline/cancel, no preparation replay, capability checks, binding, expiry, replay and pickers OK')
 
