@@ -52,7 +52,18 @@ bash tbank update
 Refresh/reconnect the app in ChatGPT if its cached tool catalog does not yet
 include `elicitation_test`. Ask it to run that tool. It only displays a harmless
 confirmation form; it never logs in, calls the bank, writes a payment attempt or
-moves money. Confirm and decline separate test calls to check both paths.
+moves money. The probe has one required boolean field with no default, rather
+than an empty form. Confirm and decline separate test calls to check both paths.
+This distinguishes displaying a normal form from handling an empty confirmation;
+it does not change payment confirmation forms or prove that a host supports them.
+
+Modern calls to this probe also write an `elicitation_test_response` JSON event to
+stderr (visible in `docker compose logs bank`). It includes the response type,
+core form support, selected encoding, number of input requests and schema fields,
+and whether the request is a continuation. Tokens, form answers, caller identity
+and raw metadata are omitted. An `input_required` event without a subsequent
+`complete` continuation event shows that the server produced the form but has not
+completed a continuation. It does not establish whether the host displayed it.
 
 After changing protocol support, rescan the connector so its client can negotiate
 again with discovery. An existing legacy connection may continue using its saved

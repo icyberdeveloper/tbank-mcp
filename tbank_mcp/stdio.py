@@ -7,6 +7,8 @@ unsupported, so hosts fall back to legacy and never send request capabilities.
 """
 from contextlib import asynccontextmanager
 from importlib.metadata import version
+import json
+import sys
 
 import anyio
 from mcp import types
@@ -17,7 +19,7 @@ from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
 from pydantic import ValidationError
 
-from .elicitation import VERSION, CAPABILITIES
+from .elicitation import VERSION, CAPABILITIES, form_capabilities
 
 PROTOCOL = "2026-07-28"
 CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
@@ -82,6 +84,22 @@ class ModernStdio:
                 result = response.model_dump(by_alias=True, mode="json", exclude_none=True)
             result.setdefault("resultType", "complete")
             result.setdefault("_meta", {})[SERVER_INFO] = self.info
+            if message.method == "tools/call" and params.get("name") == "elicitation_test":
+                # Only this bank-free probe is logged. Never emit the form's
+                # content, requestState, arguments, identity, or raw metadata.
+                core, extended = form_capabilities(meta[CAPABILITIES])
+                inputs = result.get("inputRequests", {})
+                field_counts = []
+                for item in inputs.values():
+                    prompt = item["params"]
+                    schema = prompt.get("_meta", {}).get("openai/elicitation", {}).get(
+                        "requestedSchema", prompt["requestedSchema"])
+                    field_counts.append(len(schema.get("properties", {})))
+                print(json.dumps({"event": "elicitation_test_response",
+                    "result_type": result["resultType"], "client_form": core,
+                    "openai_encoding": extended, "input_request_count": len(inputs),
+                    "schema_field_counts": field_counts,
+                    "continuation": "requestState" in params}), file=sys.stderr, flush=True)
             return types.JSONRPCResponse(jsonrpc="2.0", id=message.id, result=result)
         except McpError as exc:
             return types.JSONRPCError(jsonrpc="2.0", id=message.id, error=exc.error)

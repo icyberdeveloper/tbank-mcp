@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from . import client, trace
 from . import elicitation as elicitation_transport
 from .client import (MobileSession, TbankApiError, SessionExpired,
@@ -2184,10 +2184,13 @@ async def elicitation_test(ctx: Context = None) -> str:
     или unavailable, если клиент не объявил поддержку. Используй для проверки
     ChatGPT/OpenAI Tunnel после обновления контейнера вместо пробного перевода.
     """
+    class TestConfirmation(BaseModel):
+        confirmed: bool = Field(description="Подтверждаю проверку. Деньги не переводятся.")
+
     conversation = elicitation_transport.CURRENT.get()
     mode = "mrtr" if conversation is not None else "legacy"
     outcome, _ = await _elicit_or(ctx, "Тест подтверждения: деньги НЕ переводятся. "
-                                "Нажмите подтверждение или отмену.", _TransferGateForm)
+                                "Отметьте поле и подтвердите либо нажмите отмену.", TestConfirmation)
     return json.dumps({"transport": mode, "outcome": outcome,
                        "negotiation": elicitation_transport.negotiation_snapshot(ctx)},
                       ensure_ascii=False)
