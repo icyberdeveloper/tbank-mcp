@@ -57,8 +57,10 @@ Select your tunnel in
 If your workspace's interface differs, follow the
 [OpenAI onboarding guide](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/onboarding.md).
 Keep the container running. First check the bank session status and read access.
-Payments require the client to support MCP elicitation confirmations;
-the existing confirmation checks remain enabled.
+The supplied Compose file uses MCP Apps confirmation cards in ChatGPT. Refresh
+the app catalog after deployment, then call `elicitation_test` once to check the
+card without a bank operation. Payment checks remain enabled; other harnesses
+keep the default elicitation implementation. See [confirmation modes](MCP_APPS.md).
 
 ## Everyday commands
 

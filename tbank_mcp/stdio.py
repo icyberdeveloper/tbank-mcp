@@ -112,7 +112,7 @@ class ModernStdio:
                 request_ctx.reset(token)
 
 
-async def run(mcp, round_trips):
+async def run(mcp, round_trips, app_confirmations=None):
     server = mcp._mcp_server
     original_lifespan = server.lifespan
     ready = anyio.Event()
@@ -153,6 +153,8 @@ async def run(mcp, round_trips):
                     tasks.cancel_scope.cancel()
             finally:
                 with anyio.CancelScope(shield=True):
+                    if app_confirmations is not None:
+                        await app_confirmations.close()
                     await round_trips.close()
                     await legacy_in.aclose()
                     await write.aclose()

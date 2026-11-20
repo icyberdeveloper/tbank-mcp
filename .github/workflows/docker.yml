@@ -32,6 +32,14 @@ jobs:
         run: python tests/docker_smoke.py
       - name: Verify modern and legacy elicitation in the built image
         run: python tests/test_mrtr_stdio.py --docker
+      - name: Verify MCP Apps cards in the built image
+        run: python tests/test_mcp_apps_stdio.py --docker
+      - name: Verify confirmation UI interactions offline
+        run: >-
+          docker run --rm --network=none --init --shm-size=256m
+          --cap-drop=ALL --security-opt=no-new-privileges:true
+          -v "$PWD/tests:/tests:ro" --entrypoint python tbank-mcp:tunnel
+          /tests/browser/mcp_apps_ui.py
       - name: Publish tested image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
@@ -44,6 +52,7 @@ jobs:
           docker push ghcr.io/icyberdeveloper/tbank-mcp:sha-${{ github.sha }}
           docker push ghcr.io/icyberdeveloper/tbank-mcp:tunnel
   tests:
+    needs: ui
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -58,3 +67,18 @@ jobs:
           CONTROL_PLANE_TUNNEL_ID: tunnel_synthetic
           CONTROL_PLANE_API_KEY: sk-synthetic
         run: docker compose config --quiet
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - name: Verify the packaged UI matches its source
+        run: git diff --exit-code -- tbank_mcp/ui/confirmation.html
