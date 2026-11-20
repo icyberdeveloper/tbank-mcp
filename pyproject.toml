@@ -69,4 +69,4 @@ packages = ["tbank_mcp"]
 # as "the connection is being intercepted") and flows() answers "not found" —
 # tests/test_tls_trust.py builds a wheel and asserts both files are in it.
 # Skills ship as SKILL.md only — evals/ are dev fixtures, not user content.
-tbank_mcp = ["ca/roots/*.pem", "docs/*.md", "skills/*/SKILL.md"]
+tbank_mcp = ["ca/roots/*.pem", "docs/*.md", "skills/*/SKILL.md", "ui/*.html"]

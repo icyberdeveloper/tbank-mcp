@@ -1,5 +1,9 @@
 # Payment confirmations over OpenAI Secure MCP Tunnel
 
+The supplied ChatGPT Compose deployment now selects [MCP Apps confirmation
+cards](MCP_APPS.md). The elicitation implementation described below remains the
+default for other stdio harnesses (`TBANK_CONFIRMATION_MODE=elicitation`).
+
 Direct MCP clients use the existing `elicitation/create` exchange. Registered
 OpenAI connectors use MCP 2026-07-28 multi-round-trip requests (MRTR): capabilities
 come from each request's `_meta`, and the server returns `input_required` instead

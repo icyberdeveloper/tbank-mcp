@@ -98,6 +98,8 @@ claude mcp add tbank -- ./.venv/bin/python -m tbank_mcp.server
 The wizard downloads a prebuilt image, asks for tunnel credentials and bank login,
 and starts Docker Compose. Chromium is included; no builds or inbound ports on
 the VPS are needed.
+This Compose deployment uses [MCP Apps confirmation cards](docs/MCP_APPS.md).
+Other stdio harnesses keep the default elicitation transport.
 
 ## 🔒 Login — the password never reaches the agent
 
@@ -208,15 +210,16 @@ extension**, same values.
 Goose renders elicitation in both Desktop and CLI; its confirmation forms time out
 after 5 minutes, so answer payment confirmations promptly.
 
-Reading works in any MCP client. **Paying needs a client that renders MCP
-elicitation** — the money tools confirm the sum with a button the user presses
+Reading works in any MCP client. **Direct stdio harnesses use MCP elicitation
+for payments** — the money tools confirm the sum with a button the user presses
 («Перевести/Отмена», «Оплатить …?»), and a client without that capability is refused
 before anything is sent (`grocery_checkout` refuses there at any threshold; its
 `dry_run=True` preview, which creates nothing, still works). Hermes/Telegram and
 Claude Code (≥ 2.1.76) render it; Claude Desktop does not. See
 `TBANK_CONFIRM_ABOVE` under Security.
 
-For OpenAI Tunnel confirmation troubleshooting and a harmless form test, see
+ChatGPT deployments can use [MCP Apps cards](docs/MCP_APPS.md) instead of
+elicitation. For the existing elicitation transport and harmless form test, see
 [Payment confirmations](docs/ELICITATION.md).
 
 ## Tools

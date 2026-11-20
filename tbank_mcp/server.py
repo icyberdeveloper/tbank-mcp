@@ -19,10 +19,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import ClientCapabilities, ElicitationCapability, ToolAnnotations
+from mcp.types import CallToolRequest, ClientCapabilities, ElicitationCapability, ToolAnnotations
 from pydantic import BaseModel, Field
 from . import client, trace
 from . import elicitation as elicitation_transport
+from . import mcp_apps
 from .client import (MobileSession, TbankApiError, SessionExpired,
                      PaymentConfirmationRequired, ms_for_period, vertical,
                      pack_ref, poll_until_ready, unpack_ref,
@@ -2188,7 +2189,7 @@ async def elicitation_test(ctx: Context = None) -> str:
         confirmed: bool = Field(description="Подтверждаю проверку. Деньги не переводятся.")
 
     conversation = elicitation_transport.CURRENT.get()
-    mode = "mrtr" if conversation is not None else "legacy"
+    mode = getattr(conversation, "transport", "mrtr") if conversation is not None else "legacy"
     outcome, _ = await _elicit_or(ctx, "Тест подтверждения: деньги НЕ переводятся. "
                                 "Отметьте поле и подтвердите либо нажмите отмену.", TestConfirmation)
     return json.dumps({"transport": mode, "outcome": outcome,
@@ -7675,12 +7676,14 @@ def flows(topic: str = "") -> str:
 
 
 # Install after FastMCP has registered its ordinary handlers.
+_original_tool_handler = mcp._mcp_server.request_handlers[CallToolRequest]
 _elicitation_round_trips = elicitation_transport.install(mcp)
+_app_confirmations = mcp_apps.install(mcp, _original_tool_handler)
 
 def main():
     import anyio
     from .stdio import run
-    anyio.run(run, mcp, _elicitation_round_trips)
+    anyio.run(run, mcp, _elicitation_round_trips, _app_confirmations)
 
 if __name__ == "__main__":
     main()

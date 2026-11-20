@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Подтверждение операции</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; color: var(--color-text-primary, CanvasText); background: transparent; }
+  main { padding: 20px; border: 1px solid var(--color-border-primary, #8885); border-radius: 16px; }
+  h1 { margin: 0 0 12px; font-size: 20px; }
+  p, pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+  #message { margin: 0 0 16px; }
+  #status { color: var(--color-text-secondary, #777); font-size: 14px; }
+  label { display: block; margin: 12px 0; }
+  label span { display: block; margin-bottom: 6px; }
+  input:not([type=checkbox]), select { box-sizing: border-box; width: 100%; padding: 10px;
+    font: inherit; border: 1px solid #8887; border-radius: 8px; background: Canvas; color: CanvasText; }
+  button { padding: 11px 18px; border-radius: 10px; border: 1px solid #8887;
+    font: inherit; cursor: pointer; background: Canvas; color: CanvasText; }
+  #confirm { background: #ffd600; border-color: #ffd600; color: #171717; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  #result { margin-bottom: 0; }
+</style>
+<main>
+  <h1 id="title">Подтверждение операции</h1>
+  <p id="message">Загрузка карточки…</p>
+  <form id="form" hidden>
+    <div id="fields"></div>
+    <div class="actions">
+      <button id="confirm" type="button">Подтвердить</button>
+      <button id="cancel" type="button">Отмена</button>
+    </div>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <pre id="result" hidden></pre>
+</main>
+<script type="module">/* BUNDLED_APP */</script>
+</html>
