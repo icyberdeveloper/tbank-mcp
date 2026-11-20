@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +123,15 @@ async def main():
     restarted = AppConfirmations()
     await rejected(restarted.submit({"token": token, "action": "accept"}, OWNER))
     await restarted.close()
+
+    # An overdue timer callback cannot make a late click valid when the loop was busy.
+    manager = AppConfirmations(ttl=0.01)
+    token = wire(await manager.start(request(), OWNER, original))["_meta"][META]["token"]
+    before = len(sent)
+    time.sleep(0.02)
+    await rejected(manager.submit({"token": token, "action": "accept"}, OWNER))
+    assert len(sent) == before
+    await manager.close()
 
     # Bank selection -> money gate: validate choices, rotate handles, prepare once.
     bank = TransferSession(_two_banks())

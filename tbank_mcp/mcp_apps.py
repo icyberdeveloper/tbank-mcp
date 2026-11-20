@@ -110,6 +110,9 @@ class AppConfirmations(elicitation.RoundTrips):
         pending = self.pending.get(token)
         if pending is None:
             raise elicitation.error("Confirmation expired, consumed or server restarted; nothing resumed")
+        if pending.timer is None or pending.timer.when() <= asyncio.get_running_loop().time():
+            self.expire(token)
+            raise elicitation.error("Confirmation expired; nothing resumed")
         if pending.owner is not owner:
             raise elicitation.error("Confirmation belongs to another connection")
         data = None
