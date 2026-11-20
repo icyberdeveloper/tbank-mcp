@@ -44,6 +44,7 @@ async def main():
             for tool in tools:
                 if tool["name"] in ELIGIBLE:
                     assert tool["_meta"]["ui"]["resourceUri"] == tool["_meta"]["openai/outputTemplate"]
+                    assert tool["_meta"]["ui/resourceUri"] == tool["_meta"]["ui"]["resourceUri"]
                     assert tool["_meta"]["ui"]["resourceUri"].startswith("ui://tbank/confirmation-")
             action = next(t for t in tools if t["name"] == ACTION)
             assert action["_meta"]["ui"]["visibility"] == ["app"]
