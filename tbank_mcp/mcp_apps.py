@@ -153,6 +153,7 @@ def install(mcp, original):
         for tool in result.root.tools:
             if tool.name in ELIGIBLE:
                 tool.meta = {**(tool.meta or {}), "ui": {"resourceUri": uri},
+                             "ui/resourceUri": uri,
                              "openai/outputTemplate": uri}
         result.root.tools.append(types.Tool(name=ACTION,
             description="Submit a confirmation from the card. App-only; never call from the model.",
@@ -176,6 +177,9 @@ def install(mcp, original):
     async def read(req):
         if str(req.params.uri) != uri:
             return await read_resource(req)
+        # Log only the static resource lifecycle, never result metadata or handles.
+        print(json.dumps({"event": "mcp_app_resource", "stage": "read",
+                          "asset": "confirmation"}), file=sys.stderr, flush=True)
         return types.ServerResult(types.ReadResourceResult(contents=[types.TextResourceContents(
             uri=uri, mimeType=MIME, text=ASSET.read_text(encoding="utf-8"),
             _meta={"ui": {"prefersBorder": True,
