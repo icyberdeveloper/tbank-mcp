@@ -88,6 +88,11 @@ SHAPES = {
 # validation reject anything else — the prefix is the protocol, the tail is the
 # person. Every tail here is zeros or a counter.
 ALLOWED = {
+    # Public numeric limits in the Zod validator bundled by the pinned official
+    # MCP Apps SDK (web/package-lock.json). These are int32/uint32/int64/uint64
+    # bounds, not bank identifiers or captured data. Keep scanning the bundle.
+    "2147483647", "2147483648", "4294967295",
+    "9223372036854775807", "9223372036854775808", "18446744073709551615",
     # Публичный id ЭТОГО репозитория на GitHub (api.github.com/repos/... отдаёт его
     # любому) — server.json указывает его для MCP Registry как защиту от подмены
     # репозитория после удаления. Никого не идентифицирует.
