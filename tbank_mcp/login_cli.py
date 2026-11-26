@@ -86,11 +86,16 @@ def login(phone):
         print(f"    ERROR: {e}")
         return 1
 
-    # Step 2: OTP from user (getpass — скрытый ввод)
-    otp = getpass.getpass("[2/3] SMS-код: ")
+    # Step 2: код от пользователя (getpass — скрытый ввод). Обычно из SMS, но
+    # аккаунт с приложением-аутентификатором банк сразу просит о totp.
+    m = _STEP_RE.match(msg)
+    if m and m.group(1) == "totp":
+        kind, prompt = "totp", "[2/3] Код из приложения-аутентификатора: "
+    else:
+        kind, prompt = "otp", "[2/3] SMS-код: "
     try:
-        s.confirm_step("otp", otp)
-        print("    OTP принят.")
+        s.confirm_step(kind, getpass.getpass(prompt))
+        print("    Код принят.")
     except TbankApiError as e:
         if _next_step(e) != "password":
             print(f"    ОШИБКА: {e}")

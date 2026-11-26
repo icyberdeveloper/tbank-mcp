@@ -709,6 +709,12 @@ def _next_step_hint(resp: dict) -> str:
         return ("Следующий шаг — password. Пароль вводится НЕ через агента: "
                 "запусти tbank-mcp-login (или login_cli.py из репозитория) "
                 "в своём терминале.")
+    if step == "totp":
+        # No MCP tool sends it: the account seen live asked for the password right
+        # after, and that goes through the login CLI anyway.
+        return ("Следующий шаг — totp (код из приложения-аутентификатора). "
+                "Запусти tbank-mcp-login (или login_cli.py из репозитория) "
+                "в своём терминале.")
     tool = {"otp": "confirm_otp(<код из СМС>)",
             "pin": "confirm_pin(<PIN приложения>)"}.get(step)
     if tool:
@@ -2176,14 +2182,17 @@ class MobileSession:
         return _next_step_hint(r2j)
 
     def confirm_step(self, kind: str, value: str) -> dict:
-        """Finish the login: submit the OTP (kind='otp') or PIN (kind='pin') or
-        password (kind='password'), get the auth code, exchange it at
+        """Finish the login: submit the OTP (kind='otp'), authenticator-app code
+        (kind='totp'), PIN (kind='pin') or password (kind='password'), get the auth code, exchange it at
         auth/token/mobile -> session. Captures SSO_SESSION. Chains the token
         from each step's response to the next."""
         if not self._login_cid:
             raise TbankApiError("NO_LOGIN", "call login(phone) first")
         base = {"Accept": "application/json", "User-Agent": "okhttp/4.12.0"}
-        body = f"step={kind}&{kind}=" + urllib.parse.quote(str(value), safe="")
+        # The form field is named after the step, except totp: the bank wants
+        # `totpCode` (the SSO web form's field) and answers `totp=` with a 400.
+        field = {"totp": "totpCode"}.get(kind, kind)
+        body = f"step={kind}&{field}=" + urllib.parse.quote(str(value), safe="")
         if self._login_token:
             body += f"&token={self._login_token}"
         r = self._http.post(f"{ID_BASE}/auth/step?cid={self._login_cid}&ccc=true&cpswc=true",

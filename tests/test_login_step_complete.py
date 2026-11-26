@@ -24,6 +24,14 @@ Contract, executed against the real confirm_step() over a scripted transport:
   * the CLI reads the step from the hint's head: the unknown-step hint is not
     a PIN request.
 
+Also here, the `totp` step (2026-11-26, an account with «код из приложения-
+аутентификатора» on): step=phone answers `step: totp`, not `otp`, and no SMS
+is sent. The bank takes the code as `totpCode` — `totp=<code>` is a 400
+invalid_request — and then asks for the password. Pinned:
+  * confirm_step('totp') sends `step=totp&totpCode=<code>`;
+  * the CLI asks for the authenticator code, not an SMS, when login() names
+    totp, and then goes on to the password.
+
     python3 tests/test_login_step_complete.py
 """
 import json
@@ -169,6 +177,7 @@ def check_cli_reads_the_step_from_the_hint_head():
     check(login_cli._next_step(err("password")) == "password", "password hint → password")
     check(login_cli._next_step(err("pin")) == "pin", "pin hint → pin")
     check(login_cli._next_step(err("otp")) == "otp", "otp hint → otp")
+    check(login_cli._next_step(err("totp")) == "totp", "totp hint → totp")
     # The regression: the unknown-step hint says «confirm_otp / confirm_pin» and
     # used to read as a PIN request by substring.
     check(login_cli._next_step(err("complete")) == "complete",
@@ -180,6 +189,57 @@ def check_cli_reads_the_step_from_the_hint_head():
     print("  CLI: the step comes from the hint's head, not from a substring")
 
 
+def check_totp_is_sent_as_totp_code():
+    s = _session([{"action": "step", "step": "password", "cid": "CID-1"}])
+    s._login_token = ""          # the totp answer to step=phone carries no token
+    try:
+        s.confirm_step("totp", "123456")
+        check(False, "the password after totp must surface as NEXT_STEP")
+    except TbankApiError as e:
+        check(login_cli._next_step(e) == "password", f"totp → password, got {e.message}")
+    check(s._http.calls[0]["data"] == "step=totp&totpCode=123456",
+          f"the field is totpCode, got {s._http.calls[0]['data']!r}")
+    print("  totp: the code goes as totpCode")
+
+
+def check_cli_asks_for_the_authenticator_code_on_totp():
+    class _Fake:
+        access_token = ""
+
+        def __init__(self):
+            self.sent = []
+
+        def login(self, phone):
+            return C._next_step_hint({"step": "totp"})
+
+        def confirm_step(self, kind, value):
+            self.sent.append((kind, value))
+            if kind == "totp":
+                raise TbankApiError("NEXT_STEP", C._next_step_hint({"step": "password"}))
+
+    fake = _Fake()
+    prompts = []
+
+    def getpass(prompt):
+        prompts.append(prompt)
+        return "pw" if "Пароль" in prompt else "123456"
+
+    saved = (login_cli.srv._blank_session, login_cli.srv._save_session, login_cli.getpass.getpass)
+    login_cli.srv._blank_session = lambda: fake
+    login_cli.srv._save_session = lambda s: True
+    login_cli.getpass.getpass = getpass
+    try:
+        rc = login_cli.login("+79991234567")
+    finally:
+        login_cli.srv._blank_session, login_cli.srv._save_session, login_cli.getpass.getpass = saved
+    check(rc == 0, f"the totp → password login succeeds, rc={rc}")
+    check(fake.sent == [("totp", "123456"), ("password", "pw")],
+          f"totp code, then password; got {fake.sent}")
+    check("аутентификатора" in prompts[0] and "SMS" not in prompts[0],
+          f"the first prompt asks for the authenticator code: {prompts[0]!r}")
+    print("  CLI: totp asks for the authenticator code, then the password")
+
+
 def main():
     saved = C._wait_for_propagation
     C._wait_for_propagation = lambda probe, **kw: None   # no live keepalive poll
@@ -188,7 +248,9 @@ def main():
                    check_complete_followed_by_another_step_names_it,
                    check_complete_hop_error_is_the_banks_error,
                    check_direct_code_sends_no_extra_hop,
-                   check_cli_reads_the_step_from_the_hint_head):
+                   check_cli_reads_the_step_from_the_hint_head,
+                   check_totp_is_sent_as_totp_code,
+                   check_cli_asks_for_the_authenticator_code_on_totp):
             print(f"{fn.__name__}:")
             fn()
     finally:
